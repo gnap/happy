@@ -106,7 +106,6 @@ export type SessionListViewItem =
         type: 'session';
         session: Session;
         variant?: 'default' | 'no-path';
-        needsRestart?: boolean;
         /**
          * Whether anything is reaching this session, decided when the list was built.
          *
@@ -380,8 +379,8 @@ function dominantMachineId(sessions: Session[]): string | undefined {
 }
 
 // Helper function to build unified list view data from sessions and machines
-/** The last mark logged per session, so the line appears when it changes rather than per rebuild. */
-const listMarkLogged = new Map<string, string>();
+/** The last mark logged per session, so the line appears when it changes rather than per render. */
+const restartMarkLogged = new Map<string, string>();
 
 /** A session row as it lives in `sessionListViewData`. */
 type SessionListRow = Extract<SessionListViewItem, { type: 'session' }>;
@@ -519,8 +518,6 @@ export function sessionNeedsRestart(
 function buildSessionListViewData(
     sessions: Record<string, Session>,
     machines: Record<string, { metadata?: { happyCliVersion?: string } | null; daemonState?: { startedWithCliVersion?: string } | null }>,
-    /** What each machine said it is running, asked over whichever channel that machine answered on. */
-    daemonVersions: Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }> = {},
     /**
      * The channels this device has, in the order it prefers them.
      *
@@ -544,22 +541,21 @@ function buildSessionListViewData(
     /**
      * The row for a session, which is the previous row whenever the session still draws the same.
      *
-     * `needsRestart` and `online` are asked fresh rather than compared from the previous row: they
-     * are not properties of the session alone — the first reads the machines, the second the
-     * channels — and both can move without the session object changing.
+     * `online` is asked fresh rather than compared from the previous row: it is not a property of
+     * the session alone — it reads the channels — and it can move without the session object
+     * changing. The restart mark is not on the row at all: it depends on what the machine last
+     * reported, which changes on its own schedule, and the row that draws it asks for it.
      */
     const sessionRow = (session: Session): SessionListRow => {
-        const needsRestart = getNeedsRestart(session);
         const online = reached(session);
         const previous = previousRows.get(session.id);
         if (previous
             && sameListRowSession(previous.session, session)
-            && previous.needsRestart === needsRestart
             && previous.online === online) {
             nextRows.set(session.id, previous);
             return previous;
         }
-        const row: SessionListRow = { type: 'session', session, needsRestart, online };
+        const row: SessionListRow = { type: 'session', session, online };
         nextRows.set(session.id, row);
         return row;
     };
@@ -600,31 +596,6 @@ function buildSessionListViewData(
     activeSessions.sort((a, b) => b.createdAt - a.createdAt);
     // Inactive sessions sort by last activity so the date headers make sense.
     inactiveSessions.sort((a, b) => b.updatedAt - a.updatedAt);
-
-    /**
-     * Whether restarting this session would change its build.
-     *
-     * The baseline is the machine's own report, the same one the session page uses and in the same
-     * order: the build on disk (what a restart would spawn), then the build the daemon is running,
-     * then the fields written by the daemon, and only last the server's copy of the machine — which
-     * is the one that goes stale on its own, and the one this rule used to be built on. A copy that
-     * is missing or old makes "the versions differ" false, so sessions older than their machine read
-     * as up to date, which is what made this decision look arbitrary.
-     */
-    const getNeedsRestart = (s: Session): boolean => {
-        const marked = sessionNeedsRestart(s, machines, daemonVersions);
-        // The mark's inputs, once per change: three sources feed this baseline and a log is the only
-        // way to tell a rule that decided wrongly from one that was handed nothing.
-        const machineId = s.metadata?.machineId;
-        const machine = machineId ? machines[machineId] : undefined;
-        const live = machineId ? daemonVersions[machineId] : undefined;
-        const summary = `${s.id} session=${s.metadata?.version ?? '-'} onDisk=${live?.onDisk ?? '-'} running=${live?.running ?? '-'} record=${machine?.daemonState?.startedWithCliVersion ?? '-'} server=${machine?.metadata?.happyCliVersion ?? '-'} marked=${marked}`;
-        if (listMarkLogged.get(s.id) !== summary) {
-            listMarkLogged.set(s.id, summary);
-            console.log(`🔄 list restart mark: ${summary}`);
-        }
-        return marked;
-    };
 
     // Helper: emit a date group, inserting project-group headers with host sub-groups.
     const emitSessionGroup = (group: Session[]) => {
@@ -2410,7 +2381,6 @@ export const storage = create<StorageState>()((set, get) => {
 const builtFrom: {
     sessionsVersion: number;
     machines: unknown;
-    daemonVersions: unknown;
     daemonSockets: unknown;
     lanSightings: unknown;
     relayDirectory: unknown;
@@ -2435,7 +2405,6 @@ const builtFrom: {
 } = {
     sessionsVersion: -1,
     machines: null,
-    daemonVersions: null,
     daemonSockets: null,
     lanSightings: null,
     relayDirectory: null,
@@ -2478,10 +2447,6 @@ export const sessionListViewDataLive = new ValueStore<SessionListViewItem[]>([])
  */
 function channelAnswers(
     sessions: Record<string, Session>,
-    state: {
-        machines: Record<string, { metadata?: { happyCliVersion?: string } | null; daemonState?: { startedWithCliVersion?: string } | null }>;
-        daemonVersions: Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }>;
-    },
     drivers: readonly ChannelDriver[],
 ): { signature: string; online: Record<string, boolean> } {
     const parts: string[] = [];
@@ -2489,8 +2454,9 @@ function channelAnswers(
     for (const session of Object.values(sessions)) {
         const reachable = resolveSessionReach(session.id, session.metadata?.machineId, drivers).online;
         online[session.id] = reachable;
-        const restart = sessionNeedsRestart(session, state.machines, state.daemonVersions) ? '1' : '0';
-        parts.push(`${session.id}:${reachable ? '1' : '0'}:${restart}`);
+        // The restart mark is not part of this anymore: it is asked by the row that draws it,
+        // because it depends on the machine and not on the channels.
+        parts.push(`${session.id}:${reachable ? '1' : '0'}`);
     }
     parts.sort();
     return { signature: parts.join('|'), online };
@@ -2506,8 +2472,7 @@ function channelAnswers(
 function recomputeDerived(state: StorageState): void {
     const sessionsVersion = sessionLive.allVersion();
     const contentChanged = builtFrom.sessionsVersion !== sessionsVersion
-        || builtFrom.machines !== state.machines
-        || builtFrom.daemonVersions !== state.daemonVersions;
+        || builtFrom.machines !== state.machines;
     const channelChanged = builtFrom.daemonSockets !== state.daemonSockets
         || builtFrom.lanSightings !== state.lanSightings
         || builtFrom.relayDirectory !== state.relayDirectory
@@ -2523,10 +2488,9 @@ function recomputeDerived(state: StorageState): void {
     }
     const sessions = sessionLive.snapshot();
     const drivers = channelDrivers(withSessions(state), state.localSettings.channelPriority);
-    const answers = channelAnswers(sessions, state, drivers);
+    const answers = channelAnswers(sessions, drivers);
     builtFrom.sessionsVersion = sessionsVersion;
     builtFrom.machines = state.machines;
-    builtFrom.daemonVersions = state.daemonVersions;
     builtFrom.daemonSockets = state.daemonSockets;
     builtFrom.lanSightings = state.lanSightings;
     builtFrom.relayDirectory = state.relayDirectory;
@@ -2547,7 +2511,6 @@ function recomputeDerived(state: StorageState): void {
     const sessionListViewData = buildSessionListViewData(
         sessions,
         state.machines,
-        state.daemonVersions,
         drivers,
     );
     // The list lives in its own store: writing it does not notify the zustand store, and an array
@@ -2605,6 +2568,46 @@ export function useSession(id: string): Session | null {
 /** One field of a session, re-rendering only when that field changes. */
 export function useSessionMachineId(sessionId: string): string | undefined {
     return useKeyedSelector(sessionLive, sessionId, (session) => session?.metadata?.machineId);
+}
+
+/**
+ * Whether restarting this session would change its build.
+ *
+ * Asked by the row that draws the mark, not carried on the list row. The answer arrives on the
+ * machine's own schedule, and it used to be folded into the list — so every machine status update
+ * rebuilt the list and every row in it for a mark that one row shows. The two inputs are selected
+ * per machine, so a write for another machine wakes nothing here.
+ *
+ * The baseline is the machine's own report, the same one the session page uses and in the same
+ * order: the build on disk (what a restart would spawn), then the build the daemon is running,
+ * then the fields written by the daemon, and only last the server's copy of the machine — which
+ * is the one that goes stale on its own, and the one this rule used to be built on.
+ */
+export function useSessionNeedsRestart(session: Session): boolean {
+    const machineId = session.metadata?.machineId;
+    const machine = storage(useShallow((state) => machineId ? state.machines[machineId] : undefined));
+    const live = storage(useShallow((state) => machineId ? state.daemonVersions[machineId] : undefined));
+    const marked = sessionNeedsRestart(
+        session,
+        machineId && machine ? { [machineId]: machine } : {},
+        machineId && live ? { [machineId]: live } : {},
+    );
+    logRestartMark(session, machine, live, marked);
+    return marked;
+}
+
+/** The mark's inputs, once per change: a rule that decided wrongly and one handed nothing read alike. */
+function logRestartMark(
+    session: Session,
+    machine: { daemonState?: { startedWithCliVersion?: string } | null; metadata?: { happyCliVersion?: string } | null } | undefined,
+    live: { running: string; onDisk: string | null } | undefined,
+    marked: boolean,
+): void {
+    const summary = `${session.id} session=${session.metadata?.version ?? '-'} onDisk=${live?.onDisk ?? '-'} running=${live?.running ?? '-'} record=${machine?.daemonState?.startedWithCliVersion ?? '-'} server=${machine?.metadata?.happyCliVersion ?? '-'} marked=${marked}`;
+    if (restartMarkLogged.get(session.id) !== summary) {
+        restartMarkLogged.set(session.id, summary);
+        console.log(`🔄 list restart mark: ${summary}`);
+    }
 }
 
 export function useOutboxEntry(localId: string | null | undefined): OutboxEntry | null {
@@ -2871,6 +2874,40 @@ export function useMachineBadgeInputs(): (machineId: string) => { reach: Machine
         (machineId: string) => machineBadgeInputs(channelDrivers(channelState, priority), machineId),
         [channelState, priority],
     );
+}
+
+/**
+ * One machine's glyph inputs, for a component that draws exactly one badge.
+ *
+ * The channel state gets a new object on every socket transition, so a builder has to be rebuilt
+ * with it — and a component handed that builder re-renders with it even when its own machine's
+ * glyphs did not move. This asks the drivers for one machine and keeps the previous answer while
+ * it is the same, so the badge subscribes to its own machine rather than to every channel fact.
+ */
+export function useMachineBadgeInputsFor(machineId: string | undefined): { reach: MachineReach; capability: MachineCapability; link: MachineLink } {
+    const channelState = storage(useShallow(selectChannelState));
+    const priority = storage(useShallow((state) => state.localSettings.channelPriority));
+    const previous = React.useRef<{ reach: MachineReach; capability: MachineCapability; link: MachineLink } | null>(null);
+    const next = React.useMemo(
+        () => machineBadgeInputs(channelDrivers(channelState, priority), machineId ?? ''),
+        [channelState, priority, machineId],
+    );
+    return React.useMemo(() => {
+        const last = previous.current;
+        if (last
+            && last.reach.server === next.reach.server
+            && last.reach.lan === next.reach.lan
+            && last.reach.relay === next.reach.relay
+            && last.capability.lan === next.capability.lan
+            && last.capability.relay === next.capability.relay
+            && last.link.server === next.link.server
+            && last.link.lan === next.link.lan
+            && last.link.relay === next.link.relay) {
+            return last;
+        }
+        previous.current = next;
+        return next;
+    }, [next]);
 }
 
 export function useSessionListViewData(): SessionListViewItem[] | null {

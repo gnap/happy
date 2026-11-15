@@ -4,7 +4,7 @@ import { View, Pressable, SectionList, Platform, ActivityIndicator, RefreshContr
 import { Swipeable } from 'react-native-gesture-handler';
 import { Text } from '@/components/StyledText';
 import { usePathname } from 'expo-router';
-import { SessionListViewItem, useSessionIsFetching, useMachinePresenceMap } from '@/sync/storage';
+import { SessionListViewItem, useSessionIsFetching, useSessionNeedsRestart, useMachinePresenceMap } from '@/sync/storage';
 import { MACHINE_PRESENCE_COLORS } from '@/sync/machinePresence';
 import { Ionicons } from '@expo/vector-icons';
 import { getSessionName, useSessionStatus, getSessionSubtitle, getSessionAvatarId, formatPathRelativeToHome } from '@/utils/sessionUtils';
@@ -473,7 +473,6 @@ export function SessionsList() {
                         isFirst={isFirst}
                         isLast={isLast}
                         isSingle={isSingle}
-                        needsRestart={item.needsRestart}
                     />
                 );
         }
@@ -526,15 +525,16 @@ export function SessionsList() {
 }
 
 // Sub-component that handles session message logic
-const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle, needsRestart }: {
+const SessionItem = React.memo(({ session, selected, isFirst, isLast, isSingle }: {
     session: Session;
     selected?: boolean;
     isFirst?: boolean;
     isLast?: boolean;
     isSingle?: boolean;
-    needsRestart?: boolean;
 }) => {
     const styles = stylesheet;
+    // The mark is asked here, from the machine, so a machine status update does not rebuild the list.
+    const needsRestart = useSessionNeedsRestart(session);
     const sessionStatus = useSessionStatus(session);
     const sessionName = getSessionName(session);
     const isFetching = useSessionIsFetching(session.id);
