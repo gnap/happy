@@ -94,8 +94,12 @@ const HUB_BEAT_TIMEOUT_MS = 45_000;
  * One RTT, not the heartbeat's 45 seconds: a hub that survived the suspension reads as connected
  * here even when the OS tore its socket down, and the beats that would notice are frozen for as
  * long as the App is suspended.
+ *
+ * Five seconds rather than two: this is the phone's first round trip after waking, and on cellular
+ * the radio itself can take a second or two to come back. Two seconds judged that wake-up, not the
+ * relay, and closed a hub that was still there — which fails every stream behind it.
  */
-const HUB_RESUME_PROBE_MS = 2_000;
+const HUB_RESUME_PROBE_MS = 5_000;
 /** Long enough not to hammer a relay that is restarting, short enough to recover quickly. */
 /** How long a relay handshake may take before the socket is abandoned and retried. */
 const RELAY_HUB_OPEN_TIMEOUT_MS = 15_000;

@@ -20,7 +20,7 @@ const fakeHandle = (baseUrl: string): LanSocketHandle => ({
 } as unknown as LanSocketHandle);
 
 /** A manager wired to a fake opener that records what it was asked for. */
-function makeManager(overrides: { resumeProbeMs?: number; openTimeoutMs?: number; heartbeat?: { intervalMs: number; timeoutMs: number } } = {}) {
+function makeManager(overrides: { resumeProbeMs?: number | null; openTimeoutMs?: number; heartbeat?: { intervalMs: number; timeoutMs: number } } = {}) {
     const opens: { target: DaemonTarget; handlers: any; handle: LanSocketHandle }[] = [];
     const state: [string, unknown][] = [];
     const dropped: string[] = [];
@@ -39,7 +39,8 @@ function makeManager(overrides: { resumeProbeMs?: number; openTimeoutMs?: number
         log: () => {},
         retryDelayMs: () => 0,
         heartbeat: overrides.heartbeat ?? { intervalMs: 1, timeoutMs: 4 },
-        resumeProbeMs: overrides.resumeProbeMs ?? 60_000,
+        // `null` means "let the manager choose", which is what the per-route deadlines need.
+        resumeProbeMs: overrides.resumeProbeMs === null ? undefined : overrides.resumeProbeMs ?? 60_000,
         openTimeoutMs: overrides.openTimeoutMs,
     });
     return { manager, opens, state, dropped, unusable };
@@ -363,6 +364,30 @@ describe('DaemonConnections', () => {
 
             expect(dropped).toEqual(['m1']);
             expect(opens).toHaveLength(2);
+        });
+
+        it('gives a relay probe a longer deadline than a LAN one', async () => {
+            // The probe over the relay is a round trip through the hub and back, and the phone's
+            // radio may still be waking up. Both budgets are asserted here so a change to one
+            // cannot silently become a change to the other.
+            const { manager } = makeManager({ resumeProbeMs: null, heartbeat: quiet });
+            manager.want(target());
+            manager.want(target({ route: 'relay', baseUrl: 'https://relay.example/m1' }));
+            await tick();
+
+            const delays: number[] = [];
+            const realSetTimeout = globalThis.setTimeout;
+            const spy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) => {
+                if (ms === 2_000 || ms === 5_000) {
+                    delays.push(ms);
+                }
+                return realSetTimeout(fn, ms);
+            }) as typeof setTimeout);
+
+            manager.probeAfterResume();
+            spy.mockRestore();
+
+            expect(delays.sort()).toEqual([2_000, 5_000]);
         });
     });
 

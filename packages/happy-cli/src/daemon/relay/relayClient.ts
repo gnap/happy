@@ -61,6 +61,20 @@ const RELAY_MAX_FRAME_BYTES = 8 * 1024 * 1024;
  * justify threading a notification through every path that starts or ends one.
  */
 const DIRECTORY_PUBLISH_INTERVAL_MS = 5_000;
+/**
+ * How often the local end of a relayed stream is pinged.
+ *
+ * The relay's own pings stop at its multiplexed connection, and the App deliberately does not
+ * heartbeat relay routes — the relay is the one holding them, so liveness there is the relay's to
+ * know. That leaves this socket carrying nothing at all while a session is quiet, and this hop's
+ * runtime ended such a stream after two minutes of it: the LAN server logged the close as
+ * "WebSocket timed out from inactivity". Every quiet stream would then die every two minutes, its
+ * next message waiting for the reconnect. A protocol-level ping half a minute apart keeps the hop
+ * from ever being silent, and because the LAN server answers it, it gives this side something to
+ * hear as well. It is handled by the stack at either end, so it never becomes a frame the relay or
+ * the App has to understand.
+ */
+const LOCAL_SOCKET_PING_INTERVAL_MS = 30_000;
 const STRIP_REQUEST_HEADERS = new Set(['host', 'connection', 'content-length', 'accept-encoding']);
 const STRIP_RESPONSE_HEADERS = new Set(['content-length', 'content-encoding', 'transfer-encoding', 'connection']);
 
@@ -146,7 +160,7 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
     if (stopped) return;
     const ws = new WebSocket(control);
     socket = ws;
-    const locals = new Map<number, { ws: WebSocket; queue: string[]; open: boolean }>();
+    const locals = new Map<number, { ws: WebSocket; queue: string[]; open: boolean; keepAlive: ReturnType<typeof setInterval> }>();
     let opened = false;
 
     const send = (frame: unknown) => {
@@ -198,7 +212,15 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
       } else if (msg.t === 'ws-open') {
         logger.debug(`[relay] ws-open ${String(msg.path).split('?')[0]} from=${msg.ip ?? '-'}`);
         const local = new WebSocket(`ws://127.0.0.1:${options.lanPort}${msg.path}`);
-        const entry = { ws: local, queue: [] as string[], open: false };
+        // Keeps a quiet stream from being closed by the runtime's idle timeout. Only protocol
+        // frames are sent: the LAN server answers them itself, so neither the relay nor the App
+        // ever sees this. Kept on the entry so every way a stream can end stops it too — a runtime
+        // that drops a socket without firing `onclose` must not leave a timer pinging it forever.
+        const keepAlive = setInterval(() => {
+          try { (local as unknown as { ping?: () => void }).ping?.(); } catch { /* onclose follows */ }
+        }, LOCAL_SOCKET_PING_INTERVAL_MS);
+        (keepAlive as any).unref?.();
+        const entry = { ws: local, queue: [] as string[], open: false, keepAlive };
         locals.set(msg.id, entry);
         local.onopen = () => {
           entry.open = true;
@@ -207,6 +229,7 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
         };
         local.onmessage = (e) => { if (typeof e.data === 'string') send({ t: 'ws-msg', id: msg.id, data: e.data }); };
         local.onclose = (e) => {
+          clearInterval(keepAlive);
           if (locals.delete(msg.id)) send({ t: 'ws-close', id: msg.id, code: e.code, reason: e.reason });
         };
         local.onerror = () => { /* onclose follows */ };
@@ -222,6 +245,7 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
       } else if (msg.t === 'ws-close') {
         const entry = locals.get(msg.id);
         locals.delete(msg.id);
+        if (entry) clearInterval(entry.keepAlive);
         try { entry?.ws.close(); } catch { /* gone */ }
       }
     };
@@ -232,6 +256,7 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
       socket = null;
       publishFrame = null;
       for (const entry of locals.values()) {
+        clearInterval(entry.keepAlive);
         try { entry.ws.close(); } catch { /* gone */ }
       }
       locals.clear();

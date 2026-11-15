@@ -75,6 +75,16 @@ const DEFAULT_HEARTBEAT = { intervalMs: 15_000, timeoutMs: 45_000 };
  */
 const DEFAULT_RESUME_PROBE_MS = 2_000;
 /**
+ * The same deadline over the relay, which is a longer path than one LAN hop.
+ *
+ * The probe has to leave the phone, cross the relay, be answered by the daemon and come back. A
+ * phone waking from suspension often has to wake its radio first, and 2s was measuring that
+ * wake-up rather than the daemon: a healthy stream was written off and rebuilt on a normal return
+ * to the App. 5s is still far inside the 45s heartbeat, so a socket that is really dead is still
+ * found on resume rather than a minute later.
+ */
+const DEFAULT_RELAY_RESUME_PROBE_MS = 5_000;
+/**
  * How long an open may stay in flight before it is treated as a failure.
  *
  * The socket layer bounds itself (a 10s challenge, a 5s upgrade), so this is a backstop for the
@@ -274,8 +284,12 @@ export class DaemonConnections {
      * refuses it, so a send falls back to the server or stays queued instead of disappearing.
      */
     probeAfterResume(): void {
-        const probeMs = this.deps.resumeProbeMs ?? DEFAULT_RESUME_PROBE_MS;
         for (const [id, live] of [...this.live]) {
+            // A route this App sees end to end gets the LAN deadline; a route that goes through the
+            // relay gets the longer one. An explicit budget from the caller still wins, so the
+            // tests (and any caller that wants one number) keep the behaviour they asked for.
+            const probeMs = this.deps.resumeProbeMs
+                ?? (live.target.route === 'relay' ? DEFAULT_RELAY_RESUME_PROBE_MS : DEFAULT_RESUME_PROBE_MS);
             if (live.probeTimer !== null) {
                 clearTimeout(live.probeTimer);
                 live.probeTimer = null;
