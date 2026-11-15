@@ -6,7 +6,7 @@ import { AuthCredentials } from '@/auth/tokenStorage';
 import { Encryption } from '@/sync/encryption/encryption';
 import { decodeBase64, encodeBase64 } from '@/encryption/base64';
 import { reinitSodium } from '@/encryption/libsodium';
-import { storage, getSession, getSessionMessages, getSessions } from './storage';
+import { storage, getSession, getSessionGitStatus, getSessionMessages, getSessions } from './storage';
 import { ApiEphemeralUpdateSchema, ApiMessage, ApiUpdateContainerSchema } from './apiTypes';
 import type { ApiEphemeralActivityUpdate } from './apiTypes';
 import { Session, Machine } from './storageTypes';
@@ -5831,7 +5831,7 @@ class Sync {
             if (!status) {
                 continue;
             }
-            const current = store.sessionGitStatus[session.id];
+            const current = getSessionGitStatus(session.id);
             if (current && this.sameGitStatus(current, status)) {
                 continue;
             }

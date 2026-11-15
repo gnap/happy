@@ -131,7 +131,6 @@ interface StorageState {
     purchases: Purchases;
     profile: Profile;
     outbox: Record<string, OutboxEntry>;
-    sessionGitStatus: Record<string, GitStatus | null>;
     machines: Record<string, Machine>;
     /**
      * Machines the LAN scanner can currently see, keyed by machineId. Purely a local observation —
@@ -937,6 +936,14 @@ function sameWireSession(a: WireSession, b: WireSession): boolean {
  */
 export const sessionLive = new KeyedStore<Session>();
 export const sessionMessagesLive = new KeyedStore<SessionMessages>();
+/**
+ * The working tree of each session, as its CLI publishes it.
+ *
+ * Written whenever a machine reports a change, read by the badges on a few screens. A keyed store
+ * because the map is not drawn as a whole: one session's tree changing must not wake the others,
+ * and a git poll must not wake the chat.
+ */
+export const sessionGitStatusLive = new KeyedStore<GitStatus | null>();
 
 /**
  * A store snapshot with the sessions map folded back in.
@@ -989,7 +996,6 @@ export const storage = create<StorageState>()((set, get) => {
         feedLoaded: false,  // Initialize as false
         friendsLoaded: false,  // Initialize as false
         outbox: {},
-        sessionGitStatus: {},
         realtimeStatus: 'disconnected',
         realtimeMode: 'idle',
         socketStatus: 'disconnected',
@@ -1700,18 +1706,11 @@ export const storage = create<StorageState>()((set, get) => {
                 profile
             };
         }),
-        applyGitStatus: (sessionId: string, status: GitStatus | null) => set((state) => {
+        applyGitStatus: (sessionId: string, status: GitStatus | null) => {
             // Update project git status as well
             projectManager.updateSessionProjectGitStatus(sessionId, status);
-
-            return {
-                ...state,
-                sessionGitStatus: {
-                    ...state.sessionGitStatus,
-                    [sessionId]: status
-                }
-            };
-        }),
+            sessionGitStatusLive.set(sessionId, status);
+        },
         applyNativeUpdateStatus: (status: { available: boolean; updateUrl?: string } | null) => set((state) => ({
             ...state,
             nativeUpdateStatus: status
@@ -2202,7 +2201,7 @@ export const storage = create<StorageState>()((set, get) => {
             sessionMessagesLive.delete(sessionId);
 
             // Remove session git status if it exists
-            const { [sessionId]: deletedGitStatus, ...remainingGitStatus } = state.sessionGitStatus;
+            sessionGitStatusLive.delete(sessionId);
             
             // Clear drafts and permission/model from MMKV
             const drafts = loadSessionDrafts();
@@ -2223,7 +2222,6 @@ export const storage = create<StorageState>()((set, get) => {
 
             return {
                 ...state,
-                sessionGitStatus: remainingGitStatus,
                 deletedSessions,
             };
         }),
@@ -2584,6 +2582,11 @@ export function getSessions(): Record<string, Session> {
     return sessionLive.snapshot();
 }
 
+/** Imperative read of a session's published working tree. */
+export function getSessionGitStatus(sessionId: string): GitStatus | null {
+    return sessionGitStatusLive.get(sessionId) ?? null;
+}
+
 /**
  * Every session, as a flat list.
  *
@@ -2914,8 +2917,15 @@ export function useProjectGitStatus(projectId: string | null) {
     return storage(useShallow((state) => projectId ? state.getProjectGitStatus(projectId) : null));
 }
 
+/**
+ * The project's git status, read out of `projectManager` — a plain in-memory map that cannot
+ * notify anyone. The status is written next to the session's own status, so that key is used as
+ * the wake signal; the value itself is read live, because the project entry is shared by every
+ * session in the same worktree and is updated from whichever of them fetched.
+ */
 export function useSessionProjectGitStatus(sessionId: string | null) {
-    return storage(useShallow((state) => sessionId ? state.getSessionProjectGitStatus(sessionId) : null));
+    useKeyedValue(sessionGitStatusLive, sessionId ?? '');
+    return sessionId ? projectManager.getSessionProjectGitStatus(sessionId) : null;
 }
 
 export function useLocalSetting<K extends keyof LocalSettings>(name: K): LocalSettings[K] {
@@ -3024,7 +3034,7 @@ export function useSocketStatus() {
 }
 
 export function useSessionGitStatus(sessionId: string): GitStatus | null {
-    return storage(useShallow((state) => state.sessionGitStatus[sessionId] ?? null));
+    return useKeyedValue(sessionGitStatusLive, sessionId) ?? null;
 }
 
 export function useIsDataReady(): boolean {
