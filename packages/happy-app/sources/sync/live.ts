@@ -177,6 +177,51 @@ export class KeyedStore<T> {
     }
 }
 
+/**
+ * A single value owned outside the zustand store.
+ *
+ * For state that is derived — built from other state rather than written by an action. Putting it
+ * in the store made every rebuild a store write, which woke every selector in the App (the chat,
+ * the header, the rows) to look at a list they do not read. Here a write wakes only the hooks
+ * subscribed to this value.
+ */
+export class ValueStore<T> {
+    private value: T;
+    private listeners = new Set<Listener>();
+
+    constructor(initial: T) {
+        this.value = initial;
+    }
+
+    get(): T {
+        return this.value;
+    }
+
+    /** An identical value is not a write, the same contract the keyed store follows. */
+    set(next: T): void {
+        if (Object.is(next, this.value)) {
+            return;
+        }
+        this.value = next;
+        for (const listener of Array.from(this.listeners)) {
+            listener();
+        }
+    }
+
+    subscribe(listener: Listener): () => void {
+        this.listeners.add(listener);
+        return () => {
+            this.listeners.delete(listener);
+        };
+    }
+}
+
+export function useValueStore<T>(store: ValueStore<T>): T {
+    const subscribe = useCallback((listener: Listener) => store.subscribe(listener), [store]);
+    const snapshot = useCallback(() => store.get(), [store]);
+    return useSyncExternalStore(subscribe, snapshot, snapshot);
+}
+
 export function shallowEqual(a: unknown, b: unknown): boolean {
     if (Object.is(a, b)) {
         return true;

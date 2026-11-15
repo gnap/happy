@@ -19,7 +19,7 @@ import { channelDrivers, type ChannelState } from './channels/measure';
 import { candidateFailed as candidateFailedAt, candidateKey, candidateSucceeded, rearmAll, type CandidateHealth } from './channels/health';
 import type { ChannelDriver, ChannelLinkState, SessionReach } from './channels/types';
 import { resolveSessionReach } from './channels/resolve';
-import { KeyedStore, shallowEqual, useAllKeyedValues, useKeyedSelector, useKeyedValue } from './live';
+import { KeyedStore, shallowEqual, useAllKeyedValues, useKeyedSelector, useKeyedValue, ValueStore, useValueStore } from './live';
 
 export { channelLinks, type ChannelLink } from './channelLinks';
 export type { ChannelLinkState } from './channels/types';
@@ -130,7 +130,6 @@ interface StorageState {
     localSettings: LocalSettings;
     purchases: Purchases;
     profile: Profile;
-    sessionListViewData: SessionListViewItem[] | null;
     outbox: Record<string, OutboxEntry>;
     sessionGitStatus: Record<string, GitStatus | null>;
     machines: Record<string, Machine>;
@@ -967,6 +966,7 @@ export const storage = create<StorageState>()((set, get) => {
         purchases,
         profile,
         machines: {},
+        // (the derived session list lives in `sessionListViewDataLive`, not here)
         lanSightings: {},
         relayEndpoints: loadRelayEndpoints(),
         lanEndpoints: {},
@@ -988,7 +988,6 @@ export const storage = create<StorageState>()((set, get) => {
         feedHasMore: false,
         feedLoaded: false,  // Initialize as false
         friendsLoaded: false,  // Initialize as false
-        sessionListViewData: null,
         outbox: {},
         sessionGitStatus: {},
         realtimeStatus: 'disconnected',
@@ -1340,13 +1339,7 @@ export const storage = create<StorageState>()((set, get) => {
             sessionLive.replaceAll(mergedSessions);
             return state;
         }),
-        applyReady: () => set((state) => ({
-            ...state,
-            isDataReady: true,
-            // If the sessions list hasn't been populated yet (cold start, no cache),
-            // initialize to an empty array so the UI doesn't show the loading spinner.
-            sessionListViewData: state.sessionListViewData ?? [],
-        })),
+        applyReady: () => set((state) => ({ ...state, isDataReady: true })),
         applyMessages: (sessionId: string, messages: NormalizedMessage[]) => {
             bump('storeWrites');
             bump('messagesApplied', messages.length);
@@ -2468,6 +2461,16 @@ const builtFrom: {
 export const sessionOnlineLive = new KeyedStore<boolean>();
 
 /**
+ * The derived session list, outside the zustand store on purpose.
+ *
+ * This is rebuilt by `recomputeDerived`, never written by an action. Written through the store it
+ * woke every selector in the App — the chat, the header, every row — whenever a presence tick
+ * moved one row, all to answer a question only the list screen asks. Now it wakes only its own
+ * readers.
+ */
+export const sessionListViewDataLive = new ValueStore<SessionListViewItem[]>([]);
+
+/**
  * The part of the list that comes from channels, as one comparable string.
  *
  * Exactly the facts the list draws from them: for each session, whether anything is reaching it
@@ -2549,11 +2552,9 @@ function recomputeDerived(state: StorageState): void {
         state.daemonVersions,
         drivers,
     );
-    // The list is rebuilt by an action, not by a selector. Writing the same array back would wake
-    // every selector in the App for a list that did not move.
-    if (sessionListViewData !== state.sessionListViewData) {
-        storage.setState({ sessionListViewData });
-    }
+    // The list lives in its own store: writing it does not notify the zustand store, and an array
+    // that did not move is not a write at all.
+    sessionListViewDataLive.set(sessionListViewData);
 }
 
 storage.subscribe(recomputeDerived);
@@ -2870,7 +2871,9 @@ export function useMachineBadgeInputs(): (machineId: string) => { reach: Machine
 }
 
 export function useSessionListViewData(): SessionListViewItem[] | null {
-    return storage((state) => state.isDataReady ? state.sessionListViewData : null);
+    const ready = storage((state) => state.isDataReady);
+    const data = useValueStore(sessionListViewDataLive);
+    return ready ? data : null;
 }
 
 export function useAllSessions(): Session[] {

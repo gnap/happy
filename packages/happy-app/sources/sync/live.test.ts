@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { KeyedStore, shallowEqual } from './live';
+import { KeyedStore, ValueStore, shallowEqual } from './live';
 
 /** Notifications are coalesced to the next tick, so a test must let that tick happen. */
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -133,6 +133,31 @@ describe('KeyedStore whole-set view', () => {
         store.delete('a');
 
         expect(store.allVersion()).toBe(afterSet + 1);
+    });
+});
+
+describe('ValueStore', () => {
+    it('does not notify for the same value', () => {
+        const store = new ValueStore<number>(1);
+        const listener = vi.fn();
+        store.subscribe(listener);
+
+        store.set(1);
+
+        expect(listener).not.toHaveBeenCalled();
+    });
+
+    it('notifies synchronously, and stops after unsubscribing', () => {
+        const store = new ValueStore<string>('a');
+        const listener = vi.fn();
+        const unsubscribe = store.subscribe(listener);
+
+        store.set('b');
+        unsubscribe();
+        store.set('c');
+
+        expect(listener).toHaveBeenCalledTimes(1);
+        expect(store.get()).toBe('c');
     });
 });
 
