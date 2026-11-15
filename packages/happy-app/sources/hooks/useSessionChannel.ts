@@ -1,5 +1,5 @@
 import { useShallow } from 'zustand/react/shallow';
-import { storage, useMachineBadgeInputs } from '@/sync/storage';
+import { storage, useMachineBadgeInputs, useSessionMachineId } from '@/sync/storage';
 import type { SessionChannel } from '@/sync/lan/types';
 import type { ChannelLinkState } from '@/sync/channels/types';
 import { machineChannelIcons } from '@/sync/machinePresence';
@@ -32,7 +32,7 @@ export function useSessionChannel(sessionId: string): {
     link: ChannelLinkState | null;
 } {
     const badgeInputs = useMachineBadgeInputs();
-    const machineId = storage((state) => state.sessions[sessionId]?.metadata?.machineId);
+    const machineId = useSessionMachineId(sessionId);
     const priority = storage(useShallow((state) => normalizeChannelPriority(state.localSettings.channelPriority)));
     return storage(useShallow((state) => {
         const { channel, reason } = sync.describeChannel(sessionId);

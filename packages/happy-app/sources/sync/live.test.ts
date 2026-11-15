@@ -1,0 +1,172 @@
+import { describe, expect, it, vi } from 'vitest';
+import { KeyedStore, ValueStore, shallowEqual } from './live';
+
+/** Notifications are coalesced to the next tick, so a test must let that tick happen. */
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+describe('KeyedStore', () => {
+    it('does not treat the same value as a write', () => {
+        const store = new KeyedStore<{ n: number }>();
+        const value = { n: 1 };
+        store.set('a', value);
+        const before = store.version('a');
+
+        store.set('a', value);
+
+        expect(store.version('a')).toBe(before);
+    });
+
+    it('wakes only the subscribers of the key that changed', async () => {
+        const store = new KeyedStore<number>();
+        store.set('a', 1);
+        store.set('b', 1);
+        await tick();
+        const a = vi.fn();
+        const b = vi.fn();
+        store.subscribe('a', a);
+        store.subscribe('b', b);
+
+        store.set('a', 2);
+        await tick();
+
+        expect(a).toHaveBeenCalledTimes(1);
+        expect(b).not.toHaveBeenCalled();
+    });
+
+    it('coalesces a burst of writes into one notification', async () => {
+        const store = new KeyedStore<number>();
+        const listener = vi.fn();
+        store.subscribe('a', listener);
+
+        store.set('a', 1);
+        store.set('a', 2);
+        store.set('a', 3);
+        expect(listener).not.toHaveBeenCalled();
+
+        await tick();
+
+        expect(listener).toHaveBeenCalledTimes(1);
+        expect(store.get('a')).toBe(3);
+    });
+
+    it('keeps identities that did not move when replacing the whole set', () => {
+        const store = new KeyedStore<{ n: number }>();
+        const kept = { n: 1 };
+        const replaced = { n: 2 };
+        store.set('kept', kept);
+        store.set('replaced', replaced);
+
+        const nextReplacement = { n: 3 };
+        store.replaceAll({ kept, replaced: nextReplacement, added: { n: 4 } });
+
+        expect(store.get('kept')).toBe(kept);
+        expect(store.version('kept')).toBe(1);
+        expect(store.get('replaced')).toBe(nextReplacement);
+        expect(store.get('added')).toEqual({ n: 4 });
+    });
+
+    it('removes entries the new set no longer has, and tells their subscribers', async () => {
+        const store = new KeyedStore<number>();
+        store.set('gone', 1);
+        const listener = vi.fn();
+        store.subscribe('gone', listener);
+
+        store.replaceAll({});
+
+        await tick();
+
+        expect(store.get('gone')).toBeUndefined();
+        expect(listener).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops notifying a subscriber that unsubscribed during the flush', async () => {
+        const store = new KeyedStore<number>();
+        const second = vi.fn();
+        const unsubscribeFirst = store.subscribe('a', () => unsubscribeFirst());
+        store.subscribe('a', second);
+
+        store.set('a', 1);
+        await tick();
+
+        expect(second).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe('KeyedStore whole-set view', () => {
+    it('keeps the snapshot and list identities until the next write', () => {
+        const store = new KeyedStore<number>();
+        store.set('a', 1);
+        const record = store.snapshot();
+        const list = store.valuesList();
+
+        expect(store.snapshot()).toBe(record);
+        expect(store.valuesList()).toBe(list);
+        expect(record).toEqual({ a: 1 });
+        expect(list).toEqual([1]);
+
+        store.set('b', 2);
+
+        expect(store.snapshot()).not.toBe(record);
+        expect(store.snapshot()).toEqual({ a: 1, b: 2 });
+    });
+
+    it('tells whole-set listeners once per flush, after the per-key ones, with every write visible', async () => {
+        const store = new KeyedStore<number>();
+        const seen: string[] = [];
+        store.subscribe('a', () => seen.push('a'));
+        const all = vi.fn(() => seen.push(`all:${Object.keys(store.snapshot()).join(',')}`));
+        store.subscribeAll(all);
+
+        store.set('a', 1);
+        store.set('b', 2);
+        await tick();
+
+        expect(all).toHaveBeenCalledTimes(1);
+        expect(seen).toEqual(['a', 'all:a,b']);
+    });
+
+    it('bumps the all-version on a delete as well as a write', () => {
+        const store = new KeyedStore<number>();
+        store.set('a', 1);
+        const afterSet = store.allVersion();
+
+        store.delete('a');
+
+        expect(store.allVersion()).toBe(afterSet + 1);
+    });
+});
+
+describe('ValueStore', () => {
+    it('does not notify for the same value', () => {
+        const store = new ValueStore<number>(1);
+        const listener = vi.fn();
+        store.subscribe(listener);
+
+        store.set(1);
+
+        expect(listener).not.toHaveBeenCalled();
+    });
+
+    it('notifies synchronously, and stops after unsubscribing', () => {
+        const store = new ValueStore<string>('a');
+        const listener = vi.fn();
+        const unsubscribe = store.subscribe(listener);
+
+        store.set('b');
+        unsubscribe();
+        store.set('c');
+
+        expect(listener).toHaveBeenCalledTimes(1);
+        expect(store.get()).toBe('c');
+    });
+});
+
+describe('shallowEqual', () => {
+    it('compares one level, by value', () => {
+        const shared = { nested: true };
+        expect(shallowEqual({ a: 1, b: shared }, { a: 1, b: shared })).toBe(true);
+        expect(shallowEqual({ a: 1 }, { a: 2 })).toBe(false);
+        expect(shallowEqual({ a: 1 }, { a: 1, b: undefined })).toBe(false);
+        expect(shallowEqual(null, {})).toBe(false);
+    });
+});

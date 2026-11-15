@@ -65,13 +65,16 @@ type Pending = {
  * The App's reads leave no trace anywhere an operator can see: they travel a socket to the machine
  * and the answer comes back the same way. When a screen that reads from a session is empty, the
  * question is always the same — did the request go out, and what did the machine say — and this is
- * the only place the whole exchange is visible. Session routes only, and never the body itself:
- * a listing's file count is enough to tell an empty directory from an unanswered request.
+ * the only place the whole exchange is visible. Session routes and a preview's own documents, and
+ * never the body itself: a listing's file count is enough to tell an empty directory from an
+ * unanswered request.
  */
 function logSessionRead(request: Pending['request'], status: number, bodyBase64: string | null): void {
-    if (!request || !request.path.includes('/lan/sessions/')) return;
+    if (!request || !request.path.startsWith('/lan/')) return;
     const body = bodyBase64 ? Buffer.from(bodyBase64, 'base64') : null;
     const bytes = body?.length ?? 0;
+    // A preview's document URL is its credential; the log gets the shape of the path, not the token.
+    const shownPath = request.path.split('?')[0].replace(/^(\/lan\/preview\/)[^/]+/, '$1<token>');
     let detail = '';
     if (body && status === 200 && request.path.includes('/listing')) {
         const sessionId = request.path.split('/lan/sessions/')[1]?.split('/')[0] ?? 'session';
@@ -93,7 +96,7 @@ function logSessionRead(request: Pending['request'], status: number, bodyBase64:
             // Not the listing's JSON — the status and size still say what happened.
         }
     }
-    console.log(`[read] ${request.tag.slice(0, 8)} ${request.method} ${request.path.split('?')[0]} -> ${status} ${bytes}B${detail}`);
+    console.log(`[read] ${request.tag.slice(0, 8)} ${request.method} ${shownPath} -> ${status} ${bytes}B${detail}`);
 }
 
 /**

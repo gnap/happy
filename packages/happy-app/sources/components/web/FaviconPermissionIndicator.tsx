@@ -2,7 +2,7 @@ import React from 'react';
 import { Platform } from 'react-native';
 import { channelDrivers } from '@/sync/channels/measure';
 import { resolveSessionReach } from '@/sync/channels/resolve';
-import { storage } from '@/sync/storage';
+import { storage, getSessions, useSessions } from '@/sync/storage';
 import { updateFaviconWithNotification, resetFavicon } from '@/utils/web/faviconGenerator';
 
 /**
@@ -14,12 +14,15 @@ export const FaviconPermissionIndicator = React.memo(() => {
         return null;
     }
 
+    // One subscription per source: the sessions from the keyed store, the channel facts from the
+    // zustand store. The drivers are built from both.
+    const sessions = useSessions();
     const hasOnlineSessionWithPermissions = storage((state) => {
         // Asked of the channels, not read off the session: whether a session is being reached is
         // not a property the session carries, and the server's own flag says a session the LAN is
         // serving is away.
-        const drivers = channelDrivers(state, state.localSettings.channelPriority);
-        return Object.values(state.sessions).some(session => {
+        const drivers = channelDrivers({ ...state, sessions: getSessions() }, state.localSettings.channelPriority);
+        return sessions.some(session => {
             const isOnline = resolveSessionReach(session.id, session.metadata?.machineId, drivers).online;
 
             const hasPermissions = session.agentState?.requests &&

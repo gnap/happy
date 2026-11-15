@@ -8,7 +8,7 @@ import { ItemList } from '@/components/ItemList';
 import { sync } from '@/sync/sync';
 import { useLocalSearchParams } from 'expo-router';
 import { Pressable } from 'react-native';
-import { useAllMachines, storage, useMachineBadgeInputs, useLanSightings, useLanEndpoints, useDaemonSockets, useChannelLinks, useRelayDirectory } from '@/sync/storage';
+import { useAllMachines, storage, getSessionMessages, useMachineBadgeInputs, useLanSightings, useLanEndpoints, useDaemonSockets, useChannelLinks, useRelayDirectory } from '@/sync/storage';
 import type { SessionChannel } from '@/sync/lan/types';
 import { DEFAULT_CHANNEL_PRIORITY, normalizeChannelPriority } from '@/sync/lan/channelOrder';
 import { candidateInputsFor, orderedCandidates } from '@/sync/channels/candidates';
@@ -287,7 +287,7 @@ const LanDevScreen = React.memo(function LanDevScreen() {
                 if (!read) {
                     push(line('merge', 'fetchSessionFromDaemon found nothing to read', false));
                 } else {
-                    const stored = storage.getState().sessionMessages[mergeTarget.happySessionId]?.messages.length ?? 0;
+                    const stored = getSessionMessages(mergeTarget.happySessionId)?.messages.length ?? 0;
                     push(line(
                         'merge',
                         `${read.messages.length} normalized, ${read.decryptedCount}/${read.total} decrypted → store now holds ${stored} message(s)`

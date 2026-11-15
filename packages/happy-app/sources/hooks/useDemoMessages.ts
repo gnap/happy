@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { storage } from '@/sync/storage';
+import { sessionMessagesLive } from '@/sync/storage';
 import { Message } from '@/sync/typesMessage';
 import { createReducer } from '@/sync/reducer/reducer';
 
@@ -17,34 +17,22 @@ export function useDemoMessages(messages: Message[]) {
         const sortedMessages = [...messages].sort((a, b) => b.createdAt - a.createdAt);
 
         // Write the demo messages to the hardcoded session
-        storage.setState((state) => ({
-            ...state,
-            sessionMessages: {
-                ...state.sessionMessages,
-                [DEMO_SESSION_ID]: {
-                    messages: sortedMessages,
-                    messagesMap: messagesMap,
-                    reducerState: createReducer(),
-                    isLoaded: true,
-                    oldestSeq: 0,
-                    newestSeq: 0,
-                    cachedBitmap: 0,
-                    hasOlderMessages: false,
-                    isLoadingOlder: false,
-                    isFetching: false,
-                }
-            }
-        }));
+        sessionMessagesLive.set(DEMO_SESSION_ID, {
+            messages: sortedMessages,
+            messagesMap: messagesMap,
+            reducerState: createReducer(),
+            isLoaded: true,
+            oldestSeq: 0,
+            newestSeq: 0,
+            cachedBitmap: 0,
+            hasOlderMessages: false,
+            isLoadingOlder: false,
+            isFetching: false,
+        });
 
         // Cleanup function to remove the demo session
         return () => {
-            storage.setState((state) => {
-                const { [DEMO_SESSION_ID]: _, ...restSessions } = state.sessionMessages;
-                return {
-                    ...state,
-                    sessionMessages: restSessions
-                };
-            });
+            sessionMessagesLive.delete(DEMO_SESSION_ID);
         };
     }, [messages]);
 

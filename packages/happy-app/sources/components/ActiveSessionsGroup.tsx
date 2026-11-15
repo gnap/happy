@@ -10,7 +10,7 @@ import { Avatar } from './Avatar';
 import { Typography } from '@/constants/Typography';
 import { SessionStatusDot } from './SessionStatusDot';
 import { MachinePresenceBadge } from './MachinePresenceBadge';
-import { useAllMachines, useSetting, useMachinesMap, useMachinePresenceMap, useLanSightings, useRelayDirectory, useRelayEndpoints, useMachineBadgeInputs } from '@/sync/storage';
+import { useMachinesMap, useMachineBadgeInputsFor, useSessionNeedsRestart } from '@/sync/storage';
 import { MACHINE_PRESENCE_COLORS } from '@/sync/machinePresence';
 import { StyleSheet } from 'react-native-unistyles';
 import { machineSpawnNewSession, sessionKill } from '@/sync/ops';
@@ -24,7 +24,6 @@ import { useIsTablet } from '@/utils/responsive';
 import { useHappyAction } from '@/hooks/useHappyAction';
 import { HappyError } from '@/utils/errors';
 import { SessionRowStatusIndicators } from './SessionRowStatusIndicators';
-import { sessionNeedsRestart, useDaemonVersions } from '@/sync/storage';
 
 const stylesheet = StyleSheet.create((theme, runtime) => ({
     container: {
@@ -214,14 +213,6 @@ export function ActiveSessionsGroup({ sessions, selectedSessionId }: ActiveSessi
     // is currently server-inactive may still be sitting on the LAN — and it still needs its real
     // name in the group header rather than a bare machineId.
     const machinesMap = useMachinesMap();
-    const machinePresence = useMachinePresenceMap();
-    const lanSightings = useLanSightings();
-    const relayDirectory = useRelayDirectory();
-    const relayEndpoints = useRelayEndpoints();
-    /** The same baseline the other list uses, so the mark means one thing in both. */
-    const daemonVersions = useDaemonVersions();
-    /** What a machine's glyphs should show, from the channels — one source for every badge. */
-    const badgeInputs = useMachineBadgeInputs();
 
     // Group sessions by project, then associate with machine
     const projectGroups = React.useMemo(() => {
@@ -328,13 +319,12 @@ export function ActiveSessionsGroup({ sessions, selectedSessionId }: ActiveSessi
                                     );
                                 })()}
                                 {singleMachineId ? (
-                                    <MachinePresenceBadge
+                                    <MachineBadge
                                         machineId={singleMachineId}
                                         // Asked of the channels, not assembled here: this badge and
                                         // the settings row built their inputs separately and
                                         // disagreed about which machines had earned a relay glyph,
                                         // and neither counted a socket this App was holding.
-                                        {...badgeInputs(singleMachineId)}
                                     />
                                 ) : null}
                             </View>
@@ -349,7 +339,6 @@ export function ActiveSessionsGroup({ sessions, selectedSessionId }: ActiveSessi
                                     <View key={`${projectPath}-${machineId}`}>
                                         {machineGroup.sessions.map((session, index) => (
                                             <CompactSessionRow
-                                                needsRestart={sessionNeedsRestart(session, machinesMap, daemonVersions)}
                                                 key={session.id}
                                                 session={session}
                                                 selected={selectedSessionId === session.id}
@@ -367,9 +356,23 @@ export function ActiveSessionsGroup({ sessions, selectedSessionId }: ActiveSessi
     );
 }
 
+/**
+ * One machine's badge, subscribing to that machine alone.
+ *
+ * The group used to ask for every machine's inputs and hand them down, so a socket transition on
+ * one host re-rendered the whole group — and this badge is the only thing in the header that reads
+ * the channels.
+ */
+const MachineBadge = React.memo(({ machineId }: { machineId: string }) => {
+    const inputs = useMachineBadgeInputsFor(machineId);
+    return <MachinePresenceBadge machineId={machineId} {...inputs} />;
+});
+
 // Compact session row component with status line
-const CompactSessionRow = React.memo(({ session, selected, showBorder, needsRestart }: { session: Session; selected?: boolean; showBorder?: boolean; needsRestart?: boolean }) => {
+const CompactSessionRow = React.memo(({ session, selected, showBorder }: { session: Session; selected?: boolean; showBorder?: boolean }) => {
     const styles = stylesheet;
+    // The mark is asked here, from the machine, so a machine status update does not rebuild the group.
+    const needsRestart = useSessionNeedsRestart(session);
     const sessionStatus = useSessionStatus(session);
     const sessionName = getSessionName(session);
     const navigateToSession = useNavigateToSession();
