@@ -6,7 +6,7 @@ import { AuthCredentials } from '@/auth/tokenStorage';
 import { Encryption } from '@/sync/encryption/encryption';
 import { decodeBase64, encodeBase64 } from '@/encryption/base64';
 import { reinitSodium } from '@/encryption/libsodium';
-import { storage } from './storage';
+import { storage, getSessionMessages } from './storage';
 import { ApiEphemeralUpdateSchema, ApiMessage, ApiUpdateContainerSchema } from './apiTypes';
 import type { ApiEphemeralActivityUpdate } from './apiTypes';
 import { Session, Machine } from './storageTypes';
@@ -1354,7 +1354,7 @@ class Sync {
 
         const state = storage.getState();
         const session = state.sessions[sessionId];
-        const sessionMsgs = state.sessionMessages[sessionId];
+        const sessionMsgs = getSessionMessages(sessionId);
         if (!session || !sessionMsgs) return;
         const lastSeq = watermark?.lastSeq ?? this.sessionLastSeq.get(sessionId) ?? 0;
         const oldestSeq = watermark?.oldestSeq ?? sessionMsgs.oldestSeq;
@@ -3444,9 +3444,9 @@ class Sync {
             return null;
         }
         const state = storage.getState();
-        const messages = state.sessionMessages[sessionId];
+        const messages = getSessionMessages(sessionId);
         const link = this.daemonLinks.get(sessionId);
-        const lastRead = state.sessionMessages[sessionId]?.isFetching ? 'in flight' : 'idle';
+        const lastRead = messages?.isFetching ? 'in flight' : 'idle';
         return {
             channel: this.preferredChannel(sessionId),
             window: messages ? `${messages.oldestSeq}–${messages.newestSeq} (${messages.messages.length} messages)` : 'none',
@@ -3689,7 +3689,7 @@ class Sync {
         if (!session) {
             return;
         }
-        const existing = state.sessionMessages[sessionId]?.messages ?? [];
+        const existing = getSessionMessages(sessionId)?.messages ?? [];
         if (existing.length > 0 && this.hydratedSessions.has(sessionId)) {
             // A window is already on screen and it came from this process's cache. Nothing to do.
             return;
@@ -3713,7 +3713,7 @@ class Sync {
             // cached one. It used to win by default, and after a reload that meant the screen kept
             // ten pushed messages and refused the sixty-message window it had on disk. Merge by
             // identity so neither side is dropped.
-            const heldWindow = storage.getState().sessionMessages[sessionId];
+            const heldWindow = getSessionMessages(sessionId);
             const held = heldWindow?.messages ?? [];
             const merged = held.length > 0 ? mergePageIntoWindow(held, cached.messages) : null;
             if (held.length > 0 && !merged) {
@@ -3952,7 +3952,7 @@ class Sync {
                 // Cold-start uses the full-screen loader (isLoaded=false), not this bottom spinner.
                 // Skip the spinner when the seq increment is caused by our own outgoing message
                 // (already shown optimistically) — avoids a spurious flash while the send is in flight.
-                const alreadyLoaded = storage.getState().sessionMessages[sessionId]?.isLoaded ?? false;
+                const alreadyLoaded = getSessionMessages(sessionId)?.isLoaded ?? false;
                 const hasPendingOutbox = (this.pendingOutbox.get(sessionId)?.length ?? 0) > 0;
                 if (alreadyLoaded && !hasPendingOutbox) {
                     storage.getState().setFetching(sessionId, true);
@@ -4062,7 +4062,7 @@ class Sync {
                 let oldestSeq: number;
                 let hasOlderMessages: boolean;
                 if (cachedLastSeq > 0) {
-                    const existingState = storage.getState().sessionMessages[sessionId];
+                    const existingState = getSessionMessages(sessionId);
                     oldestSeq = existingState?.oldestSeq ?? 0;
                     hasOlderMessages = existingState?.hasOlderMessages ?? false;
                 } else {
@@ -4089,7 +4089,7 @@ class Sync {
 
                 // Only patch store for cold-start path; incremental path already has correct values.
                 if (cachedLastSeq === 0) {
-                    const stateAfter = storage.getState().sessionMessages[sessionId];
+                    const stateAfter = getSessionMessages(sessionId);
                     if (stateAfter) {
                         storage.getState().applyOlderMessages(sessionId, [], oldestSeq, hasOlderMessages);
                     }
@@ -4174,7 +4174,7 @@ class Sync {
      * Called when the user scrolls to the top of the message list.
      */
     fetchOlderMessages = async (sessionId: string): Promise<void> => {
-        const stateNow = storage.getState().sessionMessages[sessionId];
+        const stateNow = getSessionMessages(sessionId);
         if (!stateNow?.hasOlderMessages || stateNow.isLoadingOlder) return;
 
         // A session on a daemon channel scrolls back through the daemon's log, not the server's.
@@ -4194,7 +4194,7 @@ class Sync {
                 const encryption = this.encryption.getSessionEncryption(sessionId);
                 if (!encryption) throw new Error(`Session encryption not ready for ${sessionId}`);
 
-                const currentState = storage.getState().sessionMessages[sessionId];
+                const currentState = getSessionMessages(sessionId);
                 if (!currentState?.hasOlderMessages) return;
 
                 const oldestSeq = currentState.oldestSeq;
@@ -4311,7 +4311,7 @@ class Sync {
                 this.daemonLinks.set(sessionId, { ...link, older: read.older, hasOlder: read.hasOlder });
                 const oldestSeq = read.messages.length > 0
                     ? minSeqOf(read.messages)
-                    : storage.getState().sessionMessages[sessionId]?.oldestSeq ?? 0;
+                    : getSessionMessages(sessionId)?.oldestSeq ?? 0;
                 storage.getState().applyOlderMessages(sessionId, read.messages, oldestSeq, read.hasOlder);
                 void this.saveSessionCache(
                     sessionId,
@@ -5210,7 +5210,7 @@ class Sync {
         // cache is gone — cleared, never written, a fresh install — that anchor is a claim about
         // messages that are not there, and reading from it produces a window holding nothing but
         // whatever was appended since, which is to say a blank conversation with a live socket.
-        const loadedWindow = storage.getState().sessionMessages[sessionId];
+        const loadedWindow = getSessionMessages(sessionId);
         const hasWindow = !!loadedWindow?.isLoaded && loadedWindow.messages.length > 0;
         const persisted = hasWindow ? this.lanWindows[sessionId] : undefined;
         const anchor = inMemory
@@ -5235,7 +5235,7 @@ class Sync {
         // entries the store already has are dropped before the decryptor sees them. Without this
         // a poll re-decrypts and re-normalises hundreds of entries to learn about a handful.
         const knownIdentities = new Set<string>();
-        for (const message of storage.getState().sessionMessages[sessionId]?.messages ?? []) {
+        for (const message of getSessionMessages(sessionId)?.messages ?? []) {
             knownIdentities.add(message.id);
             const localId = 'localId' in message ? message.localId : null;
             if (localId) {
@@ -5326,7 +5326,7 @@ class Sync {
         // store's window is left alone.
         let keepWindow = false;
         if (read && replace && hasWindow) {
-            const held = storage.getState().sessionMessages[sessionId]?.messages ?? [];
+            const held = getSessionMessages(sessionId)?.messages ?? [];
             const heldNewest = held.length > 0 ? held[held.length - 1].createdAt : 0;
             const pageNewest = read.messages.length > 0
                 ? Math.max(...read.messages.map((message) => message.createdAt))
@@ -7439,7 +7439,7 @@ class Sync {
         // "nothing yet, still loading" from "this session has nothing", and setting it on every tick
         // made the indicator at the bottom of the list flicker on a two-second poll — a loader that
         // is on most of the time reads as one that never stops.
-        if (storage.getState().sessionMessages[sessionId]?.messages.length === 0) {
+        if (getSessionMessages(sessionId)?.messages.length === 0) {
             storage.getState().setFetching(sessionId, true);
         }
         const read = await this.fetchSessionFromDaemon(sessionId);
@@ -7604,7 +7604,7 @@ class Sync {
      */
     private withoutStoredDuplicates(sessionId: string, messages: NormalizedMessage[]): NormalizedMessage[] {
         const known = new Set<string>();
-        for (const message of storage.getState().sessionMessages[sessionId]?.messages ?? []) {
+        for (const message of getSessionMessages(sessionId)?.messages ?? []) {
             known.add(message.id);
             // Not every variant carries a localId (mode-switch messages do not), so narrow first.
             const localId = 'localId' in message ? message.localId : null;
@@ -7621,7 +7621,7 @@ class Sync {
         const result = storage.getState().applyMessages(sessionId, messages);
         let m: Message[] = [];
         for (let messageId of result.changed) {
-            const message = storage.getState().sessionMessages[sessionId].messagesMap[messageId];
+            const message = getSessionMessages(sessionId)?.messagesMap[messageId];
             if (message) {
                 m.push(message);
             }

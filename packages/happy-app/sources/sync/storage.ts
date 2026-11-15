@@ -132,7 +132,6 @@ interface StorageState {
     profile: Profile;
     sessions: Record<string, Session>;
     sessionListViewData: SessionListViewItem[] | null;
-    sessionMessages: Record<string, SessionMessages>;
     outbox: Record<string, OutboxEntry>;
     sessionGitStatus: Record<string, GitStatus | null>;
     machines: Record<string, Machine>;
@@ -927,6 +926,19 @@ function sameWireSession(a: WireSession, b: WireSession): boolean {
         && (a.restartingAt ?? null) === (b.restartingAt ?? null);
 }
 
+/**
+ * Per-key projections of the two hot maps.
+ *
+ * `sessionMessages` lives only here, not in the zustand state: the message actions below read and
+ * write these keys directly, so appending a message no longer replaces a whole map (and no longer
+ * runs every selector in the App) — it wakes the chat of that session and nothing else.
+ *
+ * `sessions` is still written through the store and mirrored down by the subscription after it;
+ * when its last React subscriber moves, the same flip removes that last whole-map rebuild.
+ */
+export const sessionLive = new KeyedStore<Session>();
+export const sessionMessagesLive = new KeyedStore<SessionMessages>();
+
 export const storage = create<StorageState>()((set, get) => {
     let { settings, version } = loadSettings();
     let localSettings = loadLocalSettings();
@@ -966,7 +978,6 @@ export const storage = create<StorageState>()((set, get) => {
         feedLoaded: false,  // Initialize as false
         friendsLoaded: false,  // Initialize as false
         sessionListViewData: null,
-        sessionMessages: {},
         outbox: {},
         sessionGitStatus: {},
         realtimeStatus: 'disconnected',
@@ -977,7 +988,7 @@ export const storage = create<StorageState>()((set, get) => {
         isDataReady: false,
         nativeUpdateStatus: null,
         isMutableToolCall: (sessionId: string, callId: string) => {
-            const sessionMessages = get().sessionMessages[sessionId];
+            const sessionMessages = sessionMessagesLive.get(sessionId);
             if (!sessionMessages) {
                 return true;
             }
@@ -991,9 +1002,9 @@ export const storage = create<StorageState>()((set, get) => {
             }
             return toolCallMessage.tool?.name ? isMutableTool(toolCallMessage.tool?.name) : true;
         },
-        finalizeRunningTools: (sessionId: string) => set((state) => {
-            const sessionMessages = state.sessionMessages[sessionId];
-            if (!sessionMessages) return state;
+        finalizeRunningTools: (sessionId: string) => {
+            const sessionMessages = sessionMessagesLive.get(sessionId);
+            if (!sessionMessages) return;
 
             const now = Date.now();
             let anyChanged = false;
@@ -1015,90 +1026,64 @@ export const storage = create<StorageState>()((set, get) => {
                 }
             }
 
-            if (!anyChanged) return state;
+            if (!anyChanged) return;
 
-            return {
-                ...state,
-                sessionMessages: {
-                    ...state.sessionMessages,
-                    [sessionId]: { ...sessionMessages, messagesMap: newMessagesMap },
-                },
-            };
-        }),
+            sessionMessagesLive.set(sessionId, { ...sessionMessages, messagesMap: newMessagesMap });
+        },
         /**
          * After a successful lazy-content RPC fetch, replace the truncated tool input
          * with the full args and clear the lazyContent flag in both the message map
          * and the reducer state. Returns true when the message was found and updated.
          */
         resolveToolCallLazyContent: (sessionId: string, messageId: string, fullInput: Record<string, unknown>): boolean => {
-            let updated = false;
-            set((state) => {
-                const sessionMessages = state.sessionMessages[sessionId];
-                if (!sessionMessages) return state;
+            const sessionMessages = sessionMessagesLive.get(sessionId);
+            if (!sessionMessages) return false;
 
-                const msg = sessionMessages.messagesMap[messageId];
-                if (!msg || msg.kind !== 'tool-call') return state;
+            const msg = sessionMessages.messagesMap[messageId];
+            if (!msg || msg.kind !== 'tool-call') return false;
 
-                const updatedTool = { ...msg.tool, input: fullInput, lazyContent: false };
-                const updatedMsg = { ...msg, tool: updatedTool };
+            const updatedTool = { ...msg.tool, input: fullInput, lazyContent: false };
+            const updatedMsg = { ...msg, tool: updatedTool };
 
-                // Mirror into reducerState so the next cache save persists the full content
-                const reducerMsg = sessionMessages.reducerState.messages.get(messageId);
-                if (reducerMsg?.tool) {
-                    reducerMsg.tool.input = fullInput;
-                    reducerMsg.tool.lazyContent = false;
-                }
+            // Mirror into reducerState so the next cache save persists the full content
+            const reducerMsg = sessionMessages.reducerState.messages.get(messageId);
+            if (reducerMsg?.tool) {
+                reducerMsg.tool.input = fullInput;
+                reducerMsg.tool.lazyContent = false;
+            }
 
-                updated = true;
-                return {
-                    ...state,
-                    sessionMessages: {
-                        ...state.sessionMessages,
-                        [sessionId]: {
-                            ...sessionMessages,
-                            messagesMap: { ...sessionMessages.messagesMap, [messageId]: updatedMsg },
-                            messages: sessionMessages.messages.map(m => m.id === messageId ? updatedMsg : m),
-                        },
-                    },
-                };
+            sessionMessagesLive.set(sessionId, {
+                ...sessionMessages,
+                messagesMap: { ...sessionMessages.messagesMap, [messageId]: updatedMsg },
+                messages: sessionMessages.messages.map(m => m.id === messageId ? updatedMsg : m),
             });
-            return updated;
+            return true;
         },
         /**
          * After a successful lazy-content RPC fetch, replace the truncated tool result
          * with the full result and remove the _lazyResult marker. Returns true when updated.
          */
         resolveToolCallLazyResult: (sessionId: string, messageId: string, fullResult: unknown): boolean => {
-            let updated = false;
-            set((state) => {
-                const sessionMessages = state.sessionMessages[sessionId];
-                if (!sessionMessages) return state;
+            const sessionMessages = sessionMessagesLive.get(sessionId);
+            if (!sessionMessages) return false;
 
-                const msg = sessionMessages.messagesMap[messageId];
-                if (!msg || msg.kind !== 'tool-call') return state;
+            const msg = sessionMessages.messagesMap[messageId];
+            if (!msg || msg.kind !== 'tool-call') return false;
 
-                const updatedTool = { ...msg.tool, result: fullResult };
-                const updatedMsg = { ...msg, tool: updatedTool };
+            const updatedTool = { ...msg.tool, result: fullResult };
+            const updatedMsg = { ...msg, tool: updatedTool };
 
-                const reducerMsg = sessionMessages.reducerState.messages.get(messageId);
-                if (reducerMsg?.tool) {
-                    reducerMsg.tool.result = fullResult;
-                }
+            const reducerMsg = sessionMessages.reducerState.messages.get(messageId);
+            if (reducerMsg?.tool) {
+                reducerMsg.tool.result = fullResult;
+            }
 
-                updated = true;
-                return {
-                    ...state,
-                    sessionMessages: {
-                        ...state.sessionMessages,
-                        [sessionId]: {
-                            ...sessionMessages,
-                            messagesMap: { ...sessionMessages.messagesMap, [messageId]: updatedMsg },
-                            messages: sessionMessages.messages.map(m => m.id === messageId ? updatedMsg : m),
-                        },
-                    },
-                };
+            sessionMessagesLive.set(sessionId, {
+                ...sessionMessages,
+                messagesMap: { ...sessionMessages.messagesMap, [messageId]: updatedMsg },
+                messages: sessionMessages.messages.map(m => m.id === messageId ? updatedMsg : m),
             });
-            return updated;
+            return true;
         },
         getActiveSessions: () => {
             const state = get();
@@ -1233,19 +1218,15 @@ export const storage = create<StorageState>()((set, get) => {
                 };
             });
 
-            // Process AgentState updates for sessions that already have messages loaded. The map
-            // is copied only when one of them actually produces a new entry: on a plain list
-            // refresh nothing here changes, and a new outer map would wake every subscriber that
-            // compares it.
-            let updatedSessionMessages = state.sessionMessages;
-
+            // Process AgentState updates for sessions that already have messages loaded. Only the
+            // session whose agent state moved is written; a plain list refresh writes nothing.
             sessions.forEach(session => {
                 // On full refresh, old state doesn't exist; skip AgentState diff.
                 const oldSession = fullRefresh ? undefined : state.sessions[session.id];
                 const newSession = mergedSessions[session.id];
 
                 // Check if sessionMessages exists AND agentStateVersion is newer
-                const existingSessionMessages = updatedSessionMessages[session.id];
+                const existingSessionMessages = sessionMessagesLive.get(session.id);
                 if (existingSessionMessages && newSession.agentState &&
                     (!oldSession || newSession.agentStateVersion > (oldSession.agentStateVersion || 0))) {
 
@@ -1306,10 +1287,7 @@ export const storage = create<StorageState>()((set, get) => {
                     const messagesArray = Object.values(mergedMessagesMap)
                         .sort((a, b) => b.createdAt - a.createdAt);
 
-                    if (updatedSessionMessages === state.sessionMessages) {
-                        updatedSessionMessages = { ...state.sessionMessages };
-                    }
-                    updatedSessionMessages[session.id] = {
+                    sessionMessagesLive.set(session.id, {
                         messages: messagesArray,
                         messagesMap: mergedMessagesMap,
                         reducerState: existingSessionMessages.reducerState,
@@ -1320,7 +1298,7 @@ export const storage = create<StorageState>()((set, get) => {
                         hasOlderMessages: existingSessionMessages.hasOlderMessages,
                         isLoadingOlder: existingSessionMessages.isLoadingOlder,
                         isFetching: existingSessionMessages.isFetching,
-                    };
+                    });
 
                     // IMPORTANT: Copy latestUsage from reducerState to Session for immediate availability
                     if (existingSessionMessages.reducerState.latestUsage) {
@@ -1353,7 +1331,6 @@ export const storage = create<StorageState>()((set, get) => {
                 ...state,
                 sessions: mergedSessions,
                 sessionListViewData,
-                sessionMessages: updatedSessionMessages
             };
         }),
         applyReady: () => set((state) => ({
@@ -1371,7 +1348,7 @@ export const storage = create<StorageState>()((set, get) => {
             set((state) => {
 
                 // Resolve session messages state
-                const existingSession = state.sessionMessages[sessionId] || {
+                const existingSession = sessionMessagesLive.get(sessionId) || {
                     messages: [],
                     messagesMap: {},
                     reducerState: createReducer(),
@@ -1433,112 +1410,92 @@ export const storage = create<StorageState>()((set, get) => {
                     };
                 }
 
-                return {
-                    ...state,
-                    sessions: updatedSessions,
-                    sessionMessages: {
-                        ...state.sessionMessages,
-                        [sessionId]: {
-                            ...existingSession,
-                            messages: messagesArray,
-                            messagesMap: mergedMessagesMap,
-                            reducerState: existingSession.reducerState, // Explicitly include the mutated reducer state
-                            isLoaded: true
-                        }
-                    }
-                };
+                sessionMessagesLive.set(sessionId, {
+                    ...existingSession,
+                    messages: messagesArray,
+                    messagesMap: mergedMessagesMap,
+                    reducerState: existingSession.reducerState, // Explicitly include the mutated reducer state
+                    isLoaded: true
+                });
+
+                // A message append is not a list event: only the session object changes when the
+                // reducer learned something new about it (todos, usage). Returning the same state
+                // otherwise means the append wakes the chat, and nothing else.
+                return updatedSessions === state.sessions ? state : { ...state, sessions: updatedSessions };
             });
 
             return { changed: Array.from(changed), hasReadyEvent };
         },
         applyMessagesLoaded: (sessionId: string) => set((state) => {
-            const existingSession = state.sessionMessages[sessionId];
-            let result: StorageState;
+            const existingSession = sessionMessagesLive.get(sessionId);
 
-                if (!existingSession) {
-                    // First time loading - check for AgentState
-                    const session = state.sessions[sessionId];
-                    const agentState = session?.agentState;
+            if (!existingSession) {
+                // First time loading - check for AgentState
+                const session = state.sessions[sessionId];
+                const agentState = session?.agentState;
 
-                    // Create new reducer state
-                    const reducerState = createReducer();
+                // Create new reducer state
+                const reducerState = createReducer();
 
-                    // Process AgentState if it exists
-                    let messages: Message[] = [];
-                    let messagesMap: Record<string, Message> = {};
+                // Process AgentState if it exists
+                let messages: Message[] = [];
+                let messagesMap: Record<string, Message> = {};
 
-                    if (agentState) {
-                        // Process AgentState through reducer to get initial permission messages
-                        const reducerResult = reducer(reducerState, [], agentState);
-                        const processedMessages = reducerResult.messages;
+                if (agentState) {
+                    // Process AgentState through reducer to get initial permission messages
+                    const reducerResult = reducer(reducerState, [], agentState);
+                    const processedMessages = reducerResult.messages;
 
-                        processedMessages.forEach(message => {
-                            messagesMap[message.id] = message;
-                        });
+                    processedMessages.forEach(message => {
+                        messagesMap[message.id] = message;
+                    });
 
-                        messages = Object.values(messagesMap)
-                            .sort((a, b) => b.createdAt - a.createdAt);
-                    }
+                    messages = Object.values(messagesMap)
+                        .sort((a, b) => b.createdAt - a.createdAt);
+                }
 
-                    // Extract latestUsage from reducerState if available and update session
-                    let updatedSessions = state.sessions;
-                    if (session && reducerState.latestUsage) {
-                        updatedSessions = {
+                sessionMessagesLive.set(sessionId, {
+                    reducerState,
+                    messages,
+                    messagesMap,
+                    isLoaded: true,
+                    oldestSeq: 0,
+                    newestSeq: 0,
+                    cachedBitmap: 0,
+                    hasOlderMessages: false,
+                    isLoadingOlder: false,
+                    isFetching: false,
+                });
+
+                // Extract latestUsage from reducerState if available and update session
+                if (session && reducerState.latestUsage) {
+                    return {
+                        ...state,
+                        sessions: {
                             ...state.sessions,
                             [sessionId]: {
                                 ...session,
                                 latestUsage: { ...reducerState.latestUsage }
                             }
-                        };
-                    }
-
-                    result = {
-                        ...state,
-                        sessions: updatedSessions,
-                        sessionMessages: {
-                            ...state.sessionMessages,
-                            [sessionId]: {
-                                reducerState,
-                                messages,
-                                messagesMap,
-                                isLoaded: true,
-                                oldestSeq: 0,
-                                newestSeq: 0,
-                                cachedBitmap: 0,
-                                hasOlderMessages: false,
-                                isLoadingOlder: false,
-                                isFetching: false,
-                            } satisfies SessionMessages
-                        }
-                    };
-                } else {
-                    result = {
-                        ...state,
-                        sessionMessages: {
-                            ...state.sessionMessages,
-                            [sessionId]: {
-                                ...existingSession,
-                                isLoaded: true,
-                                isFetching: false,
-                            } satisfies SessionMessages
-                        }
+                        },
                     };
                 }
+                return state;
+            }
 
-            return result;
+            sessionMessagesLive.set(sessionId, {
+                ...existingSession,
+                isLoaded: true,
+                isFetching: false,
+            });
+            return state;
         }),
-        setFetching: (sessionId: string, fetching: boolean) => set((state) => {
-            const existing = state.sessionMessages[sessionId];
-            if (!existing) return state;
-            return {
-                ...state,
-                sessionMessages: {
-                    ...state.sessionMessages,
-                    [sessionId]: { ...existing, isFetching: fetching },
-                },
-            };
-        }),
-        applyHydratedCache: (sessionId: string, messages: Message[], reducerState: ReducerState, oldestSeq: number, hasOlderMessages: boolean, lastSeq: number) => set((state) => {
+        setFetching: (sessionId: string, fetching: boolean) => {
+            const existing = sessionMessagesLive.get(sessionId);
+            if (!existing || existing.isFetching === fetching) return;
+            sessionMessagesLive.set(sessionId, { ...existing, isFetching: fetching });
+        },
+        applyHydratedCache: (sessionId: string, messages: Message[], reducerState: ReducerState, oldestSeq: number, hasOlderMessages: boolean, lastSeq: number) => {
             // The stored window is a projection of the log, not of the wire: one message can be
             // two entries (the queued `out` copy and the server's `in` echo) and a window merged
             // from two sources can hold both. Collapsing here is what keeps the list showing one
@@ -1548,33 +1505,27 @@ export const storage = create<StorageState>()((set, get) => {
             for (const msg of sorted) {
                 messagesMap[msg.id] = msg;
             }
-            const totalSeq = state.sessions[sessionId]?.seq ?? 0;
+            const totalSeq = get().sessions[sessionId]?.seq ?? 0;
             const cachedBitmap = computeBitmap(oldestSeq, lastSeq, totalSeq);
 
-            return {
-                ...state,
-                sessionMessages: {
-                    ...state.sessionMessages,
-                    [sessionId]: {
-                        messages: sorted,
-                        messagesMap,
-                        reducerState,
-                        isLoaded: true,
-                        oldestSeq,
-                        newestSeq: lastSeq,
-                        cachedBitmap,
-                        hasOlderMessages,
-                        isLoadingOlder: false,
-                        isFetching: false,
-                    } satisfies SessionMessages,
-                },
-            };
-        }),
-        applyWindow: (sessionId: string, messages: NormalizedMessage[], oldestSeq: number, newestSeq: number, hasOlderMessages: boolean) => set((state) => {
+            sessionMessagesLive.set(sessionId, {
+                messages: sorted,
+                messagesMap,
+                reducerState,
+                isLoaded: true,
+                oldestSeq,
+                newestSeq: lastSeq,
+                cachedBitmap,
+                hasOlderMessages,
+                isLoadingOlder: false,
+                isFetching: false,
+            });
+        },
+        applyWindow: (sessionId: string, messages: NormalizedMessage[], oldestSeq: number, newestSeq: number, hasOlderMessages: boolean) => {
             bump('storeWrites');
             bump('messagesApplied', messages.length);
-            const session = state.sessions[sessionId];
-            const held = state.sessionMessages[sessionId];
+            const session = get().sessions[sessionId];
+            const held = sessionMessagesLive.get(sessionId);
 
             // The page MERGES into whatever is held rather than replacing it. A channel is a
             // source, and no source has the right to discard messages this App already showed —
@@ -1596,7 +1547,7 @@ export const storage = create<StorageState>()((set, get) => {
                 const mergedHasOlder = held.hasOlderMessages || hasOlderMessages;
                 if (!merged && mergedOldest === held.oldestSeq && mergedNewest === held.newestSeq && mergedHasOlder === held.hasOlderMessages) {
                     // Nothing this page carries is new, and the edges did not move.
-                    return state;
+                    return;
                 }
                 if (merged) {
                     messages = merged.messages as unknown as NormalizedMessage[];
@@ -1622,7 +1573,7 @@ export const storage = create<StorageState>()((set, get) => {
             // neighbours is how tool states go wrong.
             let reducerState: ReducerState = createReducer();
             let reduceInput = messages;
-            if (appendOnlyMerge && appendOnlyMerge !== null) {
+            if (appendOnlyMerge && held) {
                 reducerState = held.reducerState;
                 reduceInput = appendOnlyMerge.added as unknown as NormalizedMessage[];
             }
@@ -1646,55 +1597,43 @@ export const storage = create<StorageState>()((set, get) => {
             const totalSeq = session?.seq ?? 0;
             const cachedBitmap = computeBitmap(oldestSeq, newestSeq, totalSeq);
 
-            return {
-                ...state,
-                sessionMessages: {
-                    ...state.sessionMessages,
-                    [sessionId]: {
-                        messages: sorted,
-                        messagesMap: cleanedMap,
-                        reducerState,
-                        isLoaded: true,
-                        oldestSeq,
-                        newestSeq,
-                        cachedBitmap,
-                        hasOlderMessages,
-                        isLoadingOlder: false,
-                        isFetching: false,
-                    } satisfies SessionMessages,
-                },
-            };
-        }),
-        setNewestSeq: (sessionId: string, newestSeq: number) => set((state) => {
-            const existing = state.sessionMessages[sessionId];
-            if (!existing) return state;
+            sessionMessagesLive.set(sessionId, {
+                messages: sorted,
+                messagesMap: cleanedMap,
+                reducerState,
+                isLoaded: true,
+                oldestSeq,
+                newestSeq,
+                cachedBitmap,
+                hasOlderMessages,
+                isLoadingOlder: false,
+                isFetching: false,
+            });
+        },
+        setNewestSeq: (sessionId: string, newestSeq: number) => {
+            const existing = sessionMessagesLive.get(sessionId);
+            if (!existing) return;
             const newNewestSeq = Math.max(existing.newestSeq, newestSeq);
-            // Unchanged means no state to write: returning a new object here re-rendered every
-            // subscriber, including the message list, to show exactly what it already showed.
-            if (newNewestSeq === existing.newestSeq) return state;
-            const totalSeq = state.sessions[sessionId]?.seq ?? 0;
+            // Unchanged means no state to write: notifying here re-rendered the message list to
+            // show exactly what it already showed.
+            if (newNewestSeq === existing.newestSeq) return;
+            const totalSeq = get().sessions[sessionId]?.seq ?? 0;
             const cachedBitmap = computeBitmap(existing.oldestSeq, newNewestSeq, totalSeq);
-            return {
-                ...state,
-                sessionMessages: {
-                    ...state.sessionMessages,
-                    [sessionId]: { ...existing, newestSeq: newNewestSeq, cachedBitmap },
-                },
-            };
-        }),
-        applyOlderMessages: (sessionId: string, olderMessages: NormalizedMessage[], newOldestSeq: number, hasOlderMessages: boolean) => set((state) => {
-            const existing = state.sessionMessages[sessionId];
-            if (!existing) return state;
+            sessionMessagesLive.set(sessionId, { ...existing, newestSeq: newNewestSeq, cachedBitmap });
+        },
+        applyOlderMessages: (sessionId: string, olderMessages: NormalizedMessage[], newOldestSeq: number, hasOlderMessages: boolean) => {
+            const existing = sessionMessagesLive.get(sessionId);
+            if (!existing) return;
             // The window is often patched with an empty batch (a read that establishes the floor
             // without adding messages); when that changes nothing, the state does not change either.
             if (olderMessages.length === 0 && existing.oldestSeq === newOldestSeq && existing.hasOlderMessages === hasOlderMessages) {
-                return state;
+                return;
             }
 
             // Run a fresh temporary reducer on just the older batch.
             // The main reducerState is left intact so incremental (new) messages keep working.
             const tempReducer = createReducer();
-            const session = state.sessions[sessionId];
+            const session = get().sessions[sessionId];
             const reducerResult = reducer(tempReducer, olderMessages, session?.agentState ?? undefined);
 
             const mergedMap = { ...existing.messagesMap };
@@ -1707,37 +1646,25 @@ export const storage = create<StorageState>()((set, get) => {
 
             const sorted = Object.values(mergedMap).sort((a, b) => b.createdAt - a.createdAt);
 
-            const totalSeq = state.sessions[sessionId]?.seq ?? 0;
+            const totalSeq = get().sessions[sessionId]?.seq ?? 0;
             const cachedBitmap = computeBitmap(newOldestSeq, existing.newestSeq, totalSeq);
 
-            return {
-                ...state,
-                sessionMessages: {
-                    ...state.sessionMessages,
-                    [sessionId]: {
-                        ...existing,
-                        messages: sorted,
-                        messagesMap: mergedMap,
-                        oldestSeq: newOldestSeq,
-                        cachedBitmap,
-                        hasOlderMessages,
-                        isLoadingOlder: false,
-                        isFetching: false,
-                    } satisfies SessionMessages,
-                },
-            };
-        }),
-        setLoadingOlder: (sessionId: string, loading: boolean) => set((state) => {
-            const existing = state.sessionMessages[sessionId];
-            if (!existing) return state;
-            return {
-                ...state,
-                sessionMessages: {
-                    ...state.sessionMessages,
-                    [sessionId]: { ...existing, isLoadingOlder: loading },
-                },
-            };
-        }),
+            sessionMessagesLive.set(sessionId, {
+                ...existing,
+                messages: sorted,
+                messagesMap: mergedMap,
+                oldestSeq: newOldestSeq,
+                cachedBitmap,
+                hasOlderMessages,
+                isLoadingOlder: false,
+                isFetching: false,
+            });
+        },
+        setLoadingOlder: (sessionId: string, loading: boolean) => {
+            const existing = sessionMessagesLive.get(sessionId);
+            if (!existing || existing.isLoadingOlder === loading) return;
+            sessionMessagesLive.set(sessionId, { ...existing, isLoadingOlder: loading });
+        },
         applySettingsLocal: (settings: Partial<Settings>) => set((state) => {
             saveSettings(applySettings(state.settings, settings), state.settingsVersion ?? 0);
             return {
@@ -2414,10 +2341,9 @@ export const storage = create<StorageState>()((set, get) => {
                 artifacts: remainingArtifacts
             };
         }),
-        deleteSessionMessages: (sessionId: string) => set((state) => {
-            const { [sessionId]: _deleted, ...remaining } = state.sessionMessages;
-            return { ...state, sessionMessages: remaining };
-        }),
+        deleteSessionMessages: (sessionId: string) => {
+            sessionMessagesLive.delete(sessionId);
+        },
         deleteSession: (sessionId: string) => set((state) => {
             // Remove session from sessions
             const { [sessionId]: _deleted, ...remainingSessions } = state.sessions;
@@ -2435,8 +2361,8 @@ export const storage = create<StorageState>()((set, get) => {
                 })();
 
             // Remove session messages if they exist
-            const { [sessionId]: deletedMessages, ...remainingSessionMessages } = state.sessionMessages;
-            
+            sessionMessagesLive.delete(sessionId);
+
             // Remove session git status if it exists
             const { [sessionId]: deletedGitStatus, ...remainingGitStatus } = state.sessionGitStatus;
             
@@ -2463,7 +2389,6 @@ export const storage = create<StorageState>()((set, get) => {
             return {
                 ...state,
                 sessions: remainingSessions,
-                sessionMessages: remainingSessionMessages,
                 sessionGitStatus: remainingGitStatus,
                 deletedSessions,
                 sessionListViewData
@@ -2778,38 +2703,25 @@ storage.subscribe((state) => {
     });
 });
 
-/**
- * Per-key projections of the two hot maps.
- *
- * These are fed from the store above rather than owning the data yet: every writer still writes
- * `sessions` / `sessionMessages`, and the subscription below copies what moved into the keyed
- * stores. That keeps the migration additive — a hook moved onto these stops being evaluated, and
- * stops rendering, for writes that touch another key — while everything still on `storage(...)`
- * keeps seeing exactly what it saw before.
- *
- * Once the last React subscriber of `state.sessions` / `state.sessionMessages` has moved, the
- * direction flips: these become the source of truth and the whole-map rebuild disappears.
- */
-export const sessionLive = new KeyedStore<Session>();
-export const sessionMessagesLive = new KeyedStore<SessionMessages>();
-
 sessionLive.replaceAll(storage.getState().sessions);
-sessionMessagesLive.replaceAll(storage.getState().sessionMessages);
+
+/**
+ * Imperative read of a session's message window, for the sync engine and other non-React callers.
+ * React code uses `useSessionMessages` / `useMessage` / `useSessionIsFetching` instead.
+ */
+export function getSessionMessages(sessionId: string): SessionMessages | undefined {
+    return sessionMessagesLive.get(sessionId);
+}
 
 let mirroredSessions = storage.getState().sessions;
-let mirroredMessages = storage.getState().sessionMessages;
 
 storage.subscribe((state) => {
-    // Identity is the signal: `applySessions` and `applyMessages` build a new map on every write,
-    // and every unchanged entry inside it keeps its object. So this walks the map but only marks
-    // the keys that actually moved.
+    // Identity is the signal: `applySessions` builds a new map on every write, and every
+    // unchanged entry inside it keeps its object. So this walks the map but only marks the keys
+    // that actually moved.
     if (state.sessions !== mirroredSessions) {
         mirroredSessions = state.sessions;
         sessionLive.replaceAll(mirroredSessions);
-    }
-    if (state.sessionMessages !== mirroredMessages) {
-        mirroredMessages = state.sessionMessages;
-        sessionMessagesLive.replaceAll(mirroredMessages);
     }
 });
 

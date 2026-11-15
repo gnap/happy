@@ -9,7 +9,7 @@ import {
     formatSessionOffline,
     formatSessionOnline
 } from './contextFormatters';
-import { storage } from '@/sync/storage';
+import { storage, getSessionMessages } from '@/sync/storage';
 import { Message } from '@/sync/typesMessage';
 import { VOICE_CONFIG } from '../voiceConfig';
 
@@ -72,7 +72,7 @@ function reportSession(sessionId: string) {
     shownSessions.add(sessionId);
     const session = storage.getState().sessions[sessionId];
     if (!session) return;
-    const messages = storage.getState().sessionMessages[sessionId]?.messages ?? [];
+    const messages = getSessionMessages(sessionId)?.messages ?? [];
     const startedAt = Date.now();
     const contextUpdate = formatSessionFull(session, messages);
     const ms = Date.now() - startedAt;
@@ -147,7 +147,7 @@ export const voiceHooks = {
         }
         shownSessions.clear();
         let prompt = '';
-        prompt += 'THIS IS AN ACTIVE SESSION: \n\n' + formatSessionFull(storage.getState().sessions[sessionId], storage.getState().sessionMessages[sessionId]?.messages ?? []);
+        prompt += 'THIS IS AN ACTIVE SESSION: \n\n' + formatSessionFull(storage.getState().sessions[sessionId], getSessionMessages(sessionId)?.messages ?? []);
         shownSessions.add(sessionId);
         // prompt += 'Another active sessions: \n\n';
         // for (let s of storage.getState().getActiveSessions()) {
