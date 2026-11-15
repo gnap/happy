@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { sync } from '@/sync/sync';
 import { sessionAllow, sessionDeny } from '@/sync/ops';
-import { storage } from '@/sync/storage';
+import { getSession, storage } from '@/sync/storage';
 import { trackPermissionResponse } from '@/track';
 import { getCurrentRealtimeSessionId } from './RealtimeSession';
 
@@ -64,7 +64,7 @@ export const realtimeClientTools = {
         console.log('🔍 processPermissionRequest called with:', decision);
         
         // Get the current session to check for permission requests
-        const session = storage.getState().sessions[sessionId];
+        const session = getSession(sessionId);
         const requests = session?.agentState?.requests;
         
         if (!requests || Object.keys(requests).length === 0) {

@@ -19,7 +19,7 @@ import { channelDrivers, type ChannelState } from './channels/measure';
 import { candidateFailed as candidateFailedAt, candidateKey, candidateSucceeded, rearmAll, type CandidateHealth } from './channels/health';
 import type { ChannelDriver, ChannelLinkState, SessionReach } from './channels/types';
 import { resolveSessionReach } from './channels/resolve';
-import { KeyedStore, shallowEqual, useKeyedSelector, useKeyedValue } from './live';
+import { KeyedStore, shallowEqual, useAllKeyedValues, useKeyedSelector, useKeyedValue } from './live';
 
 export { channelLinks, type ChannelLink } from './channelLinks';
 export type { ChannelLinkState } from './channels/types';
@@ -130,7 +130,6 @@ interface StorageState {
     localSettings: LocalSettings;
     purchases: Purchases;
     profile: Profile;
-    sessions: Record<string, Session>;
     sessionListViewData: SessionListViewItem[] | null;
     outbox: Record<string, OutboxEntry>;
     sessionGitStatus: Record<string, GitStatus | null>;
@@ -933,11 +932,24 @@ function sameWireSession(a: WireSession, b: WireSession): boolean {
  * write these keys directly, so appending a message no longer replaces a whole map (and no longer
  * runs every selector in the App) — it wakes the chat of that session and nothing else.
  *
- * `sessions` is still written through the store and mirrored down by the subscription after it;
- * when its last React subscriber moves, the same flip removes that last whole-map rebuild.
+ * `sessions` lives here too. The actions write those keys directly, the list is recomputed once
+ * per flush from `snapshot()`, and a row subscribes to its own session — so an update to one
+ * session no longer runs every selector in the App.
  */
 export const sessionLive = new KeyedStore<Session>();
 export const sessionMessagesLive = new KeyedStore<SessionMessages>();
+
+/**
+ * A store snapshot with the sessions map folded back in.
+ *
+ * The channel layer was written against one object holding both the channel facts and the
+ * sessions they are resolved for, and that shape is still the clearest way to build it: the
+ * drivers read `session()` out of the same snapshot as `socketStatus`. Sessions no longer live in
+ * the zustand state, so this is where they are added back for those calls.
+ */
+function withSessions(state: StorageState): StorageState & { sessions: Record<string, Session> } {
+    return { ...state, sessions: sessionLive.snapshot() };
+}
 
 export const storage = create<StorageState>()((set, get) => {
     let { settings, version } = loadSettings();
@@ -954,7 +966,6 @@ export const storage = create<StorageState>()((set, get) => {
         localSettings,
         purchases,
         profile,
-        sessions: {},
         machines: {},
         lanSightings: {},
         relayEndpoints: loadRelayEndpoints(),
@@ -1087,13 +1098,18 @@ export const storage = create<StorageState>()((set, get) => {
         },
         getActiveSessions: () => {
             const state = get();
+            const sessions = sessionLive.snapshot();
             // "Active" here feeds the voice hooks — a session that has gone away, and one that has
             // come back — so it has to mean what the rest of the App means by online, not what the
             // server last managed to hear.
-            const drivers = channelDrivers(state, state.localSettings.channelPriority);
-            return Object.values(state.sessions).filter(s => resolveSessionReach(s.id, s.metadata?.machineId, drivers).online);
+            const drivers = channelDrivers({ ...state, sessions }, state.localSettings.channelPriority);
+            return Object.values(sessions).filter(s => resolveSessionReach(s.id, s.metadata?.machineId, drivers).online);
         },
         applySessions: (offered: (Omit<Session, 'presence'> & { presence?: "online" | number })[], fullRefresh?: boolean) => set((state) => {
+            // The sessions map lives in the keyed store; this action is one of its writers. The
+            // list and the channel answers are recomputed once per flush by the subscription
+            // below, so a list refresh does not have to wake the zustand store at all.
+            const heldSessions = sessionLive.snapshot();
             // A session this device deleted is not offered again by any channel. Both sources lag
             // the deletion while it reaches them — a machine's catalog keeps listing a row until
             // its own delete is written, and the server keeps serving one until that deletion is
@@ -1103,14 +1119,14 @@ export const storage = create<StorageState>()((set, get) => {
             // and used to be reached every two seconds by the activity heartbeat. Compare the
             // fields the merge below can change before touching MMKV, the list, or the store.
             if (!fullRefresh && sessions.every((session) => {
-                const existing = state.sessions[session.id];
+                const existing = heldSessions[session.id];
                 return existing !== undefined && sameWireSession(existing, session);
             })) {
                 return state;
             }
 
             // Drafts: only from MMKV on initial load. Permission/model: read MMKV every time so restart/refresh keeps selection (metadata first, then existing, then MMKV, then server).
-            const savedDrafts = Object.keys(state.sessions).length === 0 ? sessionDrafts : {};
+            const savedDrafts = Object.keys(heldSessions).length === 0 ? sessionDrafts : {};
             const savedPermissionModes = loadSessionPermissionModes();
             const savedModelModes = loadSessionModelModes();
             const savedMaxModes = loadSessionMaxModes();
@@ -1121,8 +1137,8 @@ export const storage = create<StorageState>()((set, get) => {
             // this App learned from a daemon is not the server's to drop because the server's page
             // did not mention it. Delta refresh: merge as before.
             const mergedSessions: Record<string, Session> = fullRefresh
-                ? Object.fromEntries(Object.entries(state.sessions).filter(([, session]) => session.origin === 'daemon'))
-                : { ...state.sessions };
+                ? Object.fromEntries(Object.entries(heldSessions).filter(([, session]) => session.origin === 'daemon'))
+                : { ...heldSessions };
 
             // Update sessions with calculated presence using centralized resolver
             sessions.forEach(session => {
@@ -1130,7 +1146,7 @@ export const storage = create<StorageState>()((set, get) => {
                 // batch only gets here when *something* in it moved. Keeping the untouched ones
                 // is what lets a write wake the row and the chat of the session it is about, and
                 // nothing else: identity is what the per-key stores below watch.
-                const current = fullRefresh ? undefined : state.sessions[session.id];
+                const current = fullRefresh ? undefined : heldSessions[session.id];
                 if (current && sameWireSession(current, session)) {
                     return;
                 }
@@ -1141,9 +1157,9 @@ export const storage = create<StorageState>()((set, get) => {
                 // Draft: existing || saved || session. Permission: same as model — user's explicit local choice
                 // (existing/saved) takes priority over server-pushed metadata so an ACP permission change in the UI
                 // is not immediately overwritten by config_options_update / current_mode_update from the agent.
-                const existingDraft = fullRefresh ? undefined : state.sessions[session.id]?.draft;
+                const existingDraft = fullRefresh ? undefined : heldSessions[session.id]?.draft;
                 const savedDraft = savedDrafts[session.id];
-                const existingPermissionMode = fullRefresh ? undefined : state.sessions[session.id]?.permissionMode;
+                const existingPermissionMode = fullRefresh ? undefined : heldSessions[session.id]?.permissionMode;
                 const savedPermissionMode = savedPermissionModes[session.id];
                 const defaultPermissionMode: PermissionModeKey = isSandboxEnabled(session.metadata) ? 'bypassPermissions' : 'default';
                 const metadataPermission = session.metadata?.currentOperatingModeCode?.trim();
@@ -1154,7 +1170,7 @@ export const storage = create<StorageState>()((set, get) => {
                     (session.permissionMode && session.permissionMode !== 'default' ? session.permissionMode : undefined) ??
                     (metadataPermission ? metadataPermission : undefined) ??
                     defaultPermissionMode;
-                const existing = fullRefresh ? undefined : state.sessions[session.id];
+                const existing = fullRefresh ? undefined : heldSessions[session.id];
                 const metadataModel = session.metadata?.currentModelCode?.trim();
                 const existingModelMode = existing?.modelMode;
                 const savedModelMode = savedModelModes[session.id];
@@ -1181,7 +1197,7 @@ export const storage = create<StorageState>()((set, get) => {
                 const metadataProfileId = savedIsNone ? undefined : (session.metadata?.profileId ?? undefined);
                 const resolvedProfileId = existingProfileId ?? metadataProfileId ?? (savedIsNone ? null : savedProfileId) ?? session.profileId ?? undefined;
                 // Sandbox isolation: local preference > metadata
-                const existingSandboxIsolation = state.sessions[session.id]?.sandboxIsolation;
+                const existingSandboxIsolation = heldSessions[session.id]?.sandboxIsolation;
                 const savedSandboxIsolation = savedSandboxIsolations[session.id];
                 const metadataSandboxIsolation = session.metadata?.currentSandboxIsolation
                     ?? (isSandboxEnabled(session.metadata)
@@ -1222,7 +1238,7 @@ export const storage = create<StorageState>()((set, get) => {
             // session whose agent state moved is written; a plain list refresh writes nothing.
             sessions.forEach(session => {
                 // On full refresh, old state doesn't exist; skip AgentState diff.
-                const oldSession = fullRefresh ? undefined : state.sessions[session.id];
+                const oldSession = fullRefresh ? undefined : heldSessions[session.id];
                 const newSession = mergedSessions[session.id];
 
                 // Check if sessionMessages exists AND agentStateVersion is newer
@@ -1310,14 +1326,6 @@ export const storage = create<StorageState>()((set, get) => {
                 }
             });
 
-            // Build new unified list view data
-            const sessionListViewData = buildSessionListViewData(
-                mergedSessions,
-                state.machines,
-                state.daemonVersions,
-                channelDrivers(state, state.localSettings.channelPriority),
-            );
-
             // Update project manager with current sessions and machines
             const machineMetadataMap = new Map<string, any>();
             Object.values(state.machines).forEach(machine => {
@@ -1327,11 +1335,10 @@ export const storage = create<StorageState>()((set, get) => {
             });
             projectManager.updateSessions(Object.values(mergedSessions), machineMetadataMap);
 
-            return {
-                ...state,
-                sessions: mergedSessions,
-                sessionListViewData,
-            };
+            // Entries that did not move keep their identity, so this wakes only the keys that
+            // changed. The list rebuild rides the flush, not this call.
+            sessionLive.replaceAll(mergedSessions);
+            return state;
         }),
         applyReady: () => set((state) => ({
             ...state,
@@ -1362,7 +1369,7 @@ export const storage = create<StorageState>()((set, get) => {
                 };
 
                 // Get the session's agentState if available
-                const session = state.sessions[sessionId];
+                const session = sessionLive.get(sessionId);
                 const agentState = session?.agentState;
 
                 // Messages are already normalized, no need to process them again
@@ -1392,22 +1399,18 @@ export const storage = create<StorageState>()((set, get) => {
                 // Update session with todos and latestUsage
                 // IMPORTANT: We extract latestUsage from the mutable reducerState and copy it to the Session object
                 // This ensures latestUsage is available immediately on load, even before messages are fully loaded
-                let updatedSessions = state.sessions;
                 const needsUpdate = (reducerResult.todos !== undefined || reducerResult.tasks !== undefined || existingSession.reducerState.latestUsage) && session;
 
                 if (needsUpdate) {
-                    updatedSessions = {
-                        ...state.sessions,
-                        [sessionId]: {
-                            ...session,
-                            ...(reducerResult.todos !== undefined && { todos: reducerResult.todos }),
-                            ...(reducerResult.tasks !== undefined && { tasks: reducerResult.tasks }),
-                            // Copy latestUsage from reducerState to make it immediately available
-                            latestUsage: existingSession.reducerState.latestUsage ? {
-                                ...existingSession.reducerState.latestUsage
-                            } : session.latestUsage
-                        }
-                    };
+                    sessionLive.set(sessionId, {
+                        ...session,
+                        ...(reducerResult.todos !== undefined && { todos: reducerResult.todos }),
+                        ...(reducerResult.tasks !== undefined && { tasks: reducerResult.tasks }),
+                        // Copy latestUsage from reducerState to make it immediately available
+                        latestUsage: existingSession.reducerState.latestUsage ? {
+                            ...existingSession.reducerState.latestUsage
+                        } : session.latestUsage
+                    });
                 }
 
                 sessionMessagesLive.set(sessionId, {
@@ -1418,10 +1421,9 @@ export const storage = create<StorageState>()((set, get) => {
                     isLoaded: true
                 });
 
-                // A message append is not a list event: only the session object changes when the
-                // reducer learned something new about it (todos, usage). Returning the same state
-                // otherwise means the append wakes the chat, and nothing else.
-                return updatedSessions === state.sessions ? state : { ...state, sessions: updatedSessions };
+                // A message append is not a list event: the two keyed stores carry everything it
+                // changed, and the zustand state is left exactly as it was.
+                return state;
             });
 
             return { changed: Array.from(changed), hasReadyEvent };
@@ -1431,7 +1433,7 @@ export const storage = create<StorageState>()((set, get) => {
 
             if (!existingSession) {
                 // First time loading - check for AgentState
-                const session = state.sessions[sessionId];
+                const session = sessionLive.get(sessionId);
                 const agentState = session?.agentState;
 
                 // Create new reducer state
@@ -1469,16 +1471,10 @@ export const storage = create<StorageState>()((set, get) => {
 
                 // Extract latestUsage from reducerState if available and update session
                 if (session && reducerState.latestUsage) {
-                    return {
-                        ...state,
-                        sessions: {
-                            ...state.sessions,
-                            [sessionId]: {
-                                ...session,
-                                latestUsage: { ...reducerState.latestUsage }
-                            }
-                        },
-                    };
+                    sessionLive.set(sessionId, {
+                        ...session,
+                        latestUsage: { ...reducerState.latestUsage }
+                    });
                 }
                 return state;
             }
@@ -1505,7 +1501,7 @@ export const storage = create<StorageState>()((set, get) => {
             for (const msg of sorted) {
                 messagesMap[msg.id] = msg;
             }
-            const totalSeq = get().sessions[sessionId]?.seq ?? 0;
+            const totalSeq = sessionLive.get(sessionId)?.seq ?? 0;
             const cachedBitmap = computeBitmap(oldestSeq, lastSeq, totalSeq);
 
             sessionMessagesLive.set(sessionId, {
@@ -1524,7 +1520,7 @@ export const storage = create<StorageState>()((set, get) => {
         applyWindow: (sessionId: string, messages: NormalizedMessage[], oldestSeq: number, newestSeq: number, hasOlderMessages: boolean) => {
             bump('storeWrites');
             bump('messagesApplied', messages.length);
-            const session = get().sessions[sessionId];
+            const session = sessionLive.get(sessionId);
             const held = sessionMessagesLive.get(sessionId);
 
             // The page MERGES into whatever is held rather than replacing it. A channel is a
@@ -1617,7 +1613,7 @@ export const storage = create<StorageState>()((set, get) => {
             // Unchanged means no state to write: notifying here re-rendered the message list to
             // show exactly what it already showed.
             if (newNewestSeq === existing.newestSeq) return;
-            const totalSeq = get().sessions[sessionId]?.seq ?? 0;
+            const totalSeq = sessionLive.get(sessionId)?.seq ?? 0;
             const cachedBitmap = computeBitmap(existing.oldestSeq, newNewestSeq, totalSeq);
             sessionMessagesLive.set(sessionId, { ...existing, newestSeq: newNewestSeq, cachedBitmap });
         },
@@ -1633,7 +1629,7 @@ export const storage = create<StorageState>()((set, get) => {
             // Run a fresh temporary reducer on just the older batch.
             // The main reducerState is left intact so incremental (new) messages keep working.
             const tempReducer = createReducer();
-            const session = get().sessions[sessionId];
+            const session = sessionLive.get(sessionId);
             const reducerResult = reducer(tempReducer, olderMessages, session?.agentState ?? undefined);
 
             const mergedMap = { ...existing.messagesMap };
@@ -1646,7 +1642,7 @@ export const storage = create<StorageState>()((set, get) => {
 
             const sorted = Object.values(mergedMap).sort((a, b) => b.createdAt - a.createdAt);
 
-            const totalSeq = get().sessions[sessionId]?.seq ?? 0;
+            const totalSeq = sessionLive.get(sessionId)?.seq ?? 0;
             const cachedBitmap = computeBitmap(newOldestSeq, existing.newestSeq, totalSeq);
 
             sessionMessagesLive.set(sessionId, {
@@ -1774,16 +1770,16 @@ export const storage = create<StorageState>()((set, get) => {
                 ...updates
             };
         }),
-        updateSessionDraft: (sessionId: string, draft: string | null) => set((state) => {
-            const session = state.sessions[sessionId];
-            if (!session) return state;
+        updateSessionDraft: (sessionId: string, draft: string | null) => {
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
             // Don't store empty strings, convert to null
             const normalizedDraft = draft?.trim() ? draft : null;
 
             // Collect all drafts for persistence
             const allDrafts: Record<string, string> = {};
-            Object.entries(state.sessions).forEach(([id, sess]) => {
+            Object.entries(sessionLive.snapshot()).forEach(([id, sess]) => {
                 if (id === sessionId) {
                     if (normalizedDraft) {
                         allDrafts[id] = normalizedDraft;
@@ -1796,163 +1792,84 @@ export const storage = create<StorageState>()((set, get) => {
             // Persist drafts
             saveSessionDrafts(allDrafts);
 
-            const updatedSessions = {
-                ...state.sessions,
-                [sessionId]: {
-                    ...session,
-                    draft: normalizedDraft
-                }
-            };
+            sessionLive.set(sessionId, { ...session, draft: normalizedDraft });
+        },
+        updateSessionPermissionMode: (sessionId: string, mode: string) => {
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
-            // Rebuild sessionListViewData to update the UI immediately
-            const sessionListViewData = buildSessionListViewData(
-                updatedSessions,
-                state.machines,
-                            state.daemonVersions,
-                            channelDrivers(state, state.localSettings.channelPriority),
-            );
+            sessionLive.set(sessionId, { ...session, permissionMode: mode });
 
-            return {
-                ...state,
-                sessions: updatedSessions,
-                sessionListViewData
-            };
-        }),
-        updateSessionPermissionMode: (sessionId: string, mode: string) => set((state) => {
-            const session = state.sessions[sessionId];
-            if (!session) return state;
-
-            const updatedSessions = {
-                ...state.sessions,
-                [sessionId]: {
-                    ...session,
-                    permissionMode: mode
-                }
-            };
             const allModes: Record<string, string> = {};
-            Object.entries(updatedSessions).forEach(([id, sess]) => {
+            Object.entries(sessionLive.snapshot()).forEach(([id, sess]) => {
                 if (sess.permissionMode && sess.permissionMode !== 'default') {
                     allModes[id] = sess.permissionMode;
                 }
             });
             saveSessionPermissionModes(allModes);
+        },
+        updateSessionModelMode: (sessionId: string, mode: string) => {
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
-            return {
-                ...state,
-                sessions: updatedSessions
-            };
-        }),
-        updateSessionModelMode: (sessionId: string, mode: string) => set((state) => {
-            const session = state.sessions[sessionId];
-            if (!session) return state;
+            sessionLive.set(sessionId, { ...session, modelMode: mode });
 
-            const updatedSessions = {
-                ...state.sessions,
-                [sessionId]: {
-                    ...session,
-                    modelMode: mode
-                }
-            };
             const allModelModes: Record<string, string> = {};
-            Object.entries(updatedSessions).forEach(([id, sess]) => {
+            Object.entries(sessionLive.snapshot()).forEach(([id, sess]) => {
                 if (sess.modelMode != null && sess.modelMode !== '') {
                     allModelModes[id] = sess.modelMode;
                 }
             });
             saveSessionModelModes(allModelModes);
-
-            return {
-                ...state,
-                sessions: updatedSessions
-            };
-        }),
-        clearSessionModelMode: (sessionId: string) => set((state) => {
-            const session = state.sessions[sessionId];
-            if (!session) return state;
+        },
+        clearSessionModelMode: (sessionId: string) => {
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
             // Clear persisted override so the next applySessions uses CLI's metadata.currentModelCode
             const modelModes = loadSessionModelModes();
             delete modelModes[sessionId];
             saveSessionModelModes(modelModes);
 
-            return {
-                ...state,
-                sessions: {
-                    ...state.sessions,
-                    [sessionId]: { ...session, modelMode: undefined }
-                }
-            };
-        }),
-        updateSessionMaxMode: (sessionId: string, maxMode: boolean) => set((state) => {
-            const session = state.sessions[sessionId];
-            if (!session) return state;
+            sessionLive.set(sessionId, { ...session, modelMode: undefined });
+        },
+        updateSessionMaxMode: (sessionId: string, maxMode: boolean) => {
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
-            const updatedSessions = {
-                ...state.sessions,
-                [sessionId]: {
-                    ...session,
-                    maxMode,
-                },
-            };
+            sessionLive.set(sessionId, { ...session, maxMode });
+
             const allMaxModes: Record<string, boolean> = {};
-            Object.entries(updatedSessions).forEach(([id, sess]) => {
+            Object.entries(sessionLive.snapshot()).forEach(([id, sess]) => {
                 if (sess.maxMode !== undefined && sess.maxMode !== null) {
                     allMaxModes[id] = sess.maxMode;
                 }
             });
             saveSessionMaxModes(allMaxModes);
-
-            return {
-                ...state,
-                sessions: updatedSessions,
-            };
-        }),
-        clearSessionMaxMode: (sessionId: string) => set((state) => {
-            const session = state.sessions[sessionId];
-            if (!session) return state;
+        },
+        clearSessionMaxMode: (sessionId: string) => {
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
             const maxModes = loadSessionMaxModes();
             delete maxModes[sessionId];
             saveSessionMaxModes(maxModes);
 
-            return {
-                ...state,
-                sessions: {
-                    ...state.sessions,
-                    [sessionId]: { ...session, maxMode: undefined },
-                },
-            };
-        }),
-        updateSessionThinkingLevel: (sessionId: string, level: 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null) => set((state) => {
-            const session = state.sessions[sessionId];
-            if (!session) return state;
+            sessionLive.set(sessionId, { ...session, maxMode: undefined });
+        },
+        updateSessionThinkingLevel: (sessionId: string, level: 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null) => {
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
-            return {
-                ...state,
-                sessions: {
-                    ...state.sessions,
-                    [sessionId]: {
-                        ...session,
-                        thinkingLevel: level ?? undefined,
-                    },
-                },
-            };
-        }),
-        clearSessionThinkingLevel: (sessionId: string) => set((state) => {
-            const session = state.sessions[sessionId];
-            if (!session) return state;
+            sessionLive.set(sessionId, { ...session, thinkingLevel: level ?? undefined });
+        },
+        clearSessionThinkingLevel: (sessionId: string) => {
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
-            return {
-                ...state,
-                sessions: {
-                    ...state.sessions,
-                    [sessionId]: { ...session, thinkingLevel: undefined },
-                },
-            };
-        }),
-        updateSessionProfileId: (sessionId: string, profileId: string | null) => set((state) => {
-            const session = state.sessions[sessionId];
-
+            sessionLive.set(sessionId, { ...session, thinkingLevel: undefined });
+        },
+        updateSessionProfileId: (sessionId: string, profileId: string | null) => {
             // Persist to MMKV. '__none__' sentinel for explicit "No Profile" choice.
             const profileIds = loadSessionProfileIds();
             if (profileId !== null) {
@@ -1962,114 +1879,67 @@ export const storage = create<StorageState>()((set, get) => {
             }
             saveSessionProfileIds(profileIds);
 
-            if (!session) return state;
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
-            return {
-                ...state,
-                sessions: {
-                    ...state.sessions,
-                    [sessionId]: {
-                        ...session,
-                        profileId: profileId ?? undefined,
-                    },
-                },
-            };
-        }),
-        clearSessionProfileId: (sessionId: string) => set((state) => {
-            const session = state.sessions[sessionId];
-
+            sessionLive.set(sessionId, { ...session, profileId: profileId ?? undefined });
+        },
+        clearSessionProfileId: (sessionId: string) => {
             // Always clear MMKV so it doesn't leak a stale entry.
             const profileIds = loadSessionProfileIds();
             delete profileIds[sessionId];
             saveSessionProfileIds(profileIds);
 
-            if (!session) return state;
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
-            return {
-                ...state,
-                sessions: {
-                    ...state.sessions,
-                    [sessionId]: { ...session, profileId: undefined },
-                },
-            };
-        }),
-        releaseSessionProfileId: (sessionId: string) => set((state) => {
-            const session = state.sessions[sessionId];
-            if (!session) return state;
+            sessionLive.set(sessionId, { ...session, profileId: undefined });
+        },
+        releaseSessionProfileId: (sessionId: string) => {
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
             // Only clear in-memory state — keep MMKV for cold-start fallback.
             // remote (metadata.profileId) will win on next applySessions resolution.
-            return {
-                ...state,
-                sessions: {
-                    ...state.sessions,
-                    [sessionId]: { ...session, profileId: undefined },
-                },
-            };
-        }),
-        updateSessionSandboxIsolation: (sessionId: string, isolation: string) => set((state) => {
-            const session = state.sessions[sessionId];
-            if (!session) return state;
+            sessionLive.set(sessionId, { ...session, profileId: undefined });
+        },
+        updateSessionSandboxIsolation: (sessionId: string, isolation: string) => {
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
-            const updatedSessions = {
-                ...state.sessions,
-                [sessionId]: {
-                    ...session,
-                    sandboxIsolation: isolation
-                }
-            };
+            sessionLive.set(sessionId, { ...session, sandboxIsolation: isolation });
+
             const allIsolations: Record<string, string> = {};
-            Object.entries(updatedSessions).forEach(([id, sess]) => {
+            Object.entries(sessionLive.snapshot()).forEach(([id, sess]) => {
                 if (sess.sandboxIsolation && sess.sandboxIsolation !== 'off') {
                     allIsolations[id] = sess.sandboxIsolation;
                 }
             });
             saveSessionSandboxIsolations(allIsolations);
-
-            return {
-                ...state,
-                sessions: updatedSessions
-            };
-        }),
-        clearSessionSandboxIsolation: (sessionId: string) => set((state) => {
-            const session = state.sessions[sessionId];
-            if (!session) return state;
+        },
+        clearSessionSandboxIsolation: (sessionId: string) => {
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
             // Clear in-memory and MMKV
-            const updatedSessions = {
-                ...state.sessions,
-                [sessionId]: {
-                    ...session,
-                    sandboxIsolation: undefined
-                }
-            };
+            sessionLive.set(sessionId, { ...session, sandboxIsolation: undefined });
+
             const allIsolations: Record<string, string> = {};
-            Object.entries(updatedSessions).forEach(([id, sess]) => {
+            Object.entries(sessionLive.snapshot()).forEach(([id, sess]) => {
                 if (sess.sandboxIsolation && sess.sandboxIsolation !== 'off') {
                     allIsolations[id] = sess.sandboxIsolation;
                 }
             });
             saveSessionSandboxIsolations(allIsolations);
-
-            return {
-                ...state,
-                sessions: updatedSessions
-            };
-        }),
-        releaseSessionSandboxIsolation: (sessionId: string) => set((state) => {
-            const session = state.sessions[sessionId];
-            if (!session) return state;
+        },
+        releaseSessionSandboxIsolation: (sessionId: string) => {
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
             // Only clear in-memory — keep MMKV for cold-start fallback.
             // remote (metadata.currentSandboxIsolation) will win on next applySessions resolution.
-            return {
-                ...state,
-                sessions: {
-                    ...state.sessions,
-                    [sessionId]: { ...session, sandboxIsolation: undefined },
-                },
-            };
-        }),
+            sessionLive.set(sessionId, { ...session, sandboxIsolation: undefined });
+        },
         // Project management methods
         getProjects: () => projectManager.getProjects(),
         getProject: (projectId: string) => projectManager.getProject(projectId),
@@ -2108,19 +1978,10 @@ export const storage = create<StorageState>()((set, get) => {
                 return state;
             }
 
-            // Rebuild sessionListViewData to reflect machine changes — from the merged machines,
-            // which is what this rebuild is for; the previous rows were built from the old ones.
-            const sessionListViewData = buildSessionListViewData(
-                state.sessions,
-                mergedMachines,
-                state.daemonVersions,
-                channelDrivers(state, state.localSettings.channelPriority),
-            );
-
+            // The derived subscription rebuilds sessionListViewData for this machines change.
             return {
                 ...state,
                 machines: mergedMachines,
-                sessionListViewData
             };
         }),
         setDaemonSocketStatus: (id, status) => set((state) => {
@@ -2154,22 +2015,16 @@ export const storage = create<StorageState>()((set, get) => {
             // directory lags the machine's own channels by up to one publish, so "this row no
             // longer says restarting" is not yet the machine saying it is over; the grace period
             // is what retires a marker nothing refreshed.
-            const withRestarts = { ...state.sessions };
-            let changed = false;
             for (const entry of entries) {
                 for (const row of entry.sessions) {
                     if (row.restartingSince === undefined || !row.happySessionId) continue;
-                    const known = withRestarts[row.happySessionId];
+                    const known = sessionLive.get(row.happySessionId);
                     if (known && known.restartingAt !== row.restartingSince) {
-                        withRestarts[row.happySessionId] = { ...known, restartingAt: row.restartingSince };
-                        changed = true;
+                        sessionLive.set(row.happySessionId, { ...known, restartingAt: row.restartingSince });
                     }
                 }
             }
-            if (!changed) {
-                return { ...state, relayDirectory: next, relayUnknownTags: unknownTags };
-            }
-            return { ...state, sessions: withRestarts, relayDirectory: next, relayUnknownTags: unknownTags };
+            return { ...state, relayDirectory: next, relayUnknownTags: unknownTags };
         }),
         setRelayHubConnected: (connected) => set((state) => (
             state.relayHubConnected === connected ? state : { ...state, relayHubConnected: connected }
@@ -2227,20 +2082,11 @@ export const storage = create<StorageState>()((set, get) => {
                 delete next[machineId];
                 return { ...state, daemonVersions: next };
             }
-            const daemonVersions = { ...state.daemonVersions, [machineId]: { ...versions, at } };
-            // The list is built by an action, not by a selector, so nothing else recomputes it when
-            // this arrives — and the row's restart mark is decided inside that build. Recording a
-            // version without rebuilding the list would leave the mark computed from a snapshot in
-            // which the machine had never answered.
+            // The derived subscription rebuilds the list for this version change; the row's restart
+            // mark is decided inside that build, now that the machine has answered.
             return {
                 ...state,
-                daemonVersions,
-                sessionListViewData: buildSessionListViewData(
-                    state.sessions,
-                    state.machines,
-                    daemonVersions,
-                    channelDrivers(state, state.localSettings.channelPriority),
-                ),
+                daemonVersions: { ...state.daemonVersions, [machineId]: { ...versions, at } },
             };
         }),
         applyDaemonSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string; via: DaemonRoute; origin?: 'daemon' | 'server'; restartingSince?: number; desktop?: { required: boolean; available: boolean } }[] | null) => set((state) => {
@@ -2255,7 +2101,6 @@ export const storage = create<StorageState>()((set, get) => {
             // The same fact the daemon pushes, arriving the other way: a device that reads a
             // listing instead of holding a socket has to be told, and a restarting session is
             // listed with no live process — which is why the field travels with the listing at all.
-            const withRestarts = { ...state.sessions };
             for (const session of sessions) {
                 next[session.happySessionId] = {
                     ...(session.desktop ? { desktop: session.desktop } : {}),
@@ -2267,9 +2112,9 @@ export const storage = create<StorageState>()((set, get) => {
                     at,
                     ...(session.restartingSince !== undefined ? { restartingSince: session.restartingSince } : {}),
                 };
-                const known = withRestarts[session.happySessionId];
-                if (known && session.restartingSince !== undefined) {
-                    withRestarts[session.happySessionId] = { ...known, restartingAt: session.restartingSince };
+                const known = sessionLive.get(session.happySessionId);
+                if (known && session.restartingSince !== undefined && known.restartingAt !== session.restartingSince) {
+                    sessionLive.set(session.happySessionId, { ...known, restartingAt: session.restartingSince });
                 }
             }
             // A heartbeat moving is not a change the list draws: the summaries differ every few
@@ -2285,7 +2130,7 @@ export const storage = create<StorageState>()((set, get) => {
             if (stable(state.daemonSessionList) === stable(next)) {
                 return state;
             }
-            return { ...state, sessions: withRestarts, daemonSessionList: next };
+            return { ...state, daemonSessionList: next };
         }),
         setSessionChannelOverride: (sessionId: string, channel: SessionChannel | null) => set((state) => {
             if (channel === null) {
@@ -2345,8 +2190,8 @@ export const storage = create<StorageState>()((set, get) => {
             sessionMessagesLive.delete(sessionId);
         },
         deleteSession: (sessionId: string) => set((state) => {
-            // Remove session from sessions
-            const { [sessionId]: _deleted, ...remainingSessions } = state.sessions;
+            // Remove session from the keyed store; the derived subscription rebuilds the list.
+            sessionLive.delete(sessionId);
 
             // The deletion outlives this list. A machine's catalog and the server's sessions page
             // both keep offering a session until the deletion reaches them, and the row would come
@@ -2383,15 +2228,10 @@ export const storage = create<StorageState>()((set, get) => {
             delete profileIds[sessionId];
             saveSessionProfileIds(profileIds);
 
-            // Rebuild sessionListViewData without the deleted session
-            const sessionListViewData = buildSessionListViewData(remainingSessions, state.machines, state.daemonVersions, channelDrivers(state, state.localSettings.channelPriority));
-            
             return {
                 ...state,
-                sessions: remainingSessions,
                 sessionGitStatus: remainingGitStatus,
                 deletedSessions,
-                sessionListViewData
             };
         }),
         // Outbox (send status tracking)
@@ -2570,13 +2410,14 @@ export const storage = create<StorageState>()((set, get) => {
  * Every writer is covered here instead of one at a time. The inputs are compared by
  * identity, so a rebuild that only writes the list does not trigger another one.
  *
- * The session's own restarting state rides on the sessions themselves, so a push that changes it
- * is already a change to one of these inputs. What a channel is reaching is not on a session, so
- * the channel state is compared here too — a LAN socket coming up is the difference between a row
- * that reads offline and the same row reading online.
+ * The sessions are not in the zustand state any more, so this subscribes to the keyed store as
+ * well: any session write reaches `recomputeDerived` through `subscribeAll` once per flush, and
+ * the input it compares against is the store's own version. What a channel is reaching is not on
+ * a session, so the channel state is compared here too — a LAN socket coming up is the
+ * difference between a row that reads offline and the same row reading online.
  */
 const builtFrom: {
-    sessions: unknown;
+    sessionsVersion: number;
     machines: unknown;
     daemonVersions: unknown;
     daemonSockets: unknown;
@@ -2601,7 +2442,7 @@ const builtFrom: {
      */
     channelSignature: string | null;
 } = {
-    sessions: null,
+    sessionsVersion: -1,
     machines: null,
     daemonVersions: null,
     daemonSockets: null,
@@ -2635,8 +2476,8 @@ export const sessionOnlineLive = new KeyedStore<boolean>();
  * The online bits are returned as well, so the rows can be handed the same answers.
  */
 function channelAnswers(
+    sessions: Record<string, Session>,
     state: {
-        sessions: Record<string, Session>;
         machines: Record<string, { metadata?: { happyCliVersion?: string } | null; daemonState?: { startedWithCliVersion?: string } | null }>;
         daemonVersions: Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }>;
     },
@@ -2644,7 +2485,7 @@ function channelAnswers(
 ): { signature: string; online: Record<string, boolean> } {
     const parts: string[] = [];
     const online: Record<string, boolean> = {};
-    for (const session of Object.values(state.sessions)) {
+    for (const session of Object.values(sessions)) {
         const reachable = resolveSessionReach(session.id, session.metadata?.machineId, drivers).online;
         online[session.id] = reachable;
         const restart = sessionNeedsRestart(session, state.machines, state.daemonVersions) ? '1' : '0';
@@ -2654,8 +2495,16 @@ function channelAnswers(
     return { signature: parts.join('|'), online };
 }
 
-storage.subscribe((state) => {
-    const contentChanged = builtFrom.sessions !== state.sessions
+/**
+ * Rebuild whatever the list derives from the sessions and the channel state.
+ *
+ * Called from two subscriptions: the zustand store (machines, daemon versions, every channel
+ * fact) and the session keyed store (one call per flush, however many keys it wrote). Both land
+ * here so the list has one build path and one place to compare inputs.
+ */
+function recomputeDerived(state: StorageState): void {
+    const sessionsVersion = sessionLive.allVersion();
+    const contentChanged = builtFrom.sessionsVersion !== sessionsVersion
         || builtFrom.machines !== state.machines
         || builtFrom.daemonVersions !== state.daemonVersions;
     const channelChanged = builtFrom.daemonSockets !== state.daemonSockets
@@ -2671,9 +2520,10 @@ storage.subscribe((state) => {
     if (!contentChanged && !channelChanged) {
         return;
     }
-    const drivers = channelDrivers(state, state.localSettings.channelPriority);
-    const answers = channelAnswers(state, drivers);
-    builtFrom.sessions = state.sessions;
+    const sessions = sessionLive.snapshot();
+    const drivers = channelDrivers(withSessions(state), state.localSettings.channelPriority);
+    const answers = channelAnswers(sessions, state, drivers);
+    builtFrom.sessionsVersion = sessionsVersion;
     builtFrom.machines = state.machines;
     builtFrom.daemonVersions = state.daemonVersions;
     builtFrom.daemonSockets = state.daemonSockets;
@@ -2693,17 +2543,21 @@ storage.subscribe((state) => {
     if (!contentChanged && !signatureChanged) {
         return;
     }
-    storage.setState({
-        sessionListViewData: buildSessionListViewData(
-            state.sessions,
-            state.machines,
-            state.daemonVersions,
-            drivers,
-        ),
-    });
-});
+    const sessionListViewData = buildSessionListViewData(
+        sessions,
+        state.machines,
+        state.daemonVersions,
+        drivers,
+    );
+    // The list is rebuilt by an action, not by a selector. Writing the same array back would wake
+    // every selector in the App for a list that did not move.
+    if (sessionListViewData !== state.sessionListViewData) {
+        storage.setState({ sessionListViewData });
+    }
+}
 
-sessionLive.replaceAll(storage.getState().sessions);
+storage.subscribe(recomputeDerived);
+sessionLive.subscribeAll(() => recomputeDerived(storage.getState()));
 
 /**
  * Imperative read of a session's message window, for the sync engine and other non-React callers.
@@ -2713,30 +2567,40 @@ export function getSessionMessages(sessionId: string): SessionMessages | undefin
     return sessionMessagesLive.get(sessionId);
 }
 
-let mirroredSessions = storage.getState().sessions;
-
-storage.subscribe((state) => {
-    // Identity is the signal: `applySessions` builds a new map on every write, and every
-    // unchanged entry inside it keeps its object. So this walks the map but only marks the keys
-    // that actually moved.
-    if (state.sessions !== mirroredSessions) {
-        mirroredSessions = state.sessions;
-        sessionLive.replaceAll(mirroredSessions);
-    }
-});
+/**
+ * Imperative read of one session, for the sync engine and other non-React callers. React code
+ * uses `useSession` or a keyed selector, so a write to another session does not reach it.
+ */
+export function getSession(sessionId: string): Session | undefined {
+    return sessionLive.get(sessionId);
+}
 
 /**
- * Every session, as a flat list. Not reactive to a single session: callers pick through it to
- * build a path list, so `useShallow` on the values means a write re-renders them only when some
- * session object actually changed — and every caller here sorts by its own timestamp, so the
- * order of this array is not a contract.
+ * The whole session map, for the few non-React callers that need every entry at once (the
+ * session-list cache, channel resolution). Memoised until the next write.
+ */
+export function getSessions(): Record<string, Session> {
+    return sessionLive.snapshot();
+}
+
+/**
+ * Every session, as a flat list.
+ *
+ * This is the whole-map subscription, and it is deliberately the exception: the wizard and the
+ * command palette genuinely need every session. A row or a chat screen uses `useSession` or
+ * `useKeyedSelector` instead, so a write to one session does not re-render them.
  */
 export function useSessions(): Session[] {
-    return storage(useShallow((state) => Object.values(state.sessions)));
+    return useAllKeyedValues(sessionLive);
 }
 
 export function useSession(id: string): Session | null {
     return useKeyedValue(sessionLive, id) ?? null;
+}
+
+/** One field of a session, re-rendering only when that field changes. */
+export function useSessionMachineId(sessionId: string): string | undefined {
+    return useKeyedSelector(sessionLive, sessionId, (session) => session?.metadata?.machineId);
 }
 
 export function useOutboxEntry(localId: string | null | undefined): OutboxEntry | null {
@@ -2866,10 +2730,13 @@ export function useSessionOnline(sessionId: string, _machineId: string | undefin
 }
 
 export function useSessionReach(sessionId: string, machineId: string | undefined): SessionReach {
+    // The server driver answers from the session itself (`active`/`activeAt`), which lives in the
+    // keyed store now, so this key has to wake the hook as well as the channel facts in the store.
+    useKeyedValue(sessionLive, sessionId);
     return storage(useShallow((state) => resolveSessionReach(
         sessionId,
         machineId,
-        channelDrivers(state, state.localSettings.channelPriority),
+        channelDrivers(withSessions(state), state.localSettings.channelPriority),
         Date.now(),
     )));
 }
@@ -3007,10 +2874,12 @@ export function useSessionListViewData(): SessionListViewItem[] | null {
 }
 
 export function useAllSessions(): Session[] {
-    return storage(useShallow((state) => {
-        if (!state.isDataReady) return [];
-        return Object.values(state.sessions).sort((a, b) => b.updatedAt - a.updatedAt);
-    }));
+    const ready = storage((state) => state.isDataReady);
+    const sessions = useAllKeyedValues(sessionLive);
+    return React.useMemo(
+        () => ready ? [...sessions].sort((a, b) => b.updatedAt - a.updatedAt) : [],
+        [ready, sessions],
+    );
 }
 
 export function useLocalSettingMutable<K extends keyof LocalSettings>(name: K): [LocalSettings[K], (value: LocalSettings[K]) => void] {
@@ -3112,7 +2981,11 @@ export function useRealtimeMode(): 'idle' | 'speaking' {
  */
 const selectChannelState = (state: StorageState): ChannelState => ({
     socketStatus: state.socketStatus,
-    sessions: state.sessions,
+    // Non-reactive on purpose: the callers of this selector ask machine-level questions (badges,
+    // links, presence), where a session's own answer is never read. The snapshot is taken here
+    // only because the drivers' input names sessions. The one place a session's answer matters —
+    // the list build — reads the live store directly in `recomputeDerived`.
+    sessions: sessionLive.snapshot(),
     machines: state.machines,
     daemonSockets: state.daemonSockets,
     daemonSessionList: state.daemonSessionList,

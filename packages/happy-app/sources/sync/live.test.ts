@@ -92,6 +92,50 @@ describe('KeyedStore', () => {
     });
 });
 
+describe('KeyedStore whole-set view', () => {
+    it('keeps the snapshot and list identities until the next write', () => {
+        const store = new KeyedStore<number>();
+        store.set('a', 1);
+        const record = store.snapshot();
+        const list = store.valuesList();
+
+        expect(store.snapshot()).toBe(record);
+        expect(store.valuesList()).toBe(list);
+        expect(record).toEqual({ a: 1 });
+        expect(list).toEqual([1]);
+
+        store.set('b', 2);
+
+        expect(store.snapshot()).not.toBe(record);
+        expect(store.snapshot()).toEqual({ a: 1, b: 2 });
+    });
+
+    it('tells whole-set listeners once per flush, after the per-key ones, with every write visible', async () => {
+        const store = new KeyedStore<number>();
+        const seen: string[] = [];
+        store.subscribe('a', () => seen.push('a'));
+        const all = vi.fn(() => seen.push(`all:${Object.keys(store.snapshot()).join(',')}`));
+        store.subscribeAll(all);
+
+        store.set('a', 1);
+        store.set('b', 2);
+        await tick();
+
+        expect(all).toHaveBeenCalledTimes(1);
+        expect(seen).toEqual(['a', 'all:a,b']);
+    });
+
+    it('bumps the all-version on a delete as well as a write', () => {
+        const store = new KeyedStore<number>();
+        store.set('a', 1);
+        const afterSet = store.allVersion();
+
+        store.delete('a');
+
+        expect(store.allVersion()).toBe(afterSet + 1);
+    });
+});
+
 describe('shallowEqual', () => {
     it('compares one level, by value', () => {
         const shared = { nested: true };

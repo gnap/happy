@@ -12,7 +12,8 @@
  */
 function requireChannelFor(operation: ChannelOperation): void {
     const state = storage.getState();
-    const drivers = channelDrivers(state, state.localSettings.channelPriority);
+    // The drivers' input names sessions; the channel-level operation question below does not read them.
+    const drivers = channelDrivers({ ...state, sessions: getSessions() }, state.localSettings.channelPriority);
     if (!operationSupported(drivers, operation)) {
         throw new HappyError(t('errors.channelCannotServeAction'), false);
     }
@@ -25,7 +26,7 @@ function requireChannelFor(operation: ChannelOperation): void {
 
 import { apiSocket } from './apiSocket';
 import { sync } from './sync';
-import { storage } from './storage';
+import { getSessions, storage } from './storage';
 import type { MachineMetadata } from './storageTypes';
 import { channelDrivers } from './channels/measure';
 import { operationSupported } from './channels/resolve';

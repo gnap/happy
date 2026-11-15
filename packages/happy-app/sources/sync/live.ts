@@ -28,11 +28,52 @@ export class KeyedStore<T> {
     private values = new Map<string, T>();
     private versions = new Map<string, number>();
     private listeners = new Map<string, Set<Listener>>();
+    private allListeners = new Set<Listener>();
     private dirty = new Set<string>();
     private scheduled = false;
+    private cachedRecord: Record<string, T> | null = null;
+    private cachedList: T[] | null = null;
+    private allVersionCounter = 0;
 
     get(key: string): T | undefined {
         return this.values.get(key);
+    }
+
+    /**
+     * The whole set as a record, memoised until the next write. Used by derivations that need to
+     * see every entry at once — the session list, the channel answers — and by callers that pass
+     * the set to code written against the old whole-map world.
+     */
+    snapshot(): Record<string, T> {
+        if (!this.cachedRecord) {
+            const record: Record<string, T> = {};
+            this.values.forEach((value, key) => {
+                record[key] = value;
+            });
+            this.cachedRecord = record;
+        }
+        return this.cachedRecord;
+    }
+
+    /** The whole set as a list, memoised alongside `snapshot`. */
+    valuesList(): T[] {
+        if (!this.cachedList) {
+            this.cachedList = Array.from(this.values.values());
+        }
+        return this.cachedList;
+    }
+
+    /** Bumps on every write, like a key's version, but over the whole set. */
+    allVersion(): number {
+        return this.allVersionCounter;
+    }
+
+    /** Called once per flush, after the per-key listeners, if any key was written. */
+    subscribeAll(listener: Listener): () => void {
+        this.allListeners.add(listener);
+        return () => {
+            this.allListeners.delete(listener);
+        };
     }
 
     /**
@@ -51,6 +92,7 @@ export class KeyedStore<T> {
         }
         this.values.set(key, value);
         this.versions.set(key, (this.versions.get(key) ?? 0) + 1);
+        this.changed();
         this.markDirty(key);
     }
 
@@ -59,7 +101,14 @@ export class KeyedStore<T> {
             return;
         }
         this.versions.set(key, (this.versions.get(key) ?? 0) + 1);
+        this.changed();
         this.markDirty(key);
+    }
+
+    private changed(): void {
+        this.cachedRecord = null;
+        this.cachedList = null;
+        this.allVersionCounter++;
     }
 
     /** Replace the whole set with the entries of `record`, keeping identities that did not move. */
@@ -120,6 +169,11 @@ export class KeyedStore<T> {
                 listener();
             }
         }
+        // The whole-set listeners go last: a derivation reading `snapshot()` must see every key
+        // this flush wrote, and a per-key listener may itself write (which queues another flush).
+        for (const listener of Array.from(this.allListeners)) {
+            listener();
+        }
     }
 }
 
@@ -142,6 +196,47 @@ export function shallowEqual(a: unknown, b: unknown): boolean {
         }
     }
     return true;
+}
+
+/**
+ * Every value in the store, re-rendering once per flush.
+ *
+ * This is the old whole-map subscription, used by the few screens that genuinely need all entries
+ * (the new-session wizard). It is deliberately not what a list row or a chat screen uses.
+ */
+export function useAllKeyedValues<T>(store: KeyedStore<T>): T[] {
+    const subscribe = useCallback((listener: Listener) => store.subscribeAll(listener), [store]);
+    const snapshot = useCallback(() => store.allVersion(), [store]);
+    useSyncExternalStore(subscribe, snapshot, snapshot);
+    return store.valuesList();
+}
+
+/**
+ * A projection of the whole store, re-rendering only when the projection changes.
+ *
+ * For a subscriber that sits above the navigation tree and must not be woken by every write:
+ * the projection is recomputed once per flush, but the component only renders when its result
+ * differs. The projected value should therefore be cheap and comparable by `Object.is` — a string
+ * key, a count, a flag — not an array or an object built fresh every time.
+ */
+export function useKeyedProjection<T, S>(
+    store: KeyedStore<T>,
+    project: (values: readonly T[]) => S,
+): S {
+    const projectRef = useRef(project);
+    projectRef.current = project;
+    const subscribe = useCallback((listener: Listener) => store.subscribeAll(listener), [store]);
+    const cache = useMemo(() => ({ version: -1, value: undefined as S }), [store]);
+    const snapshot = useCallback(() => {
+        const version = store.allVersion();
+        if (cache.version !== -1 && cache.version === version) {
+            return cache.value;
+        }
+        cache.version = version;
+        cache.value = projectRef.current(store.valuesList());
+        return cache.value;
+    }, [store, cache]);
+    return useSyncExternalStore(subscribe, snapshot, snapshot);
 }
 
 /** The value stored at `key`, re-rendering only when that key's value is replaced. */
