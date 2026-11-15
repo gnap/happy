@@ -2659,6 +2659,10 @@ const builtFrom: {
     relayDirectory: unknown;
     socketStatus: unknown;
     daemonSessionList: unknown;
+    lanEndpoints: unknown;
+    candidateHealth: unknown;
+    relayEndpoints: unknown;
+    relayHubConnected: unknown;
     channelPriority: unknown;
     /**
      * What the list's channel-derived output is made of, for the last build.
@@ -2680,9 +2684,22 @@ const builtFrom: {
     relayDirectory: null,
     socketStatus: null,
     daemonSessionList: null,
+    lanEndpoints: null,
+    candidateHealth: null,
+    relayEndpoints: null,
+    relayHubConnected: null,
     channelPriority: null,
     channelSignature: null,
 };
+
+/**
+ * Whether anything is reaching each session, keyed by session id — what a list row draws.
+ *
+ * Filled by the same pass that decides whether the list needs rebuilding: the answer is computed
+ * once per store write for every session, and a row subscribes to its own id instead of running
+ * `resolveSessionReach` (and building the drivers it needs) on every write of the whole store.
+ */
+export const sessionOnlineLive = new KeyedStore<boolean>();
 
 /**
  * The part of the list that comes from channels, as one comparable string.
@@ -2690,20 +2707,26 @@ const builtFrom: {
  * Exactly the facts the list draws from them: for each session, whether anything is reaching it
  * and whether restarting it would change its build. Both are cheap reads — a few map lookups per
  * driver — which is what makes this cheaper than rebuilding the list to find out it is the same.
+ * The online bits are returned as well, so the rows can be handed the same answers.
  */
-function channelSignatureOf(state: {
-    sessions: Record<string, Session>;
-    machines: Record<string, { metadata?: { happyCliVersion?: string } | null; daemonState?: { startedWithCliVersion?: string } | null }>;
-    daemonVersions: Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }>;
-}, drivers: readonly ChannelDriver[]): string {
+function channelAnswers(
+    state: {
+        sessions: Record<string, Session>;
+        machines: Record<string, { metadata?: { happyCliVersion?: string } | null; daemonState?: { startedWithCliVersion?: string } | null }>;
+        daemonVersions: Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }>;
+    },
+    drivers: readonly ChannelDriver[],
+): { signature: string; online: Record<string, boolean> } {
     const parts: string[] = [];
+    const online: Record<string, boolean> = {};
     for (const session of Object.values(state.sessions)) {
-        const online = resolveSessionReach(session.id, session.metadata?.machineId, drivers).online ? '1' : '0';
+        const reachable = resolveSessionReach(session.id, session.metadata?.machineId, drivers).online;
+        online[session.id] = reachable;
         const restart = sessionNeedsRestart(session, state.machines, state.daemonVersions) ? '1' : '0';
-        parts.push(`${session.id}:${online}:${restart}`);
+        parts.push(`${session.id}:${reachable ? '1' : '0'}:${restart}`);
     }
     parts.sort();
-    return parts.join('|');
+    return { signature: parts.join('|'), online };
 }
 
 storage.subscribe((state) => {
@@ -2715,12 +2738,16 @@ storage.subscribe((state) => {
         || builtFrom.relayDirectory !== state.relayDirectory
         || builtFrom.socketStatus !== state.socketStatus
         || builtFrom.daemonSessionList !== state.daemonSessionList
+        || builtFrom.lanEndpoints !== state.lanEndpoints
+        || builtFrom.candidateHealth !== state.candidateHealth
+        || builtFrom.relayEndpoints !== state.relayEndpoints
+        || builtFrom.relayHubConnected !== state.relayHubConnected
         || builtFrom.channelPriority !== state.localSettings.channelPriority;
     if (!contentChanged && !channelChanged) {
         return;
     }
     const drivers = channelDrivers(state, state.localSettings.channelPriority);
-    const signature = channelSignatureOf(state, drivers);
+    const answers = channelAnswers(state, drivers);
     builtFrom.sessions = state.sessions;
     builtFrom.machines = state.machines;
     builtFrom.daemonVersions = state.daemonVersions;
@@ -2729,9 +2756,15 @@ storage.subscribe((state) => {
     builtFrom.relayDirectory = state.relayDirectory;
     builtFrom.socketStatus = state.socketStatus;
     builtFrom.daemonSessionList = state.daemonSessionList;
+    builtFrom.lanEndpoints = state.lanEndpoints;
+    builtFrom.candidateHealth = state.candidateHealth;
+    builtFrom.relayEndpoints = state.relayEndpoints;
+    builtFrom.relayHubConnected = state.relayHubConnected;
     builtFrom.channelPriority = state.localSettings.channelPriority;
-    const signatureChanged = signature !== builtFrom.channelSignature;
-    builtFrom.channelSignature = signature;
+    // Rows subscribe to their own answer; unchanged bits do not wake them.
+    sessionOnlineLive.replaceAll(answers.online);
+    const signatureChanged = answers.signature !== builtFrom.channelSignature;
+    builtFrom.channelSignature = answers.signature;
     if (!contentChanged && !signatureChanged) {
         return;
     }
@@ -2913,13 +2946,11 @@ export function useLanSightings(): Record<string, LanSighting> {
  * the JS thread starved for tens of seconds. A boolean selector re-renders a row only when the
  * answer actually changes.
  */
-export function useSessionOnline(sessionId: string, machineId: string | undefined): boolean {
-    return storage((state) => resolveSessionReach(
-        sessionId,
-        machineId,
-        channelDrivers(state, state.localSettings.channelPriority),
-        Date.now(),
-    ).online);
+export function useSessionOnline(sessionId: string, _machineId: string | undefined): boolean {
+    // The answer is computed once per store write for every session (the same pass that decides
+    // whether the list changed), keyed by session id. `machineId` is retained in the signature
+    // because callers read it from the session; the projection uses that same field.
+    return useKeyedValue(sessionOnlineLive, sessionId) ?? false;
 }
 
 export function useSessionReach(sessionId: string, machineId: string | undefined): SessionReach {
