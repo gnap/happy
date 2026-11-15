@@ -370,13 +370,17 @@ export function SessionsList() {
         );
     }
 
+    // A session row is keyed by the session alone. With the position in the key, one session
+    // arriving at the top changed the key of every row below it, so React unmounted and remounted
+    // all of them instead of moving one. Group rows keep the position: the same project can appear
+    // once under the online sessions and again under a date, and only the position tells them apart.
     const keyExtractor = React.useCallback((item: SessionListViewItem & { selected?: boolean }, index: number) => {
         switch (item.type) {
             case 'header': return `header-${item.title}-${index}`;
             case 'active-sessions': return 'active-sessions';
             case 'project-group': return `project-group-${item.machine.id}-${item.displayPath}-${index}`;
             case 'host-group': return `host-group-${item.projectPath}-${item.host}-${index}`;
-            case 'session': return `session-${item.session.id}-${index}`;
+            case 'session': return `session-${item.session.id}`;
             default: return `item-${index}`;
         }
     }, []);

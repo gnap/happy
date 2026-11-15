@@ -391,6 +391,101 @@ function dominantMachineId(sessions: Session[]): string | undefined {
 /** The last mark logged per session, so the line appears when it changes rather than per rebuild. */
 const listMarkLogged = new Map<string, string>();
 
+/** A session row as it lives in `sessionListViewData`. */
+type SessionListRow = Extract<SessionListViewItem, { type: 'session' }>;
+
+/**
+ * The rows the list was built from last time, so an unchanged row keeps its object.
+ *
+ * A new array or a new row wakes every reader of `sessionListViewData`, and the list is a snapshot
+ * read through `useSyncExternalStore`: a message arriving several times a second used to rebuild
+ * every row and redraw the whole screen for a change no row shows. Identity is what stops that at
+ * the source; the comparison below is what makes keeping it honest.
+ */
+let lastSessionRows = new Map<string, SessionListRow>();
+let lastGroupItems = new Map<string, SessionListViewItem>();
+let lastListViewData: SessionListViewItem[] | null = null;
+
+/** Whether two copies of one latest-usage figure say the same thing. */
+function sameUsage(previous: Session['latestUsage'], next: Session['latestUsage']): boolean {
+    if (previous === next) return true;
+    if (!previous || !next) return false;
+    return previous.inputTokens === next.inputTokens
+        && previous.outputTokens === next.outputTokens
+        && previous.cacheCreation === next.cacheCreation
+        && previous.cacheRead === next.cacheRead
+        && previous.contextSize === next.contextSize
+        && previous.contextWindowTokens === next.contextWindowTokens
+        && previous.model === next.model
+        && previous.timestamp === next.timestamp
+        && previous.cacheCreationBreakdown === next.cacheCreationBreakdown;
+}
+
+/**
+ * Whether two versions of one session draw the same list row.
+ *
+ * `updatedAt` and `seq` are deliberately left out: they advance with every message, and no row
+ * draws either — the name, subtitle, status dot and position come from the fields compared here.
+ * They are not ignored for ordering: the list still sorts and date-groups from the newest object;
+ * only the emitted row keeps the older one, because the two are equal in everything it shows.
+ *
+ * Objects are compared by reference on purpose: `metadata` and `agentState` are replaced only when
+ * their version moves, and the versions are compared too, so a reference that survived means the
+ * decrypted content is the same one.
+ */
+function sameListRowSession(previous: Session, next: Session): boolean {
+    if (previous === next) return true;
+    return previous.id === next.id
+        && previous.createdAt === next.createdAt
+        && previous.active === next.active
+        && previous.activeAt === next.activeAt
+        && previous.thinking === next.thinking
+        && previous.thinkingAt === next.thinkingAt
+        && previous.metadataVersion === next.metadataVersion
+        && previous.agentStateVersion === next.agentStateVersion
+        && previous.presence === next.presence
+        && (previous.restartingAt ?? null) === (next.restartingAt ?? null)
+        && previous.metadata === next.metadata
+        && previous.agentState === next.agentState
+        && previous.origin === next.origin
+        && previous.draft === next.draft
+        && previous.permissionMode === next.permissionMode
+        && previous.modelMode === next.modelMode
+        && previous.maxMode === next.maxMode
+        && previous.thinkingLevel === next.thinkingLevel
+        && previous.profileId === next.profileId
+        && previous.sandboxIsolation === next.sandboxIsolation
+        && previous.todos === next.todos
+        && previous.tasks === next.tasks
+        && sameUsage(previous.latestUsage, next.latestUsage);
+}
+
+/** Whether two copies of one machine say the same thing. */
+function sameMachine(previous: Machine, next: Machine): boolean {
+    if (previous === next) return true;
+    return previous.id === next.id
+        && previous.seq === next.seq
+        && previous.createdAt === next.createdAt
+        && previous.updatedAt === next.updatedAt
+        && previous.active === next.active
+        && previous.activeAt === next.activeAt
+        && previous.metadataVersion === next.metadataVersion
+        && previous.daemonStateVersion === next.daemonStateVersion
+        && previous.metadata === next.metadata
+        && previous.daemonState === next.daemonState;
+}
+
+/** Whether two machine maps say the same thing — same rows, same values, nothing removed. */
+function sameMachines(previous: Record<string, Machine>, next: Record<string, Machine>): boolean {
+    const previousIds = Object.keys(previous);
+    if (previousIds.length !== Object.keys(next).length) return false;
+    for (const id of previousIds) {
+        const nextMachine = next[id];
+        if (!nextMachine || !sameMachine(previous[id], nextMachine)) return false;
+    }
+    return true;
+}
+
 /**
  * Whether restarting this session would change its build — the one rule for every list.
  *
@@ -447,6 +542,53 @@ function buildSessionListViewData(
 ): SessionListViewItem[] {
     /** Whether anything is reaching this session, from any channel, the way the rest of the App asks. */
     const reached = (session: Session) => resolveSessionReach(session.id, session.metadata?.machineId, drivers).online;
+
+    // What this build produces, and what the last one produced, side by side.
+    const previousRows = lastSessionRows;
+    const previousGroups = lastGroupItems;
+    const nextRows = new Map<string, SessionListRow>();
+    const nextGroups = new Map<string, SessionListViewItem>();
+
+    /**
+     * The row for a session, which is the previous row whenever the session still draws the same.
+     *
+     * `needsRestart` and `online` are asked fresh rather than compared from the previous row: they
+     * are not properties of the session alone — the first reads the machines, the second the
+     * channels — and both can move without the session object changing.
+     */
+    const sessionRow = (session: Session): SessionListRow => {
+        const needsRestart = getNeedsRestart(session);
+        const online = reached(session);
+        const previous = previousRows.get(session.id);
+        if (previous
+            && sameListRowSession(previous.session, session)
+            && previous.needsRestart === needsRestart
+            && previous.online === online) {
+            nextRows.set(session.id, previous);
+            return previous;
+        }
+        const row: SessionListRow = { type: 'session', session, needsRestart, online };
+        nextRows.set(session.id, row);
+        return row;
+    };
+
+    /**
+     * A group header or divider, which is the previous one whenever it says the same thing.
+     *
+     * The key carries what the header draws, not just which project it is: the same project appears
+     * once under the online sessions and again under each date it has sessions in, and those groups
+     * can name different branches. Keyed by project alone, two such groups would keep handing each
+     * other's object back and forth, and the list would be rebuilt on every call for no change.
+     */
+    const groupItem = <T extends SessionListViewItem>(key: string, item: T, same: (previous: T, next: T) => boolean = () => true): T => {
+        const previous = previousGroups.get(key);
+        if (previous && previous.type === item.type && same(previous as T, item)) {
+            nextGroups.set(key, previous);
+            return previous as T;
+        }
+        nextGroups.set(key, item);
+        return item;
+    };
 
     // Separate active and inactive sessions
     const activeSessions: Session[] = [];
@@ -517,7 +659,7 @@ function buildSessionListViewData(
         // Standard sessions sort by last activity for the date headers.
         standard.sort((a, b) => b.updatedAt - a.updatedAt);
         for (const s of standard) {
-            listData.push({ type: 'session', session: s, needsRestart: getNeedsRestart(s), online: reached(s) });
+            listData.push(sessionRow(s));
         }
         // Sort project groups by newest createdAt in each group (stable)
         const sortedProjects = [...byProject.entries()].sort(([, a], [, b]) => {
@@ -540,7 +682,10 @@ function buildSessionListViewData(
             const homeDir = sessions[0]?.metadata?.homeDir;
             const branch = sessions.find(s => !!s.metadata?.branchName)?.metadata?.branchName
                         ?? sessions.find(s => !!s.metadata?.worktreeBranch)?.metadata?.worktreeBranch;
-            listData.push({ type: 'worktree-group', projectPath, homeDir, branch });
+            listData.push(groupItem(
+                `worktree:${projectPath}\u0000${homeDir ?? ''}\u0000${branch ?? ''}`,
+                { type: 'worktree-group', projectPath, homeDir, branch },
+            ));
             // Emit host sub-groups (sorted by newest session in each host)
             const sortedHosts = [...byHost.entries()].sort(([, a], [, b]) => {
                 const aMax = Math.max(...a.map(s => s.createdAt));
@@ -556,9 +701,13 @@ function buildSessionListViewData(
                     return b.createdAt - a.createdAt;
                 });
                 const onlineCount = hostSessions.filter(reached).length;
-                listData.push({ type: 'host-group', projectPath, host, machineId: dominantMachineId(hostSessions), onlineCount, totalCount: hostSessions.length });
+                const machineId = dominantMachineId(hostSessions);
+                listData.push(groupItem(
+                    `host:${projectPath}\u0000${host}\u0000${machineId ?? ''}\u0000${onlineCount}\u0000${hostSessions.length}`,
+                    { type: 'host-group', projectPath, host, machineId, onlineCount, totalCount: hostSessions.length },
+                ));
                 for (const s of hostSessions) {
-                    listData.push({ type: 'session', session: s, needsRestart: getNeedsRestart(s), online: reached(s) });
+                    listData.push(sessionRow(s));
                 }
             }
         }
@@ -599,7 +748,10 @@ function buildSessionListViewData(
             const homeDir = projectSessions[0]?.metadata?.homeDir;
             const branch = projectSessions.find(s => !!s.metadata?.branchName)?.metadata?.branchName
                         ?? projectSessions.find(s => !!s.metadata?.worktreeBranch)?.metadata?.worktreeBranch;
-            toList.push({ type: 'worktree-group', projectPath, homeDir, branch });
+            toList.push(groupItem(
+                `worktree:${projectPath}\u0000${homeDir ?? ''}\u0000${branch ?? ''}`,
+                { type: 'worktree-group', projectPath, homeDir, branch },
+            ));
             // Sub-group by host
             const byHost = new Map<string, Session[]>();
             for (const s of projectSessions) {
@@ -621,9 +773,13 @@ function buildSessionListViewData(
                     return b.createdAt - a.createdAt;
                 });
                 const onlineCount = hostSessions.filter(reached).length;
-                toList.push({ type: 'host-group', projectPath, host, machineId: dominantMachineId(hostSessions), onlineCount, totalCount: hostSessions.length });
+                const machineId = dominantMachineId(hostSessions);
+                toList.push(groupItem(
+                    `host:${projectPath}\u0000${host}\u0000${machineId ?? ''}\u0000${onlineCount}\u0000${hostSessions.length}`,
+                    { type: 'host-group', projectPath, host, machineId, onlineCount, totalCount: hostSessions.length },
+                ));
                 for (const s of hostSessions) {
-                    toList.push({ type: 'session', session: s, needsRestart: getNeedsRestart(s), online: reached(s) });
+                    toList.push(sessionRow(s));
                 }
             }
         }
@@ -631,7 +787,12 @@ function buildSessionListViewData(
     };
     const activeNoProject = emitProjectGroups(activeSessions, listData);
     if (activeNoProject.length > 0) {
-        listData.push({ type: 'active-sessions', sessions: activeNoProject });
+        listData.push(groupItem(
+            'active-sessions',
+            { type: 'active-sessions', sessions: activeNoProject },
+            (previous, next) => previous.sessions.length === next.sessions.length
+                && previous.sessions.every((session, index) => sameListRowSession(session, next.sessions[index])),
+        ));
     }
 
     // Group inactive sessions by date
@@ -663,7 +824,7 @@ function buildSessionListViewData(
                     headerTitle = `${diffDays} days ago`;
                 }
 
-                listData.push({ type: 'header', title: headerTitle });
+                listData.push(groupItem(`header:${headerTitle}`, { type: 'header', title: headerTitle }));
                 emitSessionGroup(currentDateGroup);
             }
 
@@ -691,11 +852,24 @@ function buildSessionListViewData(
             headerTitle = `${diffDays} days ago`;
         }
 
-        listData.push({ type: 'header', title: headerTitle });
+        listData.push(groupItem(`header:${headerTitle}`, { type: 'header', title: headerTitle }));
         emitSessionGroup(currentDateGroup);
     }
 
-    return listData;
+    // Every row above was taken from the last build when it still says the same thing. If that
+    // holds for all of them, this build says nothing new either, and the last array is returned as
+    // it was: a snapshot reader compares by identity, so an identical array stops the redraw
+    // before it starts.
+    const previous = lastListViewData;
+    const unchanged = previous !== null
+        && previous.length === listData.length
+        && listData.every((item, index) => item === previous[index]);
+
+    const result = unchanged && previous !== null ? previous : listData;
+    lastSessionRows = nextRows;
+    lastGroupItems = nextGroups;
+    lastListViewData = result;
+    return result;
 }
 
 /**
@@ -2031,12 +2205,20 @@ export const storage = create<StorageState>()((set, get) => {
                 });
             }
 
-            // Rebuild sessionListViewData to reflect machine changes
+            // A machine report that says nothing new costs nothing. `fetchMachines` decodes a fresh
+            // object every poll, so identity alone would always look like a change; the rows are
+            // compared instead, and an unchanged answer leaves the store (and the list) untouched.
+            if (sameMachines(state.machines, mergedMachines)) {
+                return state;
+            }
+
+            // Rebuild sessionListViewData to reflect machine changes — from the merged machines,
+            // which is what this rebuild is for; the previous rows were built from the old ones.
             const sessionListViewData = buildSessionListViewData(
                 state.sessions,
-                state.machines,
-                            state.daemonVersions,
-                            channelDrivers(state, state.localSettings.channelPriority),
+                mergedMachines,
+                state.daemonVersions,
+                channelDrivers(state, state.localSettings.channelPriority),
             );
 
             return {
