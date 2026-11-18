@@ -45,6 +45,9 @@ export const SessionView = React.memo((props: { id: string }) => {
     const sessionId = props.id;
     const router = useRouter();
     const session = useSession(sessionId);
+    // Message-derived usage (reducer latestUsage). Declared before the header memo because the
+    // header's model subtitle reads the real provider-reported model from it.
+    const sessionUsage = useSessionUsage(sessionId);
     const isDataReady = useIsDataReady();
     /**
      * Whether this screen has to wait for the initial sync at all.
@@ -114,14 +117,14 @@ export const SessionView = React.memo((props: { id: string }) => {
         return {
             title: getSessionName(session),
             subtitle: session.metadata?.path ? formatPathRelativeToHome(session.metadata.path, session.metadata?.homeDir) : undefined,
-            rightSubtitle: session.metadata?.contextUsage?.model || session.metadata?.sessionModel || undefined,
+            rightSubtitle: sessionUsage?.model || session.metadata?.sessionModel || undefined,
             avatarId: getSessionAvatarId(session),
             onAvatarPress: () => router.push(`/session/${sessionId}/info`),
             isLive,
             flavor: session.metadata?.flavor || null,
             tintColor: isLive ? '#000' : '#8E8E93'
         };
-    }, [session, waitingForFirstData, sessionId, router, isSessionOnline]);
+    }, [session, sessionUsage?.model, waitingForFirstData, sessionId, router, isSessionOnline]);
 
     return (
         <>

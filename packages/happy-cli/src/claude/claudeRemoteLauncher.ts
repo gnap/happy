@@ -65,7 +65,7 @@ import { EnhancedMode } from "./loop";
 import { RawJSONLines } from "@/claude/types";
 import { OutgoingMessageQueue } from "./utils/OutgoingMessageQueue";
 import { getToolName } from "./utils/getToolName";
-import { buildClaudeTurnUsagePayload } from "./utils/claudeTurnUsage";
+import { buildClaudeTurnUsagePayload, type ClaudeLastInferenceUsage } from "./utils/claudeTurnUsage";
 import { createEnvelope } from '@slopus/happy-wire';
 import { createSessionScanner } from "./utils/sessionScanner";
 import { delay } from "@/utils/time";
@@ -258,10 +258,17 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
     // Real model name as reported by the assistant message itself (e.g. "claude-sonnet-5").
     // Unlike the configured model code (ANTHROPIC_MODEL / ANTHROPIC_DEFAULT_*_MODEL, which can
     // be any operator-chosen string), this reflects what the provider actually routed the turn to.
-    // Seeded from metadata.contextUsage.model (persisted by a prior process) so a freshly
-    // resumed/restarted process doesn't fall back to the configured model code for the turns
-    // before its first real assistant message arrives.
-    let lastRealModel: string | undefined = session.client.getMetadata()?.contextUsage?.model;
+    // Deliberately not persisted in session metadata: usage facts travel in the message stream,
+    // and a metadata write per turn would churn the session list. Until the first assistant
+    // message of a turn arrives the configured code is the only name available — fine, because
+    // the turn's usage payload is assembled after that message.
+    let lastRealModel: string | undefined;
+
+    // Usage of the last main-thread API call this turn. That call's prompt is the actual context
+    // at the end of the turn. Claude emits one assistant message per content block, so consecutive
+    // messages may share `message.id` and repeat the same input/cache numbers — they are the same
+    // call and must not be summed; a new id replaces the previous call.
+    let lastMainThreadUsage: ClaudeLastInferenceUsage | undefined;
 
     // Pop echo: sent once on first SDK message, after Claude starts processing.
     let pendingPopEcho: { echoedMessageId: string; text: string } | null = null;
@@ -286,9 +293,36 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         // (e.g. Agent tool_use with model: "sonnet") can run a different model than the main
         // agent, and we don't want their model to override what the App shows for the session.
         if (message.type === 'assistant' && (message as SDKAssistantMessage).parent_tool_use_id == null) {
-            const realModel = ((message as SDKAssistantMessage).message as any)?.model;
+            const assistant = (message as SDKAssistantMessage).message;
+            const realModel = assistant?.model;
             if (typeof realModel === 'string' && realModel.length > 0) {
                 lastRealModel = realModel;
+            }
+
+            // Capture the per-call usage. This is the only source that reflects the real prompt
+            // size: result.usage sums every call in the turn and modelUsage accumulates across
+            // the whole Claude process.
+            const usage = assistant?.usage;
+            if (usage) {
+                const messageId = assistant.id;
+                // Same message.id = another content block of the same API call; keep the cache
+                // breakdown if this repeat omits it. Without an id (some proxies) calls cannot be
+                // told apart, which only affects dropping a stale breakdown — never the numbers.
+                const sameCall = lastMainThreadUsage !== undefined
+                    && (messageId === undefined || lastMainThreadUsage.messageId === messageId);
+                lastMainThreadUsage = {
+                    messageId,
+                    model: realModel,
+                    inputTokens: usage.input_tokens,
+                    cacheReadInputTokens: usage.cache_read_input_tokens ?? 0,
+                    cacheCreationInputTokens: usage.cache_creation_input_tokens ?? 0,
+                    cacheCreation: usage.cache_creation
+                        ? {
+                            ephemeral_5m_input_tokens: usage.cache_creation.ephemeral_5m_input_tokens,
+                            ephemeral_1h_input_tokens: usage.cache_creation.ephemeral_1h_input_tokens,
+                        }
+                        : (sameCall ? lastMainThreadUsage!.cacheCreation : undefined),
+                };
             }
         }
 
@@ -489,8 +523,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         let wasInboxTurn = false;
         let wasCompactTurn = false;
         let turnSucceeded = false;
-        /** Last accurate contextUsage from get_context_usage control request (includes breakdown). */
-        let lastContextUsage: { currentTokens: number; maxTokens: number; pct: number; fetchedAt: number; breakdown?: { systemPrompt: number; systemTools: number; customAgents: number; skills: number; messages: number; freeSpace: number } } | undefined;
 
         // Track session ID to detect when it actually changes
         // This prevents context loss when mode changes (permission mode, model, etc.)
@@ -579,6 +611,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
             wasInboxTurn = false;
             wasCompactTurn = false;
             turnSucceeded = false;
+            lastMainThreadUsage = undefined;
             try {
                 const remoteResult = await claudeRemote({
                     // The process belongs to the happy session, not to the turn: this is what the
@@ -808,7 +841,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                     onReady: (result) => {
                         const isError = result.is_error === true;
                         turnSucceeded = !isError;
-                        const usage = buildClaudeTurnUsagePayload(result);
+                        const usage = buildClaudeTurnUsagePayload(result, lastMainThreadUsage);
                         const extras: Record<string, unknown> = {};
                         // Prefer the real provider-reported model (from assistant messages) over
                         // modelUsage's key, which is just the configured model code and can be
@@ -816,11 +849,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                         if (usage) extras.usage = lastRealModel ? { ...usage, model: lastRealModel } : usage;
                         if (typeof result.total_cost_usd === 'number') extras.costUsd = result.total_cost_usd;
                         if (typeof result.duration_ms === 'number') extras.durationMs = result.duration_ms;
-                        // Attach contextUsage — use last known accurate value from get_context_usage.
-                        // Do not fall back to usage.context_size here: that value is an estimate
-                        // from cumulative cacheRead tokens which can exceed the context window for
-                        // long autoloop sessions. The control_request result will follow shortly.
-                        if (lastContextUsage) extras.contextUsage = lastContextUsage as any;
 
                         if (isError) {
                             session.client.closeClaudeSessionTurn('failed');
@@ -830,22 +858,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             session.client.sendSessionEvent({ type: 'message', message: msg });
                         } else {
                             session.client.closeClaudeSessionTurn('completed', extras);
-                            // Update metadata's contextUsage.model — the unified source for
-                            // the App's session header model display. Always writes, using
-                            // zero tokens as placeholder when no /context fetch has run yet.
-                            if (lastRealModel) {
-                                // `void` does not catch: an unhandled rejection here would reach
-                                // the process handler and end the session.
-                                session.client.updateMetadata((m) => ({
-                                    ...m,
-                                    contextUsage: {
-                                        ...(m.contextUsage ?? { currentTokens: 0, maxTokens: 0, pct: 0, fetchedAt: Date.now() }),
-                                        model: lastRealModel,
-                                    },
-                                })).catch((error) => {
-                                    logger.debug('[launcher] Failed to persist context usage model', error);
-                                });
-                            }
                         }
                         if (session.claudeTurnActiveRef) {
                             session.claudeTurnActiveRef.current = false;
@@ -868,16 +880,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                 { sessionId: session.client.sessionId }
                             );
                         }
-                    },
-                    onContextUsage: (usage) => {
-                        lastContextUsage = {
-                            currentTokens: usage.totalTokens,
-                            maxTokens: usage.maxTokens,
-                            pct: Math.round((usage.totalTokens / usage.maxTokens) * 100),
-                            fetchedAt: Date.now(),
-                            ...(usage.breakdown ? { breakdown: usage.breakdown } : {}),
-                        };
-                        logger.debug(`[remote]: context via control_request: ${usage.totalTokens} / ${usage.maxTokens} (${Math.round((usage.totalTokens / usage.maxTokens) * 100)}%)`);
                     },
                     onContextOutput: undefined,
                     onDisplayCrons: (crons) => {

@@ -28,11 +28,32 @@ export interface SDKUserMessage extends SDKMessage {
     }
 }
 
+/**
+ * Usage of a single API call, as reported on the assistant message that call produced.
+ * This — not the result's rolled-up `usage` or `modelUsage` — is the per-inference prompt size.
+ * Claude emits one assistant message per content block, all sharing `message.id` and carrying
+ * the same input/cache numbers; `output_tokens` may be zero on the duplicates.
+ */
+export interface SDKAssistantUsage {
+    input_tokens: number
+    output_tokens: number
+    cache_read_input_tokens?: number
+    cache_creation_input_tokens?: number
+    cache_creation?: {
+        ephemeral_5m_input_tokens: number
+        ephemeral_1h_input_tokens: number
+    }
+    [key: string]: unknown
+}
+
 export interface SDKAssistantMessage extends SDKMessage {
     type: 'assistant'
     parent_tool_use_id?: string
     message: {
         role: 'assistant'
+        id?: string
+        model?: string
+        usage?: SDKAssistantUsage
         content: Array<{
             type: string
             text?: string

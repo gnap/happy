@@ -69,6 +69,16 @@ export const sessionTurnEndUsageSchema = z.object({
 }).passthrough();
 export type SessionTurnEndUsage = z.infer<typeof sessionTurnEndUsageSchema>;
 
+/**
+ * Usage of a single API call, carried on the envelope that call produced.
+ *
+ * The App draws the context gauge from this while a turn is running; turn-end then replaces it
+ * with the authoritative rollup. Same fields as the turn-end payload because both answer the
+ * same question at different moments.
+ */
+export const sessionInferenceUsageSchema = sessionTurnEndUsageSchema;
+export type SessionInferenceUsage = SessionTurnEndUsage;
+
 /** /context snapshot (from backgroundContextFetcher) carried in turn-end. */
 export const sessionTurnEndContextUsageSchema = z.object({
     currentTokens: z.number().int().nonnegative(),
@@ -186,6 +196,12 @@ export const sessionEnvelopeSchema = z
      * gap in one writer's `n` proves a message went missing. Optional, see `sid`.
      */
     n: z.number().int().nonnegative().optional(),
+    /**
+     * Usage of the API call that produced this envelope. Present only on the first envelope of
+     * a main-thread inference — Claude emits one record per content block, and every record of
+     * the same call repeats the same input/cache numbers.
+     */
+    usage: sessionInferenceUsageSchema.optional(),
     ev: sessionEventSchema,
   })
   .superRefine((envelope, ctx) => {
@@ -234,6 +250,8 @@ export type CreateEnvelopeOptions = {
   turn?: string;
   subagent?: string;
   taskCall?: string;
+  /** Usage of the API call that produced this envelope. See `sessionEnvelopeSchema.usage`. */
+  usage?: SessionInferenceUsage;
   /** Passthrough metadata for the envelope (origin, cronId, etc.). */
   meta?: Record<string, unknown>;
 };
@@ -246,6 +264,7 @@ export function createEnvelope(role: SessionRole, ev: SessionEvent, opts: Create
     ...(opts.turn ? { turn: opts.turn } : {}),
     ...(opts.subagent ? { subagent: opts.subagent } : {}),
     ...(opts.taskCall ? { taskCall: opts.taskCall } : {}),
+    ...(opts.usage ? { usage: opts.usage } : {}),
     ev,
     ...(opts.meta ?? {}),
   });
