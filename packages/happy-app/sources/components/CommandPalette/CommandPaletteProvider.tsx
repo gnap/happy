@@ -6,14 +6,31 @@ import { CommandPalette } from './CommandPalette';
 import { Command } from './types';
 import { useGlobalKeyboard } from '@/hooks/useGlobalKeyboard';
 import { useAuth } from '@/auth/AuthContext';
-import { storage } from '@/sync/storage';
+import { storage, getSessions, sessionLive } from '@/sync/storage';
+import type { Session } from '@/sync/storageTypes';
+import { useKeyedProjection } from '@/sync/live';
 import { useShallow } from 'zustand/react/shallow';
 import { useNavigateToSession } from '@/hooks/useNavigateToSession';
+
+/** What the palette draws from the session map: the five most recent, and only what it shows. */
+function recentSessionsKey(sessions: readonly Session[]): string {
+    return sessions
+        .slice()
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .slice(0, 5)
+        // `updatedAt` orders the list, it is not drawn: bumping it without changing the order
+        // must not re-render the provider that sits above the whole navigation tree.
+        .map((session) => `${session.id}\u0000${session.metadata?.name ?? ''}\u0000${session.metadata?.path ?? ''}`)
+        .join('\u0001');
+}
 
 export function CommandPaletteProvider({ children }: { children: React.ReactNode }) {
     const router = useRouter();
     const { logout } = useAuth();
-    const sessions = storage(useShallow((state) => state.sessions));
+    // A string, not the sessions map: this provider sits above the whole navigation tree, so
+    // subscribing it to `state.sessions` re-rendered the root of the App on every incoming message.
+    // The projection changes only when one of the five commands it builds would say something else.
+    const recentKey = useKeyedProjection(sessionLive, recentSessionsKey);
     const commandPaletteEnabled = storage(useShallow((state) => state.localSettings.commandPaletteEnabled));
     const navigateToSession = useNavigateToSession();
 
@@ -75,7 +92,9 @@ export function CommandPaletteProvider({ children }: { children: React.ReactNode
             },
         ];
 
-        // Add session-specific commands
+        // Add session-specific commands. Read imperatively: the subscription above is the key that
+        // says whether this memo is stale, and reading through it keeps the map out of the selector.
+        const sessions = getSessions();
         const recentSessions = Object.values(sessions)
             .sort((a, b) => b.updatedAt - a.updatedAt)
             .slice(0, 5);
@@ -121,7 +140,7 @@ export function CommandPaletteProvider({ children }: { children: React.ReactNode
         }
 
         return cmds;
-    }, [router, logout, sessions]);
+    }, [router, logout, recentKey]);
 
     const showCommandPalette = useCallback(() => {
         if (Platform.OS !== 'web' || !commandPaletteEnabled) return;

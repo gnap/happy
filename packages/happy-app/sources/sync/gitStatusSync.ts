@@ -6,7 +6,7 @@
 import { InvalidateSync } from '@/utils/sync';
 import { sessionBash } from './ops';
 import { GitStatus } from './storageTypes';
-import { storage } from './storage';
+import { getSession, storage } from './storage';
 import { parseStatusSummary, getStatusCounts, isDirty } from './git-parsers/parseStatus';
 import { parseStatusSummaryV2, getStatusCountsV2, isDirtyV2, getCurrentBranchV2, getTrackingInfoV2 } from './git-parsers/parseStatusV2';
 import { parseCurrentBranch } from './git-parsers/parseBranch';
@@ -23,7 +23,7 @@ export class GitStatusSync {
      * Get project key string for a session
      */
     private getProjectKeyForSession(sessionId: string): string | null {
-        const session = storage.getState().sessions[sessionId];
+        const session = getSession(sessionId);
         if (!session?.metadata?.machineId || !session?.metadata?.path) {
             return null;
         }
@@ -104,7 +104,7 @@ export class GitStatusSync {
     private async fetchGitStatusForProject(sessionId: string, projectKey: string): Promise<void> {
         try {
             // Check if we have a session with valid metadata
-            const session = storage.getState().sessions[sessionId];
+            const session = getSession(sessionId);
             if (!session?.metadata?.path) {
                 return;
             }

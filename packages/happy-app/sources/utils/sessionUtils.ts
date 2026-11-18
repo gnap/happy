@@ -1,6 +1,6 @@
 import * as React from 'react';
 import { Session } from '@/sync/storageTypes';
-import { useSessionOnline } from '@/sync/storage';
+import { useResolvedPermissionIds, useSessionOnline } from '@/sync/storage';
 import { sessionIsRestarting } from '@/utils/sessionRestart';
 import { t } from '@/text';
 
@@ -35,7 +35,15 @@ export function useSessionStatus(session: Session): SessionStatus {
     // to know about. The server's view is consulted only when nothing nearer can answer: it is a
     // report about the past, and a report about the past must not overwrite what is happening now.
     const isOnline = useSessionOnline(session.id, session.metadata?.machineId);
-    const hasPermissions = (session.agentState?.requests && Object.keys(session.agentState.requests).length > 0 ? true : false);
+    // The server's list of unanswered requests, minus the ones the message stream has seen
+    // answered. The two disagree while the server cannot acknowledge the removal — exactly the
+    // window in which this row would otherwise keep saying "permission required" after the user
+    // has answered. Where the log has not been loaded the set is empty and this reads as before.
+    const resolvedPermissions = useResolvedPermissionIds(session.id);
+    const requests = session.agentState?.requests;
+    const hasPermissions = requests
+        ? Object.keys(requests).some(id => !resolvedPermissions.has(id))
+        : false;
 
     const vibingMessage = React.useMemo(() => {
         return vibingMessages[Math.floor(Math.random() * vibingMessages.length)].toLowerCase() + '…';

@@ -381,7 +381,17 @@ function relayDriver(state: ChannelState): ChannelDriver {
             // interface having a bad moment; the machine is still dialled in and its HTTP route is
             // still there. Only an address that never answered, or one the relay says it no longer
             // holds, is a reason to call the channel unavailable.
-            const answered = carried || candidates.some((candidate) => answeredAt(state, candidate));
+            //
+            // A stream this device asked for and the relay would not open is a different fact. It
+            // is the one transport a daemon channel can *send* on, so while it sits in its reconnect
+            // backoff the channel cannot carry that machine's messages at all — however healthy the
+            // hub looks and however emphatic the directory is. Reporting reachability anyway is what
+            // kept an outbox retrying the relay while the server sat idle. The backoff is the
+            // evidence's clock: the channel returns the moment the stream does. And it is the
+            // per-machine stream being consulted, not the hub — a hub that is reconnecting is
+            // handled above.
+            const streamRetrying = state.daemonSockets[`${machineId}:relay`]?.phase === 'retrying';
+            const answered = (!streamRetrying && carried) || candidates.some((candidate) => answeredAt(state, candidate));
             return { reachable: answered, alive: answered };
         },
         session: (sessionId, machineId) => {

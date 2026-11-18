@@ -6,7 +6,7 @@ import { AuthCredentials } from '@/auth/tokenStorage';
 import { Encryption } from '@/sync/encryption/encryption';
 import { decodeBase64, encodeBase64 } from '@/encryption/base64';
 import { reinitSodium } from '@/encryption/libsodium';
-import { storage } from './storage';
+import { storage, getSession, getSessionGitStatus, getSessionMessages, getSessions } from './storage';
 import { ApiEphemeralUpdateSchema, ApiMessage, ApiUpdateContainerSchema } from './apiTypes';
 import type { ApiEphemeralActivityUpdate } from './apiTypes';
 import { Session, Machine } from './storageTypes';
@@ -1262,7 +1262,7 @@ class Sync {
         }
 
         // Notify voice assistant about session visibility
-        const session = storage.getState().sessions[sessionId];
+        const session = getSession(sessionId);
         if (session) {
             voiceHooks.onSessionFocus(sessionId, session.metadata || undefined);
         }
@@ -1353,8 +1353,8 @@ class Sync {
         }
 
         const state = storage.getState();
-        const session = state.sessions[sessionId];
-        const sessionMsgs = state.sessionMessages[sessionId];
+        const session = getSession(sessionId);
+        const sessionMsgs = getSessionMessages(sessionId);
         if (!session || !sessionMsgs) return;
         const lastSeq = watermark?.lastSeq ?? this.sessionLastSeq.get(sessionId) ?? 0;
         const oldestSeq = watermark?.oldestSeq ?? sessionMsgs.oldestSeq;
@@ -1698,7 +1698,7 @@ class Sync {
         }
 
         // Get session data from storage
-        const session = storage.getState().sessions[sessionId];
+        const session = getSession(sessionId);
         if (!session) {
             console.error(`Session ${sessionId} not found in storage`);
             return;
@@ -2220,7 +2220,7 @@ class Sync {
                 // The deployed server has no presence field in its list response. Keep what this
                 // device already knows rather than resetting every session to idle on each fetch;
                 // a turn transition still arrives immediately over the activity frame.
-                const existingThinking = storage.getState().sessions[session.id];
+                const existingThinking = getSession(session.id);
                 const processedSession = {
                     ...session,
                     // A row first learned from a machine keeps that origin across server refreshes;
@@ -2263,7 +2263,7 @@ class Sync {
                 `apply ${applyMs}ms | ${decryptedSessions.length} sessions (delta)`
             );
             // Save full merged state (cached + delta), not just the delta results.
-            const fullState = storage.getState().sessions;
+            const fullState = getSessions();
             const allValues = Object.values(fullState).map(({ presence, ...s }) => s);
             // Use the accumulated key map (merged across all fetches since startup)
             // rather than only the current response's keys. Delta fetches return a
@@ -3444,9 +3444,9 @@ class Sync {
             return null;
         }
         const state = storage.getState();
-        const messages = state.sessionMessages[sessionId];
+        const messages = getSessionMessages(sessionId);
         const link = this.daemonLinks.get(sessionId);
-        const lastRead = state.sessionMessages[sessionId]?.isFetching ? 'in flight' : 'idle';
+        const lastRead = messages?.isFetching ? 'in flight' : 'idle';
         return {
             channel: this.preferredChannel(sessionId),
             window: messages ? `${messages.oldestSeq}–${messages.newestSeq} (${messages.messages.length} messages)` : 'none',
@@ -3685,11 +3685,11 @@ class Sync {
             return inFlight;
         }
         const state = storage.getState();
-        const session = state.sessions[sessionId];
+        const session = getSession(sessionId);
         if (!session) {
             return;
         }
-        const existing = state.sessionMessages[sessionId]?.messages ?? [];
+        const existing = getSessionMessages(sessionId)?.messages ?? [];
         if (existing.length > 0 && this.hydratedSessions.has(sessionId)) {
             // A window is already on screen and it came from this process's cache. Nothing to do.
             return;
@@ -3713,7 +3713,7 @@ class Sync {
             // cached one. It used to win by default, and after a reload that meant the screen kept
             // ten pushed messages and refused the sixty-message window it had on disk. Merge by
             // identity so neither side is dropped.
-            const heldWindow = storage.getState().sessionMessages[sessionId];
+            const heldWindow = getSessionMessages(sessionId);
             const held = heldWindow?.messages ?? [];
             const merged = held.length > 0 ? mergePageIntoWindow(held, cached.messages) : null;
             if (held.length > 0 && !merged) {
@@ -3931,7 +3931,7 @@ class Sync {
                 }
 
                 const cachedLastSeq = this.sessionLastSeq.get(sessionId) ?? 0;
-                const currentSession = storage.getState().sessions[sessionId];
+                const currentSession = getSession(sessionId);
                 // The server's own numbering, and nothing else. The store's newestSeq mixes axes —
                 // daemon reads and the daemon's session list both carry the daemon's counter —
                 // so comparing it against the server's said "already up to date" about messages
@@ -3952,7 +3952,7 @@ class Sync {
                 // Cold-start uses the full-screen loader (isLoaded=false), not this bottom spinner.
                 // Skip the spinner when the seq increment is caused by our own outgoing message
                 // (already shown optimistically) — avoids a spurious flash while the send is in flight.
-                const alreadyLoaded = storage.getState().sessionMessages[sessionId]?.isLoaded ?? false;
+                const alreadyLoaded = getSessionMessages(sessionId)?.isLoaded ?? false;
                 const hasPendingOutbox = (this.pendingOutbox.get(sessionId)?.length ?? 0) > 0;
                 if (alreadyLoaded && !hasPendingOutbox) {
                     storage.getState().setFetching(sessionId, true);
@@ -4062,7 +4062,7 @@ class Sync {
                 let oldestSeq: number;
                 let hasOlderMessages: boolean;
                 if (cachedLastSeq > 0) {
-                    const existingState = storage.getState().sessionMessages[sessionId];
+                    const existingState = getSessionMessages(sessionId);
                     oldestSeq = existingState?.oldestSeq ?? 0;
                     hasOlderMessages = existingState?.hasOlderMessages ?? false;
                 } else {
@@ -4089,7 +4089,7 @@ class Sync {
 
                 // Only patch store for cold-start path; incremental path already has correct values.
                 if (cachedLastSeq === 0) {
-                    const stateAfter = storage.getState().sessionMessages[sessionId];
+                    const stateAfter = getSessionMessages(sessionId);
                     if (stateAfter) {
                         storage.getState().applyOlderMessages(sessionId, [], oldestSeq, hasOlderMessages);
                     }
@@ -4152,7 +4152,7 @@ class Sync {
                         // every transport-level refusal — no CORS headers on the far side, an address
                         // on a network this device is not on, a port that is closed — and the three
                         // have nothing in common but the message. The route is what tells them apart.
-                        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+                        const machineId = getSession(sessionId)?.metadata?.machineId;
                         const relay = machineId ? storage.getState().relayEndpoints[machineId]?.baseUrl : undefined;
                         const lan = machineId ? this.lanMachineConnections.get(machineId)?.baseUrl : undefined;
                         log.log(`📡 fetchMessages: fallback failed for ${sessionId} (machine ${machineId ?? '?'}, relay ${relay ?? '-'}, lan ${lan ?? '-'}, via ${this.preferredChannel(sessionId)}): ${String(lanError)}`);
@@ -4174,7 +4174,7 @@ class Sync {
      * Called when the user scrolls to the top of the message list.
      */
     fetchOlderMessages = async (sessionId: string): Promise<void> => {
-        const stateNow = storage.getState().sessionMessages[sessionId];
+        const stateNow = getSessionMessages(sessionId);
         if (!stateNow?.hasOlderMessages || stateNow.isLoadingOlder) return;
 
         // A session on a daemon channel scrolls back through the daemon's log, not the server's.
@@ -4194,7 +4194,7 @@ class Sync {
                 const encryption = this.encryption.getSessionEncryption(sessionId);
                 if (!encryption) throw new Error(`Session encryption not ready for ${sessionId}`);
 
-                const currentState = storage.getState().sessionMessages[sessionId];
+                const currentState = getSessionMessages(sessionId);
                 if (!currentState?.hasOlderMessages) return;
 
                 const oldestSeq = currentState.oldestSeq;
@@ -4311,7 +4311,7 @@ class Sync {
                 this.daemonLinks.set(sessionId, { ...link, older: read.older, hasOlder: read.hasOlder });
                 const oldestSeq = read.messages.length > 0
                     ? minSeqOf(read.messages)
-                    : storage.getState().sessionMessages[sessionId]?.oldestSeq ?? 0;
+                    : getSessionMessages(sessionId)?.oldestSeq ?? 0;
                 storage.getState().applyOlderMessages(sessionId, read.messages, oldestSeq, read.hasOlder);
                 void this.saveSessionCache(
                     sessionId,
@@ -4465,7 +4465,7 @@ class Sync {
                     // Fast-ack: mark as acked (green). Only the CLI pop echo
                     // (via echoedMessageId in session-protocol user text) removes.
                     storage.getState().markOutboxMessageAcked(incomingLocalId);
-                    const session2 = storage.getState().sessions[sid];
+                    const session2 = getSession(sid);
                     if (session2) {
                         this.applySessions([{ ...session2, updatedAt: updateData.createdAt, seq: updateData.body.message.seq }]);
                     }
@@ -4509,7 +4509,7 @@ class Sync {
                     );
                     const shouldClearThinking = thinkingPatch?.thinking === false;
 
-                    const session = storage.getState().sessions[updateData.body.sid];
+                    const session = getSession(updateData.body.sid);
                     if (session) {
                         this.applySessions([{
                             ...session,
@@ -4671,7 +4671,7 @@ class Sync {
 
             log.log(`🗑️ Session ${sessionId} deleted from local storage`);
         } else if (updateData.body.t === 'update-session') {
-            const session = storage.getState().sessions[updateData.body.id];
+            const session = getSession(updateData.body.id);
             if (session) {
                 // Get session encryption
                 const sessionEncryption = this.encryption.getSessionEncryption(updateData.body.id);
@@ -5007,7 +5007,7 @@ class Sync {
 
         const now = Date.now();
         for (const [sessionId, update] of updates) {
-            const session = storage.getState().sessions[sessionId];
+            const session = getSession(sessionId);
             if (session) {
                 let thinking = update.thinking ?? false;
                 // The transition's own time, not the heartbeat's: "thinking since" must not drift
@@ -5197,7 +5197,7 @@ class Sync {
             return null;
         }
 
-        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        const machineId = getSession(sessionId)?.metadata?.machineId;
         const machineKey = machineId ? this.getMachineKey(machineId) : null;
         const remembered = this.daemonLinks.get(sessionId);
         const inMemory = remembered && remembered.machineId === machineId ? remembered : undefined;
@@ -5210,7 +5210,7 @@ class Sync {
         // cache is gone — cleared, never written, a fresh install — that anchor is a claim about
         // messages that are not there, and reading from it produces a window holding nothing but
         // whatever was appended since, which is to say a blank conversation with a live socket.
-        const loadedWindow = storage.getState().sessionMessages[sessionId];
+        const loadedWindow = getSessionMessages(sessionId);
         const hasWindow = !!loadedWindow?.isLoaded && loadedWindow.messages.length > 0;
         const persisted = hasWindow ? this.lanWindows[sessionId] : undefined;
         const anchor = inMemory
@@ -5235,7 +5235,7 @@ class Sync {
         // entries the store already has are dropped before the decryptor sees them. Without this
         // a poll re-decrypts and re-normalises hundreds of entries to learn about a handful.
         const knownIdentities = new Set<string>();
-        for (const message of storage.getState().sessionMessages[sessionId]?.messages ?? []) {
+        for (const message of getSessionMessages(sessionId)?.messages ?? []) {
             knownIdentities.add(message.id);
             const localId = 'localId' in message ? message.localId : null;
             if (localId) {
@@ -5326,7 +5326,7 @@ class Sync {
         // store's window is left alone.
         let keepWindow = false;
         if (read && replace && hasWindow) {
-            const held = storage.getState().sessionMessages[sessionId]?.messages ?? [];
+            const held = getSessionMessages(sessionId)?.messages ?? [];
             const heldNewest = held.length > 0 ? held[held.length - 1].createdAt : 0;
             const pageNewest = read.messages.length > 0
                 ? Math.max(...read.messages.map((message) => message.createdAt))
@@ -5447,7 +5447,7 @@ class Sync {
      * is down, which is the case the LAN channel exists for.
      */
     async getToolCallFullContent(sessionId: string, callId: string): Promise<GetToolCallFullContentResponse> {
-        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        const machineId = getSession(sessionId)?.metadata?.machineId;
         if (machineId && this.getMachineKey(machineId)) {
             const carried = await this.carryAtDaemon<{ args?: unknown; result?: unknown }>({
                 machineId,
@@ -5502,7 +5502,7 @@ class Sync {
         if (path.endsWith('/')) {
             return { ok: false, error: 'That is a folder, not a file' };
         }
-        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        const machineId = getSession(sessionId)?.metadata?.machineId;
         if (!machineId) {
             return { ok: false, error: 'This session does not say which machine it is on' };
         }
@@ -5570,7 +5570,7 @@ class Sync {
         sessionId: string,
         path: string,
     ): Promise<{ ok: true; uri?: string; bytes?: Uint8Array; name: string } | { ok: false; error: string }> {
-        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        const machineId = getSession(sessionId)?.metadata?.machineId;
         if (!machineId) {
             return { ok: false, error: 'This session does not say which machine it is on' };
         }
@@ -5632,7 +5632,7 @@ class Sync {
      * bytes-only preview it had.
      */
     async getHtmlPreviewUrl(sessionId: string, path: string): Promise<string | null> {
-        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        const machineId = getSession(sessionId)?.metadata?.machineId;
         if (!machineId || !this.getMachineKey(machineId)) {
             return null;
         }
@@ -5667,7 +5667,7 @@ class Sync {
         if (cached && Date.now() - cached.at < Sync.LISTING_CACHE_MS) {
             return cached.value;
         }
-        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        const machineId = getSession(sessionId)?.metadata?.machineId;
         let value: SessionListing | null = null;
         if (machineId && this.getMachineKey(machineId)) {
             const carried = await this.carryAtDaemon<SessionListing>({
@@ -5711,7 +5711,7 @@ class Sync {
      * remains for daemons that predate the route.
      */
     async getFileDiff(sessionId: string, path: string): Promise<string | null> {
-        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        const machineId = getSession(sessionId)?.metadata?.machineId;
         if (machineId && this.getMachineKey(machineId)) {
             const carried = await this.carryAtDaemon<{ diff: string }>({
                 machineId,
@@ -5727,7 +5727,7 @@ class Sync {
             }
             log.log(`📄 diff ${sessionId} ${path}: ${carried.kind}`);
         }
-        const sessionPath = storage.getState().sessions[sessionId]?.metadata?.path;
+        const sessionPath = getSession(sessionId)?.metadata?.path;
         if (!sessionPath) {
             return null;
         }
@@ -5814,7 +5814,7 @@ class Sync {
 
     /** Whether this session's CLI publishes its working tree in metadata. */
     private gitStatusPublished(sessionId: string): boolean {
-        return storage.getState().sessions[sessionId]?.metadata?.gitStatus !== undefined;
+        return getSession(sessionId)?.metadata?.gitStatus !== undefined;
     }
 
     /**
@@ -5831,7 +5831,7 @@ class Sync {
             if (!status) {
                 continue;
             }
-            const current = store.sessionGitStatus[session.id];
+            const current = getSessionGitStatus(session.id);
             if (current && this.sameGitStatus(current, status)) {
                 continue;
             }
@@ -5891,7 +5891,7 @@ class Sync {
             onServer?: () => Promise<T | null>;
         },
     ): Promise<CarryOutcome<T>> {
-        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        const machineId = getSession(sessionId)?.metadata?.machineId;
         if (!machineId) {
             return { kind: 'refused', reason: 'unsupported', channel: null };
         }
@@ -6245,7 +6245,7 @@ class Sync {
         // rows it names are created here, and rows it says it archived are deleted. The server's
         // list remains one more source (and the bootstrap when no machine answers), but it is no
         // longer the only thing that can put a session on screen.
-        const knownSessions = storage.getState().sessions;
+        const knownSessions = getSessions();
         const catalogIds = new Set<string>();
         const catalogRows: Session[] = [];
         const now = Date.now();
@@ -6335,7 +6335,7 @@ class Sync {
         const tombstoned = new Set<string>();
         for (const answer of answers) {
             for (const tombstone of answer.tombstones ?? []) {
-                if (storage.getState().sessions[tombstone.sessionId]) {
+                if (getSession(tombstone.sessionId)) {
                     storage.getState().deleteSession(tombstone.sessionId);
                     tombstoned.add(tombstone.sessionId);
                 }
@@ -6343,7 +6343,7 @@ class Sync {
         }
 
         // Rows the old lifecycle/roster paths left behind and no catalog names: drop them once.
-        const stalePlaceholders = Object.values(storage.getState().sessions).filter((session) =>
+        const stalePlaceholders = Object.values(getSessions()).filter((session) =>
             !catalogIds.has(session.id)
             && session.origin === undefined
             && session.metadataVersion === 0
@@ -6421,6 +6421,9 @@ class Sync {
     private channelDrivers(): ChannelDriver[] {
         const state = storage.getState();
         const priority = state.localSettings.channelPriority;
+        // The keyed store's snapshot identity changes on every write, so it belongs in the cache
+        // key exactly like the whole-map field it replaced.
+        const sessions = getSessions();
         const key = [
             state.socketStatus,
             state.daemonSockets,
@@ -6433,7 +6436,7 @@ class Sync {
             state.relayEndpoints,
             state.relayDirectory,
             state.relayHubConnected,
-            state.sessions,
+            sessions,
             state.machines,
             state.daemonSessionList,
             priority,
@@ -6442,7 +6445,7 @@ class Sync {
         if (cached && cached.key.length === key.length && cached.key.every((part, index) => part === key[index])) {
             return cached.drivers;
         }
-        const drivers = buildChannelDrivers(state, priority);
+        const drivers = buildChannelDrivers({ ...state, sessions }, priority);
         this.channelDriversCache = { key, drivers };
         return drivers;
     }
@@ -6462,7 +6465,7 @@ class Sync {
         if (override) {
             return [override, 'pinned'];
         }
-        const session = storage.getState().sessions[sessionId];
+        const session = getSession(sessionId);
         // A session that never declared the capability is running a build that cannot serve the LAN
         // at all: it keeps no message log for the LAN to read, and it cannot take a message
         // delivered back over it. Preferring the LAN for one would show an empty session and
@@ -7121,7 +7124,7 @@ class Sync {
             // restarted live sessions whenever a message was sent into one of those gaps.
             return listed.origin !== 'server' && listed.isAlive === false;
         }
-        const machineId = state.sessions[sessionId]?.metadata?.machineId;
+        const machineId = getSession(sessionId)?.metadata?.machineId;
         const published = machineId
             ? state.relayDirectory[machineId]?.sessions.find((session) => session.happySessionId === sessionId)
             : undefined;
@@ -7140,7 +7143,7 @@ class Sync {
         if (Date.now() - last < Sync.SESSION_WAKE_WINDOW_MS) {
             return 'recent';
         }
-        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        const machineId = getSession(sessionId)?.metadata?.machineId;
         if (!machineId) {
             return 'failed';
         }
@@ -7168,7 +7171,7 @@ class Sync {
         if (!visible) {
             return;
         }
-        if (storage.getState().sessions[visible]?.metadata?.machineId === machineId) {
+        if (getSession(visible)?.metadata?.machineId === machineId) {
             this.readScheduler.markStale();
         }
     }
@@ -7316,7 +7319,7 @@ class Sync {
         if (channel === 'server') {
             return null;
         }
-        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        const machineId = getSession(sessionId)?.metadata?.machineId;
         if (!machineId) {
             return null;
         }
@@ -7439,7 +7442,7 @@ class Sync {
         // "nothing yet, still loading" from "this session has nothing", and setting it on every tick
         // made the indicator at the bottom of the list flicker on a two-second poll — a loader that
         // is on most of the time reads as one that never stops.
-        if (storage.getState().sessionMessages[sessionId]?.messages.length === 0) {
+        if (getSessionMessages(sessionId)?.messages.length === 0) {
             storage.getState().setFetching(sessionId, true);
         }
         const read = await this.fetchSessionFromDaemon(sessionId);
@@ -7494,7 +7497,7 @@ class Sync {
             // session refreshes when the socket returns, or when the person opens it again.
             return false;
         }
-        const machineId = storage.getState().sessions[sessionId]?.metadata?.machineId;
+        const machineId = getSession(sessionId)?.metadata?.machineId;
         if (!machineId) {
             return false;
         }
@@ -7604,7 +7607,7 @@ class Sync {
      */
     private withoutStoredDuplicates(sessionId: string, messages: NormalizedMessage[]): NormalizedMessage[] {
         const known = new Set<string>();
-        for (const message of storage.getState().sessionMessages[sessionId]?.messages ?? []) {
+        for (const message of getSessionMessages(sessionId)?.messages ?? []) {
             known.add(message.id);
             // Not every variant carries a localId (mode-switch messages do not), so narrow first.
             const localId = 'localId' in message ? message.localId : null;
@@ -7621,7 +7624,7 @@ class Sync {
         const result = storage.getState().applyMessages(sessionId, messages);
         let m: Message[] = [];
         for (let messageId of result.changed) {
-            const message = storage.getState().sessionMessages[sessionId].messagesMap[messageId];
+            const message = getSessionMessages(sessionId)?.messagesMap[messageId];
             if (message) {
                 m.push(message);
             }
@@ -7649,7 +7652,7 @@ class Sync {
         }
 
         const thinkingPatch = getSessionThinkingPatchFromMessageContent(rawContent);
-        const session = storage.getState().sessions[sessionId];
+        const session = getSession(sessionId);
         const wasThinking = session?.thinking ?? false;
 
         if (thinkingPatch?.thinking === false) {

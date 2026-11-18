@@ -4,7 +4,7 @@
  */
 
 import { sessionBash } from './ops';
-import { storage } from './storage';
+import { getSession, storage } from './storage';
 import { parseStatusSummaryV2, getCurrentBranchV2 } from './git-parsers/parseStatusV2';
 import { parseNumStat, createDiffStatsMap } from './git-parsers/parseDiff';
 
@@ -33,7 +33,7 @@ export interface GitStatusFiles {
 export async function getGitStatusFiles(sessionId: string): Promise<GitStatusFiles | null> {
     try {
         // Check if we have a session with valid metadata
-        const session = storage.getState().sessions[sessionId];
+        const session = getSession(sessionId);
         if (!session?.metadata?.path) {
             return null;
         }

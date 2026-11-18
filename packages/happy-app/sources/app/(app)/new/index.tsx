@@ -2,7 +2,7 @@ import React from 'react';
 import { View, Text, Platform, Pressable, useWindowDimensions, ScrollView, TextInput, Switch} from 'react-native';
 import Constants from 'expo-constants';
 import { Typography } from '@/constants/Typography';
-import { useAllMachines, storage, useMachinePresenceMap, useSetting, useSettingMutable, useSessions, useLocalSetting } from '@/sync/storage';
+import { useAllMachines, storage, getSessions, useMachinePresenceMap, useSetting, useSettingMutable, useSessions, useLocalSetting } from '@/sync/storage';
 import { Ionicons, Octicons } from '@expo/vector-icons';
 import { ItemGroup } from '@/components/ItemGroup';
 import { Item } from '@/components/Item';
@@ -81,7 +81,7 @@ const getRecentPathForMachine = (machineId: string | null, recentPaths: Array<{ 
     const defaultPath = machine?.metadata?.homeDir || '';
 
     // Get all sessions for this machine, sorted by creation time (most recent first)
-    const sessions = Object.values(storage.getState().sessions);
+    const sessions = Object.values(getSessions());
     const pathsWithTimestamps: Array<{ path: string; timestamp: number }> = [];
 
     sessions.forEach(session => {

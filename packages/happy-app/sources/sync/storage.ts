@@ -19,6 +19,7 @@ import { channelDrivers, type ChannelState } from './channels/measure';
 import { candidateFailed as candidateFailedAt, candidateKey, candidateSucceeded, rearmAll, type CandidateHealth } from './channels/health';
 import type { ChannelDriver, ChannelLinkState, SessionReach } from './channels/types';
 import { resolveSessionReach } from './channels/resolve';
+import { KeyedStore, shallowEqual, useAllKeyedValues, useKeyedSelector, useKeyedValue, ValueStore, useValueStore } from './live';
 
 export { channelLinks, type ChannelLink } from './channelLinks';
 export type { ChannelLinkState } from './channels/types';
@@ -69,7 +70,7 @@ export interface OutboxEntry {
     createdAt: number;
 }
 
-interface SessionMessages {
+export interface SessionMessages {
     messages: Message[];
     /** Highest seq actually loaded into memory; 0 means unknown */
     newestSeq: number;
@@ -105,7 +106,6 @@ export type SessionListViewItem =
         type: 'session';
         session: Session;
         variant?: 'default' | 'no-path';
-        needsRestart?: boolean;
         /**
          * Whether anything is reaching this session, decided when the list was built.
          *
@@ -115,9 +115,6 @@ export type SessionListViewItem =
          */
         online?: boolean;
     };
-
-// Legacy type for backward compatibility - to be removed
-export type SessionListItem = string | Session;
 
 /**
  * How long a LAN sighting stays valid after the scan that produced it. Long enough to ride out a
@@ -132,12 +129,7 @@ interface StorageState {
     localSettings: LocalSettings;
     purchases: Purchases;
     profile: Profile;
-    sessions: Record<string, Session>;
-    sessionsData: SessionListItem[] | null;  // Legacy - to be removed
-    sessionListViewData: SessionListViewItem[] | null;
-    sessionMessages: Record<string, SessionMessages>;
     outbox: Record<string, OutboxEntry>;
-    sessionGitStatus: Record<string, GitStatus | null>;
     machines: Record<string, Machine>;
     /**
      * Machines the LAN scanner can currently see, keyed by machineId. Purely a local observation —
@@ -272,7 +264,6 @@ interface StorageState {
     applyLanEndpoint: (machineId: string, endpoint: { baseUrls: string[]; at: number } | null) => void;
     /** Record the live LAN socket, or null once it is gone. */
     setDaemonSocketStatus: (id: string, status: DaemonConnectionState) => void;
-    applyLoaded: () => void;
     applyReady: () => void;
     applyMessages: (sessionId: string, messages: NormalizedMessage[]) => { changed: string[], hasReadyEvent: boolean };
     applyMessagesLoaded: (sessionId: string) => void;
@@ -388,8 +379,103 @@ function dominantMachineId(sessions: Session[]): string | undefined {
 }
 
 // Helper function to build unified list view data from sessions and machines
-/** The last mark logged per session, so the line appears when it changes rather than per rebuild. */
-const listMarkLogged = new Map<string, string>();
+/** The last mark logged per session, so the line appears when it changes rather than per render. */
+const restartMarkLogged = new Map<string, string>();
+
+/** A session row as it lives in `sessionListViewData`. */
+type SessionListRow = Extract<SessionListViewItem, { type: 'session' }>;
+
+/**
+ * The rows the list was built from last time, so an unchanged row keeps its object.
+ *
+ * A new array or a new row wakes every reader of `sessionListViewData`, and the list is a snapshot
+ * read through `useSyncExternalStore`: a message arriving several times a second used to rebuild
+ * every row and redraw the whole screen for a change no row shows. Identity is what stops that at
+ * the source; the comparison below is what makes keeping it honest.
+ */
+let lastSessionRows = new Map<string, SessionListRow>();
+let lastGroupItems = new Map<string, SessionListViewItem>();
+let lastListViewData: SessionListViewItem[] | null = null;
+
+/** Whether two copies of one latest-usage figure say the same thing. */
+function sameUsage(previous: Session['latestUsage'], next: Session['latestUsage']): boolean {
+    if (previous === next) return true;
+    if (!previous || !next) return false;
+    return previous.inputTokens === next.inputTokens
+        && previous.outputTokens === next.outputTokens
+        && previous.cacheCreation === next.cacheCreation
+        && previous.cacheRead === next.cacheRead
+        && previous.contextSize === next.contextSize
+        && previous.contextWindowTokens === next.contextWindowTokens
+        && previous.model === next.model
+        && previous.timestamp === next.timestamp
+        && previous.cacheCreationBreakdown === next.cacheCreationBreakdown;
+}
+
+/**
+ * Whether two versions of one session draw the same list row.
+ *
+ * `updatedAt` and `seq` are deliberately left out: they advance with every message, and no row
+ * draws either — the name, subtitle, status dot and position come from the fields compared here.
+ * They are not ignored for ordering: the list still sorts and date-groups from the newest object;
+ * only the emitted row keeps the older one, because the two are equal in everything it shows.
+ *
+ * Objects are compared by reference on purpose: `metadata` and `agentState` are replaced only when
+ * their version moves, and the versions are compared too, so a reference that survived means the
+ * decrypted content is the same one.
+ */
+function sameListRowSession(previous: Session, next: Session): boolean {
+    if (previous === next) return true;
+    return previous.id === next.id
+        && previous.createdAt === next.createdAt
+        && previous.active === next.active
+        && previous.activeAt === next.activeAt
+        && previous.thinking === next.thinking
+        && previous.thinkingAt === next.thinkingAt
+        && previous.metadataVersion === next.metadataVersion
+        && previous.agentStateVersion === next.agentStateVersion
+        && previous.presence === next.presence
+        && (previous.restartingAt ?? null) === (next.restartingAt ?? null)
+        && previous.metadata === next.metadata
+        && previous.agentState === next.agentState
+        && previous.origin === next.origin
+        && previous.draft === next.draft
+        && previous.permissionMode === next.permissionMode
+        && previous.modelMode === next.modelMode
+        && previous.maxMode === next.maxMode
+        && previous.thinkingLevel === next.thinkingLevel
+        && previous.profileId === next.profileId
+        && previous.sandboxIsolation === next.sandboxIsolation
+        && previous.todos === next.todos
+        && previous.tasks === next.tasks
+        && sameUsage(previous.latestUsage, next.latestUsage);
+}
+
+/** Whether two copies of one machine say the same thing. */
+function sameMachine(previous: Machine, next: Machine): boolean {
+    if (previous === next) return true;
+    return previous.id === next.id
+        && previous.seq === next.seq
+        && previous.createdAt === next.createdAt
+        && previous.updatedAt === next.updatedAt
+        && previous.active === next.active
+        && previous.activeAt === next.activeAt
+        && previous.metadataVersion === next.metadataVersion
+        && previous.daemonStateVersion === next.daemonStateVersion
+        && previous.metadata === next.metadata
+        && previous.daemonState === next.daemonState;
+}
+
+/** Whether two machine maps say the same thing — same rows, same values, nothing removed. */
+function sameMachines(previous: Record<string, Machine>, next: Record<string, Machine>): boolean {
+    const previousIds = Object.keys(previous);
+    if (previousIds.length !== Object.keys(next).length) return false;
+    for (const id of previousIds) {
+        const nextMachine = next[id];
+        if (!nextMachine || !sameMachine(previous[id], nextMachine)) return false;
+    }
+    return true;
+}
 
 /**
  * Whether restarting this session would change its build — the one rule for every list.
@@ -432,8 +518,6 @@ export function sessionNeedsRestart(
 function buildSessionListViewData(
     sessions: Record<string, Session>,
     machines: Record<string, { metadata?: { happyCliVersion?: string } | null; daemonState?: { startedWithCliVersion?: string } | null }>,
-    /** What each machine said it is running, asked over whichever channel that machine answered on. */
-    daemonVersions: Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }> = {},
     /**
      * The channels this device has, in the order it prefers them.
      *
@@ -447,6 +531,52 @@ function buildSessionListViewData(
 ): SessionListViewItem[] {
     /** Whether anything is reaching this session, from any channel, the way the rest of the App asks. */
     const reached = (session: Session) => resolveSessionReach(session.id, session.metadata?.machineId, drivers).online;
+
+    // What this build produces, and what the last one produced, side by side.
+    const previousRows = lastSessionRows;
+    const previousGroups = lastGroupItems;
+    const nextRows = new Map<string, SessionListRow>();
+    const nextGroups = new Map<string, SessionListViewItem>();
+
+    /**
+     * The row for a session, which is the previous row whenever the session still draws the same.
+     *
+     * `online` is asked fresh rather than compared from the previous row: it is not a property of
+     * the session alone — it reads the channels — and it can move without the session object
+     * changing. The restart mark is not on the row at all: it depends on what the machine last
+     * reported, which changes on its own schedule, and the row that draws it asks for it.
+     */
+    const sessionRow = (session: Session): SessionListRow => {
+        const online = reached(session);
+        const previous = previousRows.get(session.id);
+        if (previous
+            && sameListRowSession(previous.session, session)
+            && previous.online === online) {
+            nextRows.set(session.id, previous);
+            return previous;
+        }
+        const row: SessionListRow = { type: 'session', session, online };
+        nextRows.set(session.id, row);
+        return row;
+    };
+
+    /**
+     * A group header or divider, which is the previous one whenever it says the same thing.
+     *
+     * The key carries what the header draws, not just which project it is: the same project appears
+     * once under the online sessions and again under each date it has sessions in, and those groups
+     * can name different branches. Keyed by project alone, two such groups would keep handing each
+     * other's object back and forth, and the list would be rebuilt on every call for no change.
+     */
+    const groupItem = <T extends SessionListViewItem>(key: string, item: T, same: (previous: T, next: T) => boolean = () => true): T => {
+        const previous = previousGroups.get(key);
+        if (previous && previous.type === item.type && same(previous as T, item)) {
+            nextGroups.set(key, previous);
+            return previous as T;
+        }
+        nextGroups.set(key, item);
+        return item;
+    };
 
     // Separate active and inactive sessions
     const activeSessions: Session[] = [];
@@ -466,31 +596,6 @@ function buildSessionListViewData(
     activeSessions.sort((a, b) => b.createdAt - a.createdAt);
     // Inactive sessions sort by last activity so the date headers make sense.
     inactiveSessions.sort((a, b) => b.updatedAt - a.updatedAt);
-
-    /**
-     * Whether restarting this session would change its build.
-     *
-     * The baseline is the machine's own report, the same one the session page uses and in the same
-     * order: the build on disk (what a restart would spawn), then the build the daemon is running,
-     * then the fields written by the daemon, and only last the server's copy of the machine — which
-     * is the one that goes stale on its own, and the one this rule used to be built on. A copy that
-     * is missing or old makes "the versions differ" false, so sessions older than their machine read
-     * as up to date, which is what made this decision look arbitrary.
-     */
-    const getNeedsRestart = (s: Session): boolean => {
-        const marked = sessionNeedsRestart(s, machines, daemonVersions);
-        // The mark's inputs, once per change: three sources feed this baseline and a log is the only
-        // way to tell a rule that decided wrongly from one that was handed nothing.
-        const machineId = s.metadata?.machineId;
-        const machine = machineId ? machines[machineId] : undefined;
-        const live = machineId ? daemonVersions[machineId] : undefined;
-        const summary = `${s.id} session=${s.metadata?.version ?? '-'} onDisk=${live?.onDisk ?? '-'} running=${live?.running ?? '-'} record=${machine?.daemonState?.startedWithCliVersion ?? '-'} server=${machine?.metadata?.happyCliVersion ?? '-'} marked=${marked}`;
-        if (listMarkLogged.get(s.id) !== summary) {
-            listMarkLogged.set(s.id, summary);
-            console.log(`🔄 list restart mark: ${summary}`);
-        }
-        return marked;
-    };
 
     // Helper: emit a date group, inserting project-group headers with host sub-groups.
     const emitSessionGroup = (group: Session[]) => {
@@ -517,7 +622,7 @@ function buildSessionListViewData(
         // Standard sessions sort by last activity for the date headers.
         standard.sort((a, b) => b.updatedAt - a.updatedAt);
         for (const s of standard) {
-            listData.push({ type: 'session', session: s, needsRestart: getNeedsRestart(s), online: reached(s) });
+            listData.push(sessionRow(s));
         }
         // Sort project groups by newest createdAt in each group (stable)
         const sortedProjects = [...byProject.entries()].sort(([, a], [, b]) => {
@@ -540,7 +645,10 @@ function buildSessionListViewData(
             const homeDir = sessions[0]?.metadata?.homeDir;
             const branch = sessions.find(s => !!s.metadata?.branchName)?.metadata?.branchName
                         ?? sessions.find(s => !!s.metadata?.worktreeBranch)?.metadata?.worktreeBranch;
-            listData.push({ type: 'worktree-group', projectPath, homeDir, branch });
+            listData.push(groupItem(
+                `worktree:${projectPath}\u0000${homeDir ?? ''}\u0000${branch ?? ''}`,
+                { type: 'worktree-group', projectPath, homeDir, branch },
+            ));
             // Emit host sub-groups (sorted by newest session in each host)
             const sortedHosts = [...byHost.entries()].sort(([, a], [, b]) => {
                 const aMax = Math.max(...a.map(s => s.createdAt));
@@ -556,9 +664,13 @@ function buildSessionListViewData(
                     return b.createdAt - a.createdAt;
                 });
                 const onlineCount = hostSessions.filter(reached).length;
-                listData.push({ type: 'host-group', projectPath, host, machineId: dominantMachineId(hostSessions), onlineCount, totalCount: hostSessions.length });
+                const machineId = dominantMachineId(hostSessions);
+                listData.push(groupItem(
+                    `host:${projectPath}\u0000${host}\u0000${machineId ?? ''}\u0000${onlineCount}\u0000${hostSessions.length}`,
+                    { type: 'host-group', projectPath, host, machineId, onlineCount, totalCount: hostSessions.length },
+                ));
                 for (const s of hostSessions) {
-                    listData.push({ type: 'session', session: s, needsRestart: getNeedsRestart(s), online: reached(s) });
+                    listData.push(sessionRow(s));
                 }
             }
         }
@@ -599,7 +711,10 @@ function buildSessionListViewData(
             const homeDir = projectSessions[0]?.metadata?.homeDir;
             const branch = projectSessions.find(s => !!s.metadata?.branchName)?.metadata?.branchName
                         ?? projectSessions.find(s => !!s.metadata?.worktreeBranch)?.metadata?.worktreeBranch;
-            toList.push({ type: 'worktree-group', projectPath, homeDir, branch });
+            toList.push(groupItem(
+                `worktree:${projectPath}\u0000${homeDir ?? ''}\u0000${branch ?? ''}`,
+                { type: 'worktree-group', projectPath, homeDir, branch },
+            ));
             // Sub-group by host
             const byHost = new Map<string, Session[]>();
             for (const s of projectSessions) {
@@ -621,9 +736,13 @@ function buildSessionListViewData(
                     return b.createdAt - a.createdAt;
                 });
                 const onlineCount = hostSessions.filter(reached).length;
-                toList.push({ type: 'host-group', projectPath, host, machineId: dominantMachineId(hostSessions), onlineCount, totalCount: hostSessions.length });
+                const machineId = dominantMachineId(hostSessions);
+                toList.push(groupItem(
+                    `host:${projectPath}\u0000${host}\u0000${machineId ?? ''}\u0000${onlineCount}\u0000${hostSessions.length}`,
+                    { type: 'host-group', projectPath, host, machineId, onlineCount, totalCount: hostSessions.length },
+                ));
                 for (const s of hostSessions) {
-                    toList.push({ type: 'session', session: s, needsRestart: getNeedsRestart(s), online: reached(s) });
+                    toList.push(sessionRow(s));
                 }
             }
         }
@@ -631,7 +750,12 @@ function buildSessionListViewData(
     };
     const activeNoProject = emitProjectGroups(activeSessions, listData);
     if (activeNoProject.length > 0) {
-        listData.push({ type: 'active-sessions', sessions: activeNoProject });
+        listData.push(groupItem(
+            'active-sessions',
+            { type: 'active-sessions', sessions: activeNoProject },
+            (previous, next) => previous.sessions.length === next.sessions.length
+                && previous.sessions.every((session, index) => sameListRowSession(session, next.sessions[index])),
+        ));
     }
 
     // Group inactive sessions by date
@@ -663,7 +787,7 @@ function buildSessionListViewData(
                     headerTitle = `${diffDays} days ago`;
                 }
 
-                listData.push({ type: 'header', title: headerTitle });
+                listData.push(groupItem(`header:${headerTitle}`, { type: 'header', title: headerTitle }));
                 emitSessionGroup(currentDateGroup);
             }
 
@@ -691,11 +815,24 @@ function buildSessionListViewData(
             headerTitle = `${diffDays} days ago`;
         }
 
-        listData.push({ type: 'header', title: headerTitle });
+        listData.push(groupItem(`header:${headerTitle}`, { type: 'header', title: headerTitle }));
         emitSessionGroup(currentDateGroup);
     }
 
-    return listData;
+    // Every row above was taken from the last build when it still says the same thing. If that
+    // holds for all of them, this build says nothing new either, and the last array is returned as
+    // it was: a snapshot reader compares by identity, so an identical array stops the redraw
+    // before it starts.
+    const previous = lastListViewData;
+    const unchanged = previous !== null
+        && previous.length === listData.length
+        && listData.every((item, index) => item === previous[index]);
+
+    const result = unchanged && previous !== null ? previous : listData;
+    lastSessionRows = nextRows;
+    lastGroupItems = nextGroups;
+    lastListViewData = result;
+    return result;
 }
 
 /**
@@ -735,6 +872,62 @@ function reduceRelayEndpoint(
     return { relayEndpoints: next };
 }
 
+/**
+ * The facts a channel can change about a session.
+ *
+ * If two answers agree on all of them, the session did not move: its presence is derived from
+ * `active`/`activeAt` alone, and every other field of the stored object is a merge of this answer
+ * with local choices that did not change either. That is the test used both to skip a whole
+ * refresh and to keep the per-session object when only one session in the batch changed.
+ */
+type WireSession = Omit<Session, 'presence'> & { presence?: "online" | number };
+
+function sameWireSession(a: WireSession, b: WireSession): boolean {
+    return a.active === b.active
+        && a.activeAt === b.activeAt
+        && a.thinking === b.thinking
+        && a.thinkingAt === b.thinkingAt
+        && a.metadataVersion === b.metadataVersion
+        && a.agentStateVersion === b.agentStateVersion
+        && a.updatedAt === b.updatedAt
+        && a.seq === b.seq
+        && (a.restartingAt ?? null) === (b.restartingAt ?? null);
+}
+
+/**
+ * Per-key projections of the two hot maps.
+ *
+ * `sessionMessages` lives only here, not in the zustand state: the message actions below read and
+ * write these keys directly, so appending a message no longer replaces a whole map (and no longer
+ * runs every selector in the App) — it wakes the chat of that session and nothing else.
+ *
+ * `sessions` lives here too. The actions write those keys directly, the list is recomputed once
+ * per flush from `snapshot()`, and a row subscribes to its own session — so an update to one
+ * session no longer runs every selector in the App.
+ */
+export const sessionLive = new KeyedStore<Session>();
+export const sessionMessagesLive = new KeyedStore<SessionMessages>();
+/**
+ * The working tree of each session, as its CLI publishes it.
+ *
+ * Written whenever a machine reports a change, read by the badges on a few screens. A keyed store
+ * because the map is not drawn as a whole: one session's tree changing must not wake the others,
+ * and a git poll must not wake the chat.
+ */
+export const sessionGitStatusLive = new KeyedStore<GitStatus | null>();
+
+/**
+ * A store snapshot with the sessions map folded back in.
+ *
+ * The channel layer was written against one object holding both the channel facts and the
+ * sessions they are resolved for, and that shape is still the clearest way to build it: the
+ * drivers read `session()` out of the same snapshot as `socketStatus`. Sessions no longer live in
+ * the zustand state, so this is where they are added back for those calls.
+ */
+function withSessions(state: StorageState): StorageState & { sessions: Record<string, Session> } {
+    return { ...state, sessions: sessionLive.snapshot() };
+}
+
 export const storage = create<StorageState>()((set, get) => {
     let { settings, version } = loadSettings();
     let localSettings = loadLocalSettings();
@@ -750,8 +943,8 @@ export const storage = create<StorageState>()((set, get) => {
         localSettings,
         purchases,
         profile,
-        sessions: {},
         machines: {},
+        // (the derived session list lives in `sessionListViewDataLive`, not here)
         lanSightings: {},
         relayEndpoints: loadRelayEndpoints(),
         lanEndpoints: {},
@@ -773,11 +966,7 @@ export const storage = create<StorageState>()((set, get) => {
         feedHasMore: false,
         feedLoaded: false,  // Initialize as false
         friendsLoaded: false,  // Initialize as false
-        sessionsData: null,  // Legacy - to be removed
-        sessionListViewData: null,
-        sessionMessages: {},
         outbox: {},
-        sessionGitStatus: {},
         realtimeStatus: 'disconnected',
         realtimeMode: 'idle',
         socketStatus: 'disconnected',
@@ -786,7 +975,7 @@ export const storage = create<StorageState>()((set, get) => {
         isDataReady: false,
         nativeUpdateStatus: null,
         isMutableToolCall: (sessionId: string, callId: string) => {
-            const sessionMessages = get().sessionMessages[sessionId];
+            const sessionMessages = sessionMessagesLive.get(sessionId);
             if (!sessionMessages) {
                 return true;
             }
@@ -800,9 +989,9 @@ export const storage = create<StorageState>()((set, get) => {
             }
             return toolCallMessage.tool?.name ? isMutableTool(toolCallMessage.tool?.name) : true;
         },
-        finalizeRunningTools: (sessionId: string) => set((state) => {
-            const sessionMessages = state.sessionMessages[sessionId];
-            if (!sessionMessages) return state;
+        finalizeRunningTools: (sessionId: string) => {
+            const sessionMessages = sessionMessagesLive.get(sessionId);
+            if (!sessionMessages) return;
 
             const now = Date.now();
             let anyChanged = false;
@@ -824,100 +1013,79 @@ export const storage = create<StorageState>()((set, get) => {
                 }
             }
 
-            if (!anyChanged) return state;
+            if (!anyChanged) return;
 
-            return {
-                ...state,
-                sessionMessages: {
-                    ...state.sessionMessages,
-                    [sessionId]: { ...sessionMessages, messagesMap: newMessagesMap },
-                },
-            };
-        }),
+            sessionMessagesLive.set(sessionId, { ...sessionMessages, messagesMap: newMessagesMap });
+        },
         /**
          * After a successful lazy-content RPC fetch, replace the truncated tool input
          * with the full args and clear the lazyContent flag in both the message map
          * and the reducer state. Returns true when the message was found and updated.
          */
         resolveToolCallLazyContent: (sessionId: string, messageId: string, fullInput: Record<string, unknown>): boolean => {
-            let updated = false;
-            set((state) => {
-                const sessionMessages = state.sessionMessages[sessionId];
-                if (!sessionMessages) return state;
+            const sessionMessages = sessionMessagesLive.get(sessionId);
+            if (!sessionMessages) return false;
 
-                const msg = sessionMessages.messagesMap[messageId];
-                if (!msg || msg.kind !== 'tool-call') return state;
+            const msg = sessionMessages.messagesMap[messageId];
+            if (!msg || msg.kind !== 'tool-call') return false;
 
-                const updatedTool = { ...msg.tool, input: fullInput, lazyContent: false };
-                const updatedMsg = { ...msg, tool: updatedTool };
+            const updatedTool = { ...msg.tool, input: fullInput, lazyContent: false };
+            const updatedMsg = { ...msg, tool: updatedTool };
 
-                // Mirror into reducerState so the next cache save persists the full content
-                const reducerMsg = sessionMessages.reducerState.messages.get(messageId);
-                if (reducerMsg?.tool) {
-                    reducerMsg.tool.input = fullInput;
-                    reducerMsg.tool.lazyContent = false;
-                }
+            // Mirror into reducerState so the next cache save persists the full content
+            const reducerMsg = sessionMessages.reducerState.messages.get(messageId);
+            if (reducerMsg?.tool) {
+                reducerMsg.tool.input = fullInput;
+                reducerMsg.tool.lazyContent = false;
+            }
 
-                updated = true;
-                return {
-                    ...state,
-                    sessionMessages: {
-                        ...state.sessionMessages,
-                        [sessionId]: {
-                            ...sessionMessages,
-                            messagesMap: { ...sessionMessages.messagesMap, [messageId]: updatedMsg },
-                            messages: sessionMessages.messages.map(m => m.id === messageId ? updatedMsg : m),
-                        },
-                    },
-                };
+            sessionMessagesLive.set(sessionId, {
+                ...sessionMessages,
+                messagesMap: { ...sessionMessages.messagesMap, [messageId]: updatedMsg },
+                messages: sessionMessages.messages.map(m => m.id === messageId ? updatedMsg : m),
             });
-            return updated;
+            return true;
         },
         /**
          * After a successful lazy-content RPC fetch, replace the truncated tool result
          * with the full result and remove the _lazyResult marker. Returns true when updated.
          */
         resolveToolCallLazyResult: (sessionId: string, messageId: string, fullResult: unknown): boolean => {
-            let updated = false;
-            set((state) => {
-                const sessionMessages = state.sessionMessages[sessionId];
-                if (!sessionMessages) return state;
+            const sessionMessages = sessionMessagesLive.get(sessionId);
+            if (!sessionMessages) return false;
 
-                const msg = sessionMessages.messagesMap[messageId];
-                if (!msg || msg.kind !== 'tool-call') return state;
+            const msg = sessionMessages.messagesMap[messageId];
+            if (!msg || msg.kind !== 'tool-call') return false;
 
-                const updatedTool = { ...msg.tool, result: fullResult };
-                const updatedMsg = { ...msg, tool: updatedTool };
+            const updatedTool = { ...msg.tool, result: fullResult };
+            const updatedMsg = { ...msg, tool: updatedTool };
 
-                const reducerMsg = sessionMessages.reducerState.messages.get(messageId);
-                if (reducerMsg?.tool) {
-                    reducerMsg.tool.result = fullResult;
-                }
+            const reducerMsg = sessionMessages.reducerState.messages.get(messageId);
+            if (reducerMsg?.tool) {
+                reducerMsg.tool.result = fullResult;
+            }
 
-                updated = true;
-                return {
-                    ...state,
-                    sessionMessages: {
-                        ...state.sessionMessages,
-                        [sessionId]: {
-                            ...sessionMessages,
-                            messagesMap: { ...sessionMessages.messagesMap, [messageId]: updatedMsg },
-                            messages: sessionMessages.messages.map(m => m.id === messageId ? updatedMsg : m),
-                        },
-                    },
-                };
+            sessionMessagesLive.set(sessionId, {
+                ...sessionMessages,
+                messagesMap: { ...sessionMessages.messagesMap, [messageId]: updatedMsg },
+                messages: sessionMessages.messages.map(m => m.id === messageId ? updatedMsg : m),
             });
-            return updated;
+            return true;
         },
         getActiveSessions: () => {
             const state = get();
+            const sessions = sessionLive.snapshot();
             // "Active" here feeds the voice hooks — a session that has gone away, and one that has
             // come back — so it has to mean what the rest of the App means by online, not what the
             // server last managed to hear.
-            const drivers = channelDrivers(state, state.localSettings.channelPriority);
-            return Object.values(state.sessions).filter(s => resolveSessionReach(s.id, s.metadata?.machineId, drivers).online);
+            const drivers = channelDrivers({ ...state, sessions }, state.localSettings.channelPriority);
+            return Object.values(sessions).filter(s => resolveSessionReach(s.id, s.metadata?.machineId, drivers).online);
         },
         applySessions: (offered: (Omit<Session, 'presence'> & { presence?: "online" | number })[], fullRefresh?: boolean) => set((state) => {
+            // The sessions map lives in the keyed store; this action is one of its writers. The
+            // list and the channel answers are recomputed once per flush by the subscription
+            // below, so a list refresh does not have to wake the zustand store at all.
+            const heldSessions = sessionLive.snapshot();
             // A session this device deleted is not offered again by any channel. Both sources lag
             // the deletion while it reaches them — a machine's catalog keeps listing a row until
             // its own delete is written, and the server keeps serving one until that deletion is
@@ -927,23 +1095,14 @@ export const storage = create<StorageState>()((set, get) => {
             // and used to be reached every two seconds by the activity heartbeat. Compare the
             // fields the merge below can change before touching MMKV, the list, or the store.
             if (!fullRefresh && sessions.every((session) => {
-                const existing = state.sessions[session.id];
-                return existing !== undefined
-                    && existing.active === session.active
-                    && existing.activeAt === session.activeAt
-                    && existing.thinking === session.thinking
-                    && existing.thinkingAt === session.thinkingAt
-                    && existing.metadataVersion === session.metadataVersion
-                    && existing.agentStateVersion === session.agentStateVersion
-                    && existing.updatedAt === session.updatedAt
-                    && existing.seq === session.seq
-                    && (existing.restartingAt ?? null) === (session.restartingAt ?? null);
+                const existing = heldSessions[session.id];
+                return existing !== undefined && sameWireSession(existing, session);
             })) {
                 return state;
             }
 
             // Drafts: only from MMKV on initial load. Permission/model: read MMKV every time so restart/refresh keeps selection (metadata first, then existing, then MMKV, then server).
-            const savedDrafts = Object.keys(state.sessions).length === 0 ? sessionDrafts : {};
+            const savedDrafts = Object.keys(heldSessions).length === 0 ? sessionDrafts : {};
             const savedPermissionModes = loadSessionPermissionModes();
             const savedModelModes = loadSessionModelModes();
             const savedMaxModes = loadSessionMaxModes();
@@ -954,20 +1113,29 @@ export const storage = create<StorageState>()((set, get) => {
             // this App learned from a daemon is not the server's to drop because the server's page
             // did not mention it. Delta refresh: merge as before.
             const mergedSessions: Record<string, Session> = fullRefresh
-                ? Object.fromEntries(Object.entries(state.sessions).filter(([, session]) => session.origin === 'daemon'))
-                : { ...state.sessions };
+                ? Object.fromEntries(Object.entries(heldSessions).filter(([, session]) => session.origin === 'daemon'))
+                : { ...heldSessions };
 
             // Update sessions with calculated presence using centralized resolver
             sessions.forEach(session => {
+                // One changed session used to rebuild every offered session's object, because the
+                // batch only gets here when *something* in it moved. Keeping the untouched ones
+                // is what lets a write wake the row and the chat of the session it is about, and
+                // nothing else: identity is what the per-key stores below watch.
+                const current = fullRefresh ? undefined : heldSessions[session.id];
+                if (current && sameWireSession(current, session)) {
+                    return;
+                }
+
                 // Use centralized resolver for consistent state management
                 const presence = resolveSessionOnlineState(session);
 
                 // Draft: existing || saved || session. Permission: same as model — user's explicit local choice
                 // (existing/saved) takes priority over server-pushed metadata so an ACP permission change in the UI
                 // is not immediately overwritten by config_options_update / current_mode_update from the agent.
-                const existingDraft = fullRefresh ? undefined : state.sessions[session.id]?.draft;
+                const existingDraft = fullRefresh ? undefined : heldSessions[session.id]?.draft;
                 const savedDraft = savedDrafts[session.id];
-                const existingPermissionMode = fullRefresh ? undefined : state.sessions[session.id]?.permissionMode;
+                const existingPermissionMode = fullRefresh ? undefined : heldSessions[session.id]?.permissionMode;
                 const savedPermissionMode = savedPermissionModes[session.id];
                 const defaultPermissionMode: PermissionModeKey = isSandboxEnabled(session.metadata) ? 'bypassPermissions' : 'default';
                 const metadataPermission = session.metadata?.currentOperatingModeCode?.trim();
@@ -978,7 +1146,7 @@ export const storage = create<StorageState>()((set, get) => {
                     (session.permissionMode && session.permissionMode !== 'default' ? session.permissionMode : undefined) ??
                     (metadataPermission ? metadataPermission : undefined) ??
                     defaultPermissionMode;
-                const existing = fullRefresh ? undefined : state.sessions[session.id];
+                const existing = fullRefresh ? undefined : heldSessions[session.id];
                 const metadataModel = session.metadata?.currentModelCode?.trim();
                 const existingModelMode = existing?.modelMode;
                 const savedModelMode = savedModelModes[session.id];
@@ -1005,7 +1173,7 @@ export const storage = create<StorageState>()((set, get) => {
                 const metadataProfileId = savedIsNone ? undefined : (session.metadata?.profileId ?? undefined);
                 const resolvedProfileId = existingProfileId ?? metadataProfileId ?? (savedIsNone ? null : savedProfileId) ?? session.profileId ?? undefined;
                 // Sandbox isolation: local preference > metadata
-                const existingSandboxIsolation = state.sessions[session.id]?.sandboxIsolation;
+                const existingSandboxIsolation = heldSessions[session.id]?.sandboxIsolation;
                 const savedSandboxIsolation = savedSandboxIsolations[session.id];
                 const metadataSandboxIsolation = session.metadata?.currentSandboxIsolation
                     ?? (isSandboxEnabled(session.metadata)
@@ -1042,62 +1210,15 @@ export const storage = create<StorageState>()((set, get) => {
                 };
             });
 
-            // Build active set from all sessions (including existing ones), by the same answer the
-            // rows are drawn from: this is what puts a session above the "offline" divider in the
-            // list, and the server's flag alone put one there while the LAN was serving it.
-            const drivers = channelDrivers(state, state.localSettings.channelPriority);
-            const activeSet = new Set<string>();
-            Object.values(mergedSessions).forEach(session => {
-                if (resolveSessionReach(session.id, session.metadata?.machineId, drivers).online) {
-                    activeSet.add(session.id);
-                }
-            });
-
-            // Separate active and inactive sessions
-            const activeSessions: Session[] = [];
-            const inactiveSessions: Session[] = [];
-
-            // Process all sessions from merged set
-            Object.values(mergedSessions).forEach(session => {
-                if (activeSet.has(session.id)) {
-                    activeSessions.push(session);
-                } else {
-                    inactiveSessions.push(session);
-                }
-            });
-
-            // Sort both arrays by creation date for stable ordering
-            activeSessions.sort((a, b) => b.createdAt - a.createdAt);
-            inactiveSessions.sort((a, b) => b.createdAt - a.createdAt);
-
-            // Build flat list data for FlashList
-            const listData: SessionListItem[] = [];
-
-            if (activeSessions.length > 0) {
-                listData.push('online');
-                listData.push(...activeSessions);
-            }
-
-            // Legacy sessionsData - to be removed
-            // Machines are now integrated into sessionListViewData
-
-            if (inactiveSessions.length > 0) {
-                listData.push('offline');
-                listData.push(...inactiveSessions);
-            }
-
-            // console.log(`📊 Storage: applySessions called with ${sessions.length} sessions, active: ${activeSessions.length}, inactive: ${inactiveSessions.length}`);
-
-            // Process AgentState updates for sessions that already have messages loaded
-            const updatedSessionMessages = { ...state.sessionMessages };
-
+            // Process AgentState updates for sessions that already have messages loaded. Only the
+            // session whose agent state moved is written; a plain list refresh writes nothing.
             sessions.forEach(session => {
                 // On full refresh, old state doesn't exist; skip AgentState diff.
-                const oldSession = fullRefresh ? undefined : state.sessions[session.id];
+                const oldSession = fullRefresh ? undefined : heldSessions[session.id];
                 const newSession = mergedSessions[session.id];
 
                 // Check if sessionMessages exists AND agentStateVersion is newer
-                const existingSessionMessages = updatedSessionMessages[session.id];
+                const existingSessionMessages = sessionMessagesLive.get(session.id);
                 if (existingSessionMessages && newSession.agentState &&
                     (!oldSession || newSession.agentStateVersion > (oldSession.agentStateVersion || 0))) {
 
@@ -1158,7 +1279,7 @@ export const storage = create<StorageState>()((set, get) => {
                     const messagesArray = Object.values(mergedMessagesMap)
                         .sort((a, b) => b.createdAt - a.createdAt);
 
-                    updatedSessionMessages[session.id] = {
+                    sessionMessagesLive.set(session.id, {
                         messages: messagesArray,
                         messagesMap: mergedMessagesMap,
                         reducerState: existingSessionMessages.reducerState,
@@ -1169,7 +1290,7 @@ export const storage = create<StorageState>()((set, get) => {
                         hasOlderMessages: existingSessionMessages.hasOlderMessages,
                         isLoadingOlder: existingSessionMessages.isLoadingOlder,
                         isFetching: existingSessionMessages.isFetching,
-                    };
+                    });
 
                     // IMPORTANT: Copy latestUsage from reducerState to Session for immediate availability
                     if (existingSessionMessages.reducerState.latestUsage) {
@@ -1181,14 +1302,6 @@ export const storage = create<StorageState>()((set, get) => {
                 }
             });
 
-            // Build new unified list view data
-            const sessionListViewData = buildSessionListViewData(
-                mergedSessions,
-                state.machines,
-                state.daemonVersions,
-                channelDrivers(state, state.localSettings.channelPriority),
-            );
-
             // Update project manager with current sessions and machines
             const machineMetadataMap = new Map<string, any>();
             Object.values(state.machines).forEach(machine => {
@@ -1198,28 +1311,12 @@ export const storage = create<StorageState>()((set, get) => {
             });
             projectManager.updateSessions(Object.values(mergedSessions), machineMetadataMap);
 
-            return {
-                ...state,
-                sessions: mergedSessions,
-                sessionsData: listData,  // Legacy - to be removed
-                sessionListViewData,
-                sessionMessages: updatedSessionMessages
-            };
+            // Entries that did not move keep their identity, so this wakes only the keys that
+            // changed. The list rebuild rides the flush, not this call.
+            sessionLive.replaceAll(mergedSessions);
+            return state;
         }),
-        applyLoaded: () => set((state) => {
-            const result = {
-                ...state,
-                sessionsData: []
-            };
-            return result;
-        }),
-        applyReady: () => set((state) => ({
-            ...state,
-            isDataReady: true,
-            // If the sessions list hasn't been populated yet (cold start, no cache),
-            // initialize to an empty array so the UI doesn't show the loading spinner.
-            sessionListViewData: state.sessionListViewData ?? [],
-        })),
+        applyReady: () => set((state) => ({ ...state, isDataReady: true })),
         applyMessages: (sessionId: string, messages: NormalizedMessage[]) => {
             bump('storeWrites');
             bump('messagesApplied', messages.length);
@@ -1228,7 +1325,7 @@ export const storage = create<StorageState>()((set, get) => {
             set((state) => {
 
                 // Resolve session messages state
-                const existingSession = state.sessionMessages[sessionId] || {
+                const existingSession = sessionMessagesLive.get(sessionId) || {
                     messages: [],
                     messagesMap: {},
                     reducerState: createReducer(),
@@ -1242,7 +1339,7 @@ export const storage = create<StorageState>()((set, get) => {
                 };
 
                 // Get the session's agentState if available
-                const session = state.sessions[sessionId];
+                const session = sessionLive.get(sessionId);
                 const agentState = session?.agentState;
 
                 // Messages are already normalized, no need to process them again
@@ -1272,130 +1369,99 @@ export const storage = create<StorageState>()((set, get) => {
                 // Update session with todos and latestUsage
                 // IMPORTANT: We extract latestUsage from the mutable reducerState and copy it to the Session object
                 // This ensures latestUsage is available immediately on load, even before messages are fully loaded
-                let updatedSessions = state.sessions;
                 const needsUpdate = (reducerResult.todos !== undefined || reducerResult.tasks !== undefined || existingSession.reducerState.latestUsage) && session;
 
                 if (needsUpdate) {
-                    updatedSessions = {
-                        ...state.sessions,
-                        [sessionId]: {
-                            ...session,
-                            ...(reducerResult.todos !== undefined && { todos: reducerResult.todos }),
-                            ...(reducerResult.tasks !== undefined && { tasks: reducerResult.tasks }),
-                            // Copy latestUsage from reducerState to make it immediately available
-                            latestUsage: existingSession.reducerState.latestUsage ? {
-                                ...existingSession.reducerState.latestUsage
-                            } : session.latestUsage
-                        }
-                    };
+                    sessionLive.set(sessionId, {
+                        ...session,
+                        ...(reducerResult.todos !== undefined && { todos: reducerResult.todos }),
+                        ...(reducerResult.tasks !== undefined && { tasks: reducerResult.tasks }),
+                        // Copy latestUsage from reducerState to make it immediately available
+                        latestUsage: existingSession.reducerState.latestUsage ? {
+                            ...existingSession.reducerState.latestUsage
+                        } : session.latestUsage
+                    });
                 }
 
-                return {
-                    ...state,
-                    sessions: updatedSessions,
-                    sessionMessages: {
-                        ...state.sessionMessages,
-                        [sessionId]: {
-                            ...existingSession,
-                            messages: messagesArray,
-                            messagesMap: mergedMessagesMap,
-                            reducerState: existingSession.reducerState, // Explicitly include the mutated reducer state
-                            isLoaded: true
-                        }
-                    }
-                };
+                sessionMessagesLive.set(sessionId, {
+                    ...existingSession,
+                    messages: messagesArray,
+                    messagesMap: mergedMessagesMap,
+                    reducerState: existingSession.reducerState, // Explicitly include the mutated reducer state
+                    isLoaded: true
+                });
+
+                // A message append is not a list event: the two keyed stores carry everything it
+                // changed, and the zustand state is left exactly as it was.
+                return state;
             });
 
             return { changed: Array.from(changed), hasReadyEvent };
         },
         applyMessagesLoaded: (sessionId: string) => set((state) => {
-            const existingSession = state.sessionMessages[sessionId];
-            let result: StorageState;
+            const existingSession = sessionMessagesLive.get(sessionId);
 
-                if (!existingSession) {
-                    // First time loading - check for AgentState
-                    const session = state.sessions[sessionId];
-                    const agentState = session?.agentState;
+            if (!existingSession) {
+                // First time loading - check for AgentState
+                const session = sessionLive.get(sessionId);
+                const agentState = session?.agentState;
 
-                    // Create new reducer state
-                    const reducerState = createReducer();
+                // Create new reducer state
+                const reducerState = createReducer();
 
-                    // Process AgentState if it exists
-                    let messages: Message[] = [];
-                    let messagesMap: Record<string, Message> = {};
+                // Process AgentState if it exists
+                let messages: Message[] = [];
+                let messagesMap: Record<string, Message> = {};
 
-                    if (agentState) {
-                        // Process AgentState through reducer to get initial permission messages
-                        const reducerResult = reducer(reducerState, [], agentState);
-                        const processedMessages = reducerResult.messages;
+                if (agentState) {
+                    // Process AgentState through reducer to get initial permission messages
+                    const reducerResult = reducer(reducerState, [], agentState);
+                    const processedMessages = reducerResult.messages;
 
-                        processedMessages.forEach(message => {
-                            messagesMap[message.id] = message;
-                        });
+                    processedMessages.forEach(message => {
+                        messagesMap[message.id] = message;
+                    });
 
-                        messages = Object.values(messagesMap)
-                            .sort((a, b) => b.createdAt - a.createdAt);
-                    }
-
-                    // Extract latestUsage from reducerState if available and update session
-                    let updatedSessions = state.sessions;
-                    if (session && reducerState.latestUsage) {
-                        updatedSessions = {
-                            ...state.sessions,
-                            [sessionId]: {
-                                ...session,
-                                latestUsage: { ...reducerState.latestUsage }
-                            }
-                        };
-                    }
-
-                    result = {
-                        ...state,
-                        sessions: updatedSessions,
-                        sessionMessages: {
-                            ...state.sessionMessages,
-                            [sessionId]: {
-                                reducerState,
-                                messages,
-                                messagesMap,
-                                isLoaded: true,
-                                oldestSeq: 0,
-                                newestSeq: 0,
-                                cachedBitmap: 0,
-                                hasOlderMessages: false,
-                                isLoadingOlder: false,
-                                isFetching: false,
-                            } satisfies SessionMessages
-                        }
-                    };
-                } else {
-                    result = {
-                        ...state,
-                        sessionMessages: {
-                            ...state.sessionMessages,
-                            [sessionId]: {
-                                ...existingSession,
-                                isLoaded: true,
-                                isFetching: false,
-                            } satisfies SessionMessages
-                        }
-                    };
+                    messages = Object.values(messagesMap)
+                        .sort((a, b) => b.createdAt - a.createdAt);
                 }
 
-            return result;
+                sessionMessagesLive.set(sessionId, {
+                    reducerState,
+                    messages,
+                    messagesMap,
+                    isLoaded: true,
+                    oldestSeq: 0,
+                    newestSeq: 0,
+                    cachedBitmap: 0,
+                    hasOlderMessages: false,
+                    isLoadingOlder: false,
+                    isFetching: false,
+                });
+
+                // Extract latestUsage from reducerState if available and update session
+                if (session && reducerState.latestUsage) {
+                    sessionLive.set(sessionId, {
+                        ...session,
+                        latestUsage: { ...reducerState.latestUsage }
+                    });
+                }
+                return state;
+            }
+
+            sessionMessagesLive.set(sessionId, {
+                ...existingSession,
+                isLoaded: true,
+                isFetching: false,
+            });
+            return state;
         }),
-        setFetching: (sessionId: string, fetching: boolean) => set((state) => {
-            const existing = state.sessionMessages[sessionId];
-            if (!existing) return state;
-            return {
-                ...state,
-                sessionMessages: {
-                    ...state.sessionMessages,
-                    [sessionId]: { ...existing, isFetching: fetching },
-                },
-            };
-        }),
-        applyHydratedCache: (sessionId: string, messages: Message[], reducerState: ReducerState, oldestSeq: number, hasOlderMessages: boolean, lastSeq: number) => set((state) => {
+        setFetching: (sessionId: string, fetching: boolean) => {
+            const existing = sessionMessagesLive.get(sessionId);
+            if (!existing || existing.isFetching === fetching) return;
+            sessionMessagesLive.set(sessionId, { ...existing, isFetching: fetching });
+        },
+        applyHydratedCache: (sessionId: string, messages: Message[], reducerState: ReducerState, oldestSeq: number, hasOlderMessages: boolean, lastSeq: number) => {
             // The stored window is a projection of the log, not of the wire: one message can be
             // two entries (the queued `out` copy and the server's `in` echo) and a window merged
             // from two sources can hold both. Collapsing here is what keeps the list showing one
@@ -1405,33 +1471,27 @@ export const storage = create<StorageState>()((set, get) => {
             for (const msg of sorted) {
                 messagesMap[msg.id] = msg;
             }
-            const totalSeq = state.sessions[sessionId]?.seq ?? 0;
+            const totalSeq = sessionLive.get(sessionId)?.seq ?? 0;
             const cachedBitmap = computeBitmap(oldestSeq, lastSeq, totalSeq);
 
-            return {
-                ...state,
-                sessionMessages: {
-                    ...state.sessionMessages,
-                    [sessionId]: {
-                        messages: sorted,
-                        messagesMap,
-                        reducerState,
-                        isLoaded: true,
-                        oldestSeq,
-                        newestSeq: lastSeq,
-                        cachedBitmap,
-                        hasOlderMessages,
-                        isLoadingOlder: false,
-                        isFetching: false,
-                    } satisfies SessionMessages,
-                },
-            };
-        }),
-        applyWindow: (sessionId: string, messages: NormalizedMessage[], oldestSeq: number, newestSeq: number, hasOlderMessages: boolean) => set((state) => {
+            sessionMessagesLive.set(sessionId, {
+                messages: sorted,
+                messagesMap,
+                reducerState,
+                isLoaded: true,
+                oldestSeq,
+                newestSeq: lastSeq,
+                cachedBitmap,
+                hasOlderMessages,
+                isLoadingOlder: false,
+                isFetching: false,
+            });
+        },
+        applyWindow: (sessionId: string, messages: NormalizedMessage[], oldestSeq: number, newestSeq: number, hasOlderMessages: boolean) => {
             bump('storeWrites');
             bump('messagesApplied', messages.length);
-            const session = state.sessions[sessionId];
-            const held = state.sessionMessages[sessionId];
+            const session = sessionLive.get(sessionId);
+            const held = sessionMessagesLive.get(sessionId);
 
             // The page MERGES into whatever is held rather than replacing it. A channel is a
             // source, and no source has the right to discard messages this App already showed —
@@ -1453,7 +1513,7 @@ export const storage = create<StorageState>()((set, get) => {
                 const mergedHasOlder = held.hasOlderMessages || hasOlderMessages;
                 if (!merged && mergedOldest === held.oldestSeq && mergedNewest === held.newestSeq && mergedHasOlder === held.hasOlderMessages) {
                     // Nothing this page carries is new, and the edges did not move.
-                    return state;
+                    return;
                 }
                 if (merged) {
                     messages = merged.messages as unknown as NormalizedMessage[];
@@ -1479,7 +1539,7 @@ export const storage = create<StorageState>()((set, get) => {
             // neighbours is how tool states go wrong.
             let reducerState: ReducerState = createReducer();
             let reduceInput = messages;
-            if (appendOnlyMerge && appendOnlyMerge !== null) {
+            if (appendOnlyMerge && held) {
                 reducerState = held.reducerState;
                 reduceInput = appendOnlyMerge.added as unknown as NormalizedMessage[];
             }
@@ -1503,55 +1563,43 @@ export const storage = create<StorageState>()((set, get) => {
             const totalSeq = session?.seq ?? 0;
             const cachedBitmap = computeBitmap(oldestSeq, newestSeq, totalSeq);
 
-            return {
-                ...state,
-                sessionMessages: {
-                    ...state.sessionMessages,
-                    [sessionId]: {
-                        messages: sorted,
-                        messagesMap: cleanedMap,
-                        reducerState,
-                        isLoaded: true,
-                        oldestSeq,
-                        newestSeq,
-                        cachedBitmap,
-                        hasOlderMessages,
-                        isLoadingOlder: false,
-                        isFetching: false,
-                    } satisfies SessionMessages,
-                },
-            };
-        }),
-        setNewestSeq: (sessionId: string, newestSeq: number) => set((state) => {
-            const existing = state.sessionMessages[sessionId];
-            if (!existing) return state;
+            sessionMessagesLive.set(sessionId, {
+                messages: sorted,
+                messagesMap: cleanedMap,
+                reducerState,
+                isLoaded: true,
+                oldestSeq,
+                newestSeq,
+                cachedBitmap,
+                hasOlderMessages,
+                isLoadingOlder: false,
+                isFetching: false,
+            });
+        },
+        setNewestSeq: (sessionId: string, newestSeq: number) => {
+            const existing = sessionMessagesLive.get(sessionId);
+            if (!existing) return;
             const newNewestSeq = Math.max(existing.newestSeq, newestSeq);
-            // Unchanged means no state to write: returning a new object here re-rendered every
-            // subscriber, including the message list, to show exactly what it already showed.
-            if (newNewestSeq === existing.newestSeq) return state;
-            const totalSeq = state.sessions[sessionId]?.seq ?? 0;
+            // Unchanged means no state to write: notifying here re-rendered the message list to
+            // show exactly what it already showed.
+            if (newNewestSeq === existing.newestSeq) return;
+            const totalSeq = sessionLive.get(sessionId)?.seq ?? 0;
             const cachedBitmap = computeBitmap(existing.oldestSeq, newNewestSeq, totalSeq);
-            return {
-                ...state,
-                sessionMessages: {
-                    ...state.sessionMessages,
-                    [sessionId]: { ...existing, newestSeq: newNewestSeq, cachedBitmap },
-                },
-            };
-        }),
-        applyOlderMessages: (sessionId: string, olderMessages: NormalizedMessage[], newOldestSeq: number, hasOlderMessages: boolean) => set((state) => {
-            const existing = state.sessionMessages[sessionId];
-            if (!existing) return state;
+            sessionMessagesLive.set(sessionId, { ...existing, newestSeq: newNewestSeq, cachedBitmap });
+        },
+        applyOlderMessages: (sessionId: string, olderMessages: NormalizedMessage[], newOldestSeq: number, hasOlderMessages: boolean) => {
+            const existing = sessionMessagesLive.get(sessionId);
+            if (!existing) return;
             // The window is often patched with an empty batch (a read that establishes the floor
             // without adding messages); when that changes nothing, the state does not change either.
             if (olderMessages.length === 0 && existing.oldestSeq === newOldestSeq && existing.hasOlderMessages === hasOlderMessages) {
-                return state;
+                return;
             }
 
             // Run a fresh temporary reducer on just the older batch.
             // The main reducerState is left intact so incremental (new) messages keep working.
             const tempReducer = createReducer();
-            const session = state.sessions[sessionId];
+            const session = sessionLive.get(sessionId);
             const reducerResult = reducer(tempReducer, olderMessages, session?.agentState ?? undefined);
 
             const mergedMap = { ...existing.messagesMap };
@@ -1564,37 +1612,25 @@ export const storage = create<StorageState>()((set, get) => {
 
             const sorted = Object.values(mergedMap).sort((a, b) => b.createdAt - a.createdAt);
 
-            const totalSeq = state.sessions[sessionId]?.seq ?? 0;
+            const totalSeq = sessionLive.get(sessionId)?.seq ?? 0;
             const cachedBitmap = computeBitmap(newOldestSeq, existing.newestSeq, totalSeq);
 
-            return {
-                ...state,
-                sessionMessages: {
-                    ...state.sessionMessages,
-                    [sessionId]: {
-                        ...existing,
-                        messages: sorted,
-                        messagesMap: mergedMap,
-                        oldestSeq: newOldestSeq,
-                        cachedBitmap,
-                        hasOlderMessages,
-                        isLoadingOlder: false,
-                        isFetching: false,
-                    } satisfies SessionMessages,
-                },
-            };
-        }),
-        setLoadingOlder: (sessionId: string, loading: boolean) => set((state) => {
-            const existing = state.sessionMessages[sessionId];
-            if (!existing) return state;
-            return {
-                ...state,
-                sessionMessages: {
-                    ...state.sessionMessages,
-                    [sessionId]: { ...existing, isLoadingOlder: loading },
-                },
-            };
-        }),
+            sessionMessagesLive.set(sessionId, {
+                ...existing,
+                messages: sorted,
+                messagesMap: mergedMap,
+                oldestSeq: newOldestSeq,
+                cachedBitmap,
+                hasOlderMessages,
+                isLoadingOlder: false,
+                isFetching: false,
+            });
+        },
+        setLoadingOlder: (sessionId: string, loading: boolean) => {
+            const existing = sessionMessagesLive.get(sessionId);
+            if (!existing || existing.isLoadingOlder === loading) return;
+            sessionMessagesLive.set(sessionId, { ...existing, isLoadingOlder: loading });
+        },
         applySettingsLocal: (settings: Partial<Settings>) => set((state) => {
             saveSettings(applySettings(state.settings, settings), state.settingsVersion ?? 0);
             return {
@@ -1641,18 +1677,11 @@ export const storage = create<StorageState>()((set, get) => {
                 profile
             };
         }),
-        applyGitStatus: (sessionId: string, status: GitStatus | null) => set((state) => {
+        applyGitStatus: (sessionId: string, status: GitStatus | null) => {
             // Update project git status as well
             projectManager.updateSessionProjectGitStatus(sessionId, status);
-
-            return {
-                ...state,
-                sessionGitStatus: {
-                    ...state.sessionGitStatus,
-                    [sessionId]: status
-                }
-            };
-        }),
+            sessionGitStatusLive.set(sessionId, status);
+        },
         applyNativeUpdateStatus: (status: { available: boolean; updateUrl?: string } | null) => set((state) => ({
             ...state,
             nativeUpdateStatus: status
@@ -1704,16 +1733,16 @@ export const storage = create<StorageState>()((set, get) => {
                 ...updates
             };
         }),
-        updateSessionDraft: (sessionId: string, draft: string | null) => set((state) => {
-            const session = state.sessions[sessionId];
-            if (!session) return state;
+        updateSessionDraft: (sessionId: string, draft: string | null) => {
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
             // Don't store empty strings, convert to null
             const normalizedDraft = draft?.trim() ? draft : null;
 
             // Collect all drafts for persistence
             const allDrafts: Record<string, string> = {};
-            Object.entries(state.sessions).forEach(([id, sess]) => {
+            Object.entries(sessionLive.snapshot()).forEach(([id, sess]) => {
                 if (id === sessionId) {
                     if (normalizedDraft) {
                         allDrafts[id] = normalizedDraft;
@@ -1726,163 +1755,84 @@ export const storage = create<StorageState>()((set, get) => {
             // Persist drafts
             saveSessionDrafts(allDrafts);
 
-            const updatedSessions = {
-                ...state.sessions,
-                [sessionId]: {
-                    ...session,
-                    draft: normalizedDraft
-                }
-            };
+            sessionLive.set(sessionId, { ...session, draft: normalizedDraft });
+        },
+        updateSessionPermissionMode: (sessionId: string, mode: string) => {
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
-            // Rebuild sessionListViewData to update the UI immediately
-            const sessionListViewData = buildSessionListViewData(
-                updatedSessions,
-                state.machines,
-                            state.daemonVersions,
-                            channelDrivers(state, state.localSettings.channelPriority),
-            );
+            sessionLive.set(sessionId, { ...session, permissionMode: mode });
 
-            return {
-                ...state,
-                sessions: updatedSessions,
-                sessionListViewData
-            };
-        }),
-        updateSessionPermissionMode: (sessionId: string, mode: string) => set((state) => {
-            const session = state.sessions[sessionId];
-            if (!session) return state;
-
-            const updatedSessions = {
-                ...state.sessions,
-                [sessionId]: {
-                    ...session,
-                    permissionMode: mode
-                }
-            };
             const allModes: Record<string, string> = {};
-            Object.entries(updatedSessions).forEach(([id, sess]) => {
+            Object.entries(sessionLive.snapshot()).forEach(([id, sess]) => {
                 if (sess.permissionMode && sess.permissionMode !== 'default') {
                     allModes[id] = sess.permissionMode;
                 }
             });
             saveSessionPermissionModes(allModes);
+        },
+        updateSessionModelMode: (sessionId: string, mode: string) => {
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
-            return {
-                ...state,
-                sessions: updatedSessions
-            };
-        }),
-        updateSessionModelMode: (sessionId: string, mode: string) => set((state) => {
-            const session = state.sessions[sessionId];
-            if (!session) return state;
+            sessionLive.set(sessionId, { ...session, modelMode: mode });
 
-            const updatedSessions = {
-                ...state.sessions,
-                [sessionId]: {
-                    ...session,
-                    modelMode: mode
-                }
-            };
             const allModelModes: Record<string, string> = {};
-            Object.entries(updatedSessions).forEach(([id, sess]) => {
+            Object.entries(sessionLive.snapshot()).forEach(([id, sess]) => {
                 if (sess.modelMode != null && sess.modelMode !== '') {
                     allModelModes[id] = sess.modelMode;
                 }
             });
             saveSessionModelModes(allModelModes);
-
-            return {
-                ...state,
-                sessions: updatedSessions
-            };
-        }),
-        clearSessionModelMode: (sessionId: string) => set((state) => {
-            const session = state.sessions[sessionId];
-            if (!session) return state;
+        },
+        clearSessionModelMode: (sessionId: string) => {
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
             // Clear persisted override so the next applySessions uses CLI's metadata.currentModelCode
             const modelModes = loadSessionModelModes();
             delete modelModes[sessionId];
             saveSessionModelModes(modelModes);
 
-            return {
-                ...state,
-                sessions: {
-                    ...state.sessions,
-                    [sessionId]: { ...session, modelMode: undefined }
-                }
-            };
-        }),
-        updateSessionMaxMode: (sessionId: string, maxMode: boolean) => set((state) => {
-            const session = state.sessions[sessionId];
-            if (!session) return state;
+            sessionLive.set(sessionId, { ...session, modelMode: undefined });
+        },
+        updateSessionMaxMode: (sessionId: string, maxMode: boolean) => {
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
-            const updatedSessions = {
-                ...state.sessions,
-                [sessionId]: {
-                    ...session,
-                    maxMode,
-                },
-            };
+            sessionLive.set(sessionId, { ...session, maxMode });
+
             const allMaxModes: Record<string, boolean> = {};
-            Object.entries(updatedSessions).forEach(([id, sess]) => {
+            Object.entries(sessionLive.snapshot()).forEach(([id, sess]) => {
                 if (sess.maxMode !== undefined && sess.maxMode !== null) {
                     allMaxModes[id] = sess.maxMode;
                 }
             });
             saveSessionMaxModes(allMaxModes);
-
-            return {
-                ...state,
-                sessions: updatedSessions,
-            };
-        }),
-        clearSessionMaxMode: (sessionId: string) => set((state) => {
-            const session = state.sessions[sessionId];
-            if (!session) return state;
+        },
+        clearSessionMaxMode: (sessionId: string) => {
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
             const maxModes = loadSessionMaxModes();
             delete maxModes[sessionId];
             saveSessionMaxModes(maxModes);
 
-            return {
-                ...state,
-                sessions: {
-                    ...state.sessions,
-                    [sessionId]: { ...session, maxMode: undefined },
-                },
-            };
-        }),
-        updateSessionThinkingLevel: (sessionId: string, level: 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null) => set((state) => {
-            const session = state.sessions[sessionId];
-            if (!session) return state;
+            sessionLive.set(sessionId, { ...session, maxMode: undefined });
+        },
+        updateSessionThinkingLevel: (sessionId: string, level: 'auto' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null) => {
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
-            return {
-                ...state,
-                sessions: {
-                    ...state.sessions,
-                    [sessionId]: {
-                        ...session,
-                        thinkingLevel: level ?? undefined,
-                    },
-                },
-            };
-        }),
-        clearSessionThinkingLevel: (sessionId: string) => set((state) => {
-            const session = state.sessions[sessionId];
-            if (!session) return state;
+            sessionLive.set(sessionId, { ...session, thinkingLevel: level ?? undefined });
+        },
+        clearSessionThinkingLevel: (sessionId: string) => {
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
-            return {
-                ...state,
-                sessions: {
-                    ...state.sessions,
-                    [sessionId]: { ...session, thinkingLevel: undefined },
-                },
-            };
-        }),
-        updateSessionProfileId: (sessionId: string, profileId: string | null) => set((state) => {
-            const session = state.sessions[sessionId];
-
+            sessionLive.set(sessionId, { ...session, thinkingLevel: undefined });
+        },
+        updateSessionProfileId: (sessionId: string, profileId: string | null) => {
             // Persist to MMKV. '__none__' sentinel for explicit "No Profile" choice.
             const profileIds = loadSessionProfileIds();
             if (profileId !== null) {
@@ -1892,114 +1842,67 @@ export const storage = create<StorageState>()((set, get) => {
             }
             saveSessionProfileIds(profileIds);
 
-            if (!session) return state;
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
-            return {
-                ...state,
-                sessions: {
-                    ...state.sessions,
-                    [sessionId]: {
-                        ...session,
-                        profileId: profileId ?? undefined,
-                    },
-                },
-            };
-        }),
-        clearSessionProfileId: (sessionId: string) => set((state) => {
-            const session = state.sessions[sessionId];
-
+            sessionLive.set(sessionId, { ...session, profileId: profileId ?? undefined });
+        },
+        clearSessionProfileId: (sessionId: string) => {
             // Always clear MMKV so it doesn't leak a stale entry.
             const profileIds = loadSessionProfileIds();
             delete profileIds[sessionId];
             saveSessionProfileIds(profileIds);
 
-            if (!session) return state;
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
-            return {
-                ...state,
-                sessions: {
-                    ...state.sessions,
-                    [sessionId]: { ...session, profileId: undefined },
-                },
-            };
-        }),
-        releaseSessionProfileId: (sessionId: string) => set((state) => {
-            const session = state.sessions[sessionId];
-            if (!session) return state;
+            sessionLive.set(sessionId, { ...session, profileId: undefined });
+        },
+        releaseSessionProfileId: (sessionId: string) => {
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
             // Only clear in-memory state — keep MMKV for cold-start fallback.
             // remote (metadata.profileId) will win on next applySessions resolution.
-            return {
-                ...state,
-                sessions: {
-                    ...state.sessions,
-                    [sessionId]: { ...session, profileId: undefined },
-                },
-            };
-        }),
-        updateSessionSandboxIsolation: (sessionId: string, isolation: string) => set((state) => {
-            const session = state.sessions[sessionId];
-            if (!session) return state;
+            sessionLive.set(sessionId, { ...session, profileId: undefined });
+        },
+        updateSessionSandboxIsolation: (sessionId: string, isolation: string) => {
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
-            const updatedSessions = {
-                ...state.sessions,
-                [sessionId]: {
-                    ...session,
-                    sandboxIsolation: isolation
-                }
-            };
+            sessionLive.set(sessionId, { ...session, sandboxIsolation: isolation });
+
             const allIsolations: Record<string, string> = {};
-            Object.entries(updatedSessions).forEach(([id, sess]) => {
+            Object.entries(sessionLive.snapshot()).forEach(([id, sess]) => {
                 if (sess.sandboxIsolation && sess.sandboxIsolation !== 'off') {
                     allIsolations[id] = sess.sandboxIsolation;
                 }
             });
             saveSessionSandboxIsolations(allIsolations);
-
-            return {
-                ...state,
-                sessions: updatedSessions
-            };
-        }),
-        clearSessionSandboxIsolation: (sessionId: string) => set((state) => {
-            const session = state.sessions[sessionId];
-            if (!session) return state;
+        },
+        clearSessionSandboxIsolation: (sessionId: string) => {
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
             // Clear in-memory and MMKV
-            const updatedSessions = {
-                ...state.sessions,
-                [sessionId]: {
-                    ...session,
-                    sandboxIsolation: undefined
-                }
-            };
+            sessionLive.set(sessionId, { ...session, sandboxIsolation: undefined });
+
             const allIsolations: Record<string, string> = {};
-            Object.entries(updatedSessions).forEach(([id, sess]) => {
+            Object.entries(sessionLive.snapshot()).forEach(([id, sess]) => {
                 if (sess.sandboxIsolation && sess.sandboxIsolation !== 'off') {
                     allIsolations[id] = sess.sandboxIsolation;
                 }
             });
             saveSessionSandboxIsolations(allIsolations);
-
-            return {
-                ...state,
-                sessions: updatedSessions
-            };
-        }),
-        releaseSessionSandboxIsolation: (sessionId: string) => set((state) => {
-            const session = state.sessions[sessionId];
-            if (!session) return state;
+        },
+        releaseSessionSandboxIsolation: (sessionId: string) => {
+            const session = sessionLive.get(sessionId);
+            if (!session) return;
 
             // Only clear in-memory — keep MMKV for cold-start fallback.
             // remote (metadata.currentSandboxIsolation) will win on next applySessions resolution.
-            return {
-                ...state,
-                sessions: {
-                    ...state.sessions,
-                    [sessionId]: { ...session, sandboxIsolation: undefined },
-                },
-            };
-        }),
+            sessionLive.set(sessionId, { ...session, sandboxIsolation: undefined });
+        },
         // Project management methods
         getProjects: () => projectManager.getProjects(),
         getProject: (projectId: string) => projectManager.getProject(projectId),
@@ -2031,18 +1934,17 @@ export const storage = create<StorageState>()((set, get) => {
                 });
             }
 
-            // Rebuild sessionListViewData to reflect machine changes
-            const sessionListViewData = buildSessionListViewData(
-                state.sessions,
-                state.machines,
-                            state.daemonVersions,
-                            channelDrivers(state, state.localSettings.channelPriority),
-            );
+            // A machine report that says nothing new costs nothing. `fetchMachines` decodes a fresh
+            // object every poll, so identity alone would always look like a change; the rows are
+            // compared instead, and an unchanged answer leaves the store (and the list) untouched.
+            if (sameMachines(state.machines, mergedMachines)) {
+                return state;
+            }
 
+            // The derived subscription rebuilds sessionListViewData for this machines change.
             return {
                 ...state,
                 machines: mergedMachines,
-                sessionListViewData
             };
         }),
         setDaemonSocketStatus: (id, status) => set((state) => {
@@ -2076,22 +1978,16 @@ export const storage = create<StorageState>()((set, get) => {
             // directory lags the machine's own channels by up to one publish, so "this row no
             // longer says restarting" is not yet the machine saying it is over; the grace period
             // is what retires a marker nothing refreshed.
-            const withRestarts = { ...state.sessions };
-            let changed = false;
             for (const entry of entries) {
                 for (const row of entry.sessions) {
                     if (row.restartingSince === undefined || !row.happySessionId) continue;
-                    const known = withRestarts[row.happySessionId];
+                    const known = sessionLive.get(row.happySessionId);
                     if (known && known.restartingAt !== row.restartingSince) {
-                        withRestarts[row.happySessionId] = { ...known, restartingAt: row.restartingSince };
-                        changed = true;
+                        sessionLive.set(row.happySessionId, { ...known, restartingAt: row.restartingSince });
                     }
                 }
             }
-            if (!changed) {
-                return { ...state, relayDirectory: next, relayUnknownTags: unknownTags };
-            }
-            return { ...state, sessions: withRestarts, relayDirectory: next, relayUnknownTags: unknownTags };
+            return { ...state, relayDirectory: next, relayUnknownTags: unknownTags };
         }),
         setRelayHubConnected: (connected) => set((state) => (
             state.relayHubConnected === connected ? state : { ...state, relayHubConnected: connected }
@@ -2149,20 +2045,11 @@ export const storage = create<StorageState>()((set, get) => {
                 delete next[machineId];
                 return { ...state, daemonVersions: next };
             }
-            const daemonVersions = { ...state.daemonVersions, [machineId]: { ...versions, at } };
-            // The list is built by an action, not by a selector, so nothing else recomputes it when
-            // this arrives — and the row's restart mark is decided inside that build. Recording a
-            // version without rebuilding the list would leave the mark computed from a snapshot in
-            // which the machine had never answered.
+            // The derived subscription rebuilds the list for this version change; the row's restart
+            // mark is decided inside that build, now that the machine has answered.
             return {
                 ...state,
-                daemonVersions,
-                sessionListViewData: buildSessionListViewData(
-                    state.sessions,
-                    state.machines,
-                    daemonVersions,
-                    channelDrivers(state, state.localSettings.channelPriority),
-                ),
+                daemonVersions: { ...state.daemonVersions, [machineId]: { ...versions, at } },
             };
         }),
         applyDaemonSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string; via: DaemonRoute; origin?: 'daemon' | 'server'; restartingSince?: number; desktop?: { required: boolean; available: boolean } }[] | null) => set((state) => {
@@ -2177,7 +2064,6 @@ export const storage = create<StorageState>()((set, get) => {
             // The same fact the daemon pushes, arriving the other way: a device that reads a
             // listing instead of holding a socket has to be told, and a restarting session is
             // listed with no live process — which is why the field travels with the listing at all.
-            const withRestarts = { ...state.sessions };
             for (const session of sessions) {
                 next[session.happySessionId] = {
                     ...(session.desktop ? { desktop: session.desktop } : {}),
@@ -2189,9 +2075,9 @@ export const storage = create<StorageState>()((set, get) => {
                     at,
                     ...(session.restartingSince !== undefined ? { restartingSince: session.restartingSince } : {}),
                 };
-                const known = withRestarts[session.happySessionId];
-                if (known && session.restartingSince !== undefined) {
-                    withRestarts[session.happySessionId] = { ...known, restartingAt: session.restartingSince };
+                const known = sessionLive.get(session.happySessionId);
+                if (known && session.restartingSince !== undefined && known.restartingAt !== session.restartingSince) {
+                    sessionLive.set(session.happySessionId, { ...known, restartingAt: session.restartingSince });
                 }
             }
             // A heartbeat moving is not a change the list draws: the summaries differ every few
@@ -2207,7 +2093,7 @@ export const storage = create<StorageState>()((set, get) => {
             if (stable(state.daemonSessionList) === stable(next)) {
                 return state;
             }
-            return { ...state, sessions: withRestarts, daemonSessionList: next };
+            return { ...state, daemonSessionList: next };
         }),
         setSessionChannelOverride: (sessionId: string, channel: SessionChannel | null) => set((state) => {
             if (channel === null) {
@@ -2263,13 +2149,12 @@ export const storage = create<StorageState>()((set, get) => {
                 artifacts: remainingArtifacts
             };
         }),
-        deleteSessionMessages: (sessionId: string) => set((state) => {
-            const { [sessionId]: _deleted, ...remaining } = state.sessionMessages;
-            return { ...state, sessionMessages: remaining };
-        }),
+        deleteSessionMessages: (sessionId: string) => {
+            sessionMessagesLive.delete(sessionId);
+        },
         deleteSession: (sessionId: string) => set((state) => {
-            // Remove session from sessions
-            const { [sessionId]: _deleted, ...remainingSessions } = state.sessions;
+            // Remove session from the keyed store; the derived subscription rebuilds the list.
+            sessionLive.delete(sessionId);
 
             // The deletion outlives this list. A machine's catalog and the server's sessions page
             // both keep offering a session until the deletion reaches them, and the row would come
@@ -2284,10 +2169,10 @@ export const storage = create<StorageState>()((set, get) => {
                 })();
 
             // Remove session messages if they exist
-            const { [sessionId]: deletedMessages, ...remainingSessionMessages } = state.sessionMessages;
-            
+            sessionMessagesLive.delete(sessionId);
+
             // Remove session git status if it exists
-            const { [sessionId]: deletedGitStatus, ...remainingGitStatus } = state.sessionGitStatus;
+            sessionGitStatusLive.delete(sessionId);
             
             // Clear drafts and permission/model from MMKV
             const drafts = loadSessionDrafts();
@@ -2306,16 +2191,9 @@ export const storage = create<StorageState>()((set, get) => {
             delete profileIds[sessionId];
             saveSessionProfileIds(profileIds);
 
-            // Rebuild sessionListViewData without the deleted session
-            const sessionListViewData = buildSessionListViewData(remainingSessions, state.machines, state.daemonVersions, channelDrivers(state, state.localSettings.channelPriority));
-            
             return {
                 ...state,
-                sessions: remainingSessions,
-                sessionMessages: remainingSessionMessages,
-                sessionGitStatus: remainingGitStatus,
                 deletedSessions,
-                sessionListViewData
             };
         }),
         // Outbox (send status tracking)
@@ -2494,20 +2372,24 @@ export const storage = create<StorageState>()((set, get) => {
  * Every writer is covered here instead of one at a time. The inputs are compared by
  * identity, so a rebuild that only writes the list does not trigger another one.
  *
- * The session's own restarting state rides on the sessions themselves, so a push that changes it
- * is already a change to one of these inputs. What a channel is reaching is not on a session, so
- * the channel state is compared here too — a LAN socket coming up is the difference between a row
- * that reads offline and the same row reading online.
+ * The sessions are not in the zustand state any more, so this subscribes to the keyed store as
+ * well: any session write reaches `recomputeDerived` through `subscribeAll` once per flush, and
+ * the input it compares against is the store's own version. What a channel is reaching is not on
+ * a session, so the channel state is compared here too — a LAN socket coming up is the
+ * difference between a row that reads offline and the same row reading online.
  */
 const builtFrom: {
-    sessions: unknown;
+    sessionsVersion: number;
     machines: unknown;
-    daemonVersions: unknown;
     daemonSockets: unknown;
     lanSightings: unknown;
     relayDirectory: unknown;
     socketStatus: unknown;
     daemonSessionList: unknown;
+    lanEndpoints: unknown;
+    candidateHealth: unknown;
+    relayEndpoints: unknown;
+    relayHubConnected: unknown;
     channelPriority: unknown;
     /**
      * What the list's channel-derived output is made of, for the last build.
@@ -2521,17 +2403,39 @@ const builtFrom: {
      */
     channelSignature: string | null;
 } = {
-    sessions: null,
+    sessionsVersion: -1,
     machines: null,
-    daemonVersions: null,
     daemonSockets: null,
     lanSightings: null,
     relayDirectory: null,
     socketStatus: null,
     daemonSessionList: null,
+    lanEndpoints: null,
+    candidateHealth: null,
+    relayEndpoints: null,
+    relayHubConnected: null,
     channelPriority: null,
     channelSignature: null,
 };
+
+/**
+ * Whether anything is reaching each session, keyed by session id — what a list row draws.
+ *
+ * Filled by the same pass that decides whether the list needs rebuilding: the answer is computed
+ * once per store write for every session, and a row subscribes to its own id instead of running
+ * `resolveSessionReach` (and building the drivers it needs) on every write of the whole store.
+ */
+export const sessionOnlineLive = new KeyedStore<boolean>();
+
+/**
+ * The derived session list, outside the zustand store on purpose.
+ *
+ * This is rebuilt by `recomputeDerived`, never written by an action. Written through the store it
+ * woke every selector in the App — the chat, the header, every row — whenever a presence tick
+ * moved one row, all to answer a question only the list screen asks. Now it wakes only its own
+ * readers.
+ */
+export const sessionListViewDataLive = new ValueStore<SessionListViewItem[]>([]);
 
 /**
  * The part of the list that comes from channels, as one comparable string.
@@ -2539,89 +2443,195 @@ const builtFrom: {
  * Exactly the facts the list draws from them: for each session, whether anything is reaching it
  * and whether restarting it would change its build. Both are cheap reads — a few map lookups per
  * driver — which is what makes this cheaper than rebuilding the list to find out it is the same.
+ * The online bits are returned as well, so the rows can be handed the same answers.
  */
-function channelSignatureOf(state: {
-    sessions: Record<string, Session>;
-    machines: Record<string, { metadata?: { happyCliVersion?: string } | null; daemonState?: { startedWithCliVersion?: string } | null }>;
-    daemonVersions: Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }>;
-}, drivers: readonly ChannelDriver[]): string {
+function channelAnswers(
+    sessions: Record<string, Session>,
+    drivers: readonly ChannelDriver[],
+): { signature: string; online: Record<string, boolean> } {
     const parts: string[] = [];
-    for (const session of Object.values(state.sessions)) {
-        const online = resolveSessionReach(session.id, session.metadata?.machineId, drivers).online ? '1' : '0';
-        const restart = sessionNeedsRestart(session, state.machines, state.daemonVersions) ? '1' : '0';
-        parts.push(`${session.id}:${online}:${restart}`);
+    const online: Record<string, boolean> = {};
+    for (const session of Object.values(sessions)) {
+        const reachable = resolveSessionReach(session.id, session.metadata?.machineId, drivers).online;
+        online[session.id] = reachable;
+        // The restart mark is not part of this anymore: it is asked by the row that draws it,
+        // because it depends on the machine and not on the channels.
+        parts.push(`${session.id}:${reachable ? '1' : '0'}`);
     }
     parts.sort();
-    return parts.join('|');
+    return { signature: parts.join('|'), online };
 }
 
-storage.subscribe((state) => {
-    const contentChanged = builtFrom.sessions !== state.sessions
-        || builtFrom.machines !== state.machines
-        || builtFrom.daemonVersions !== state.daemonVersions;
+/**
+ * Rebuild whatever the list derives from the sessions and the channel state.
+ *
+ * Called from two subscriptions: the zustand store (machines, daemon versions, every channel
+ * fact) and the session keyed store (one call per flush, however many keys it wrote). Both land
+ * here so the list has one build path and one place to compare inputs.
+ */
+function recomputeDerived(state: StorageState): void {
+    const sessionsVersion = sessionLive.allVersion();
+    const contentChanged = builtFrom.sessionsVersion !== sessionsVersion
+        || builtFrom.machines !== state.machines;
     const channelChanged = builtFrom.daemonSockets !== state.daemonSockets
         || builtFrom.lanSightings !== state.lanSightings
         || builtFrom.relayDirectory !== state.relayDirectory
         || builtFrom.socketStatus !== state.socketStatus
         || builtFrom.daemonSessionList !== state.daemonSessionList
+        || builtFrom.lanEndpoints !== state.lanEndpoints
+        || builtFrom.candidateHealth !== state.candidateHealth
+        || builtFrom.relayEndpoints !== state.relayEndpoints
+        || builtFrom.relayHubConnected !== state.relayHubConnected
         || builtFrom.channelPriority !== state.localSettings.channelPriority;
     if (!contentChanged && !channelChanged) {
         return;
     }
-    const drivers = channelDrivers(state, state.localSettings.channelPriority);
-    const signature = channelSignatureOf(state, drivers);
-    builtFrom.sessions = state.sessions;
+    const sessions = sessionLive.snapshot();
+    const drivers = channelDrivers(withSessions(state), state.localSettings.channelPriority);
+    const answers = channelAnswers(sessions, drivers);
+    builtFrom.sessionsVersion = sessionsVersion;
     builtFrom.machines = state.machines;
-    builtFrom.daemonVersions = state.daemonVersions;
     builtFrom.daemonSockets = state.daemonSockets;
     builtFrom.lanSightings = state.lanSightings;
     builtFrom.relayDirectory = state.relayDirectory;
     builtFrom.socketStatus = state.socketStatus;
     builtFrom.daemonSessionList = state.daemonSessionList;
+    builtFrom.lanEndpoints = state.lanEndpoints;
+    builtFrom.candidateHealth = state.candidateHealth;
+    builtFrom.relayEndpoints = state.relayEndpoints;
+    builtFrom.relayHubConnected = state.relayHubConnected;
     builtFrom.channelPriority = state.localSettings.channelPriority;
-    const signatureChanged = signature !== builtFrom.channelSignature;
-    builtFrom.channelSignature = signature;
+    // Rows subscribe to their own answer; unchanged bits do not wake them.
+    sessionOnlineLive.replaceAll(answers.online);
+    const signatureChanged = answers.signature !== builtFrom.channelSignature;
+    builtFrom.channelSignature = answers.signature;
     if (!contentChanged && !signatureChanged) {
         return;
     }
-    storage.setState({
-        sessionListViewData: buildSessionListViewData(
-            state.sessions,
-            state.machines,
-            state.daemonVersions,
-            drivers,
-        ),
-    });
-});
+    const sessionListViewData = buildSessionListViewData(
+        sessions,
+        state.machines,
+        drivers,
+    );
+    // The list lives in its own store: writing it does not notify the zustand store, and an array
+    // that did not move is not a write at all.
+    sessionListViewDataLive.set(sessionListViewData);
+}
 
-export function useSessions() {
-    return storage(useShallow((state) => state.isDataReady ? state.sessionsData : null));
+storage.subscribe(recomputeDerived);
+sessionLive.subscribeAll(() => recomputeDerived(storage.getState()));
+
+/**
+ * Imperative read of a session's message window, for the sync engine and other non-React callers.
+ * React code uses `useSessionMessages` / `useMessage` / `useSessionIsFetching` instead.
+ */
+export function getSessionMessages(sessionId: string): SessionMessages | undefined {
+    return sessionMessagesLive.get(sessionId);
+}
+
+/**
+ * Imperative read of one session, for the sync engine and other non-React callers. React code
+ * uses `useSession` or a keyed selector, so a write to another session does not reach it.
+ */
+export function getSession(sessionId: string): Session | undefined {
+    return sessionLive.get(sessionId);
+}
+
+/**
+ * The whole session map, for the few non-React callers that need every entry at once (the
+ * session-list cache, channel resolution). Memoised until the next write.
+ */
+export function getSessions(): Record<string, Session> {
+    return sessionLive.snapshot();
+}
+
+/** Imperative read of a session's published working tree. */
+export function getSessionGitStatus(sessionId: string): GitStatus | null {
+    return sessionGitStatusLive.get(sessionId) ?? null;
+}
+
+/**
+ * Every session, as a flat list.
+ *
+ * This is the whole-map subscription, and it is deliberately the exception: the wizard and the
+ * command palette genuinely need every session. A row or a chat screen uses `useSession` or
+ * `useKeyedSelector` instead, so a write to one session does not re-render them.
+ */
+export function useSessions(): Session[] {
+    return useAllKeyedValues(sessionLive);
 }
 
 export function useSession(id: string): Session | null {
-    return storage(useShallow((state) => state.sessions[id] ?? null));
+    return useKeyedValue(sessionLive, id) ?? null;
 }
 
-const emptyArray: unknown[] = [];
+/** One field of a session, re-rendering only when that field changes. */
+export function useSessionMachineId(sessionId: string): string | undefined {
+    return useKeyedSelector(sessionLive, sessionId, (session) => session?.metadata?.machineId);
+}
+
+/**
+ * Whether restarting this session would change its build.
+ *
+ * Asked by the row that draws the mark, not carried on the list row. The answer arrives on the
+ * machine's own schedule, and it used to be folded into the list — so every machine status update
+ * rebuilt the list and every row in it for a mark that one row shows. The two inputs are selected
+ * per machine, so a write for another machine wakes nothing here.
+ *
+ * The baseline is the machine's own report, the same one the session page uses and in the same
+ * order: the build on disk (what a restart would spawn), then the build the daemon is running,
+ * then the fields written by the daemon, and only last the server's copy of the machine — which
+ * is the one that goes stale on its own, and the one this rule used to be built on.
+ */
+export function useSessionNeedsRestart(session: Session): boolean {
+    const machineId = session.metadata?.machineId;
+    const machine = storage(useShallow((state) => machineId ? state.machines[machineId] : undefined));
+    const live = storage(useShallow((state) => machineId ? state.daemonVersions[machineId] : undefined));
+    const marked = sessionNeedsRestart(
+        session,
+        machineId && machine ? { [machineId]: machine } : {},
+        machineId && live ? { [machineId]: live } : {},
+    );
+    logRestartMark(session, machine, live, marked);
+    return marked;
+}
+
+/** The mark's inputs, once per change: a rule that decided wrongly and one handed nothing read alike. */
+function logRestartMark(
+    session: Session,
+    machine: { daemonState?: { startedWithCliVersion?: string } | null; metadata?: { happyCliVersion?: string } | null } | undefined,
+    live: { running: string; onDisk: string | null } | undefined,
+    marked: boolean,
+): void {
+    const summary = `${session.id} session=${session.metadata?.version ?? '-'} onDisk=${live?.onDisk ?? '-'} running=${live?.running ?? '-'} record=${machine?.daemonState?.startedWithCliVersion ?? '-'} server=${machine?.metadata?.happyCliVersion ?? '-'} marked=${marked}`;
+    if (restartMarkLogged.get(session.id) !== summary) {
+        restartMarkLogged.set(session.id, summary);
+        console.log(`🔄 list restart mark: ${summary}`);
+    }
+}
 
 export function useOutboxEntry(localId: string | null | undefined): OutboxEntry | null {
     return storage((state) => (localId ? state.outbox[localId] ?? null : null));
 }
 
 export function useSessionMessages(sessionId: string): { messages: Message[], isLoaded: boolean, hasOlderMessages: boolean, isLoadingOlder: boolean, isFetching: boolean, oldestSeq: number, newestSeq: number, cachedBitmap: number } {
-    return storage(useShallow((state) => {
-        const session = state.sessionMessages[sessionId];
-        return {
-            messages: session?.messages ?? emptyArray as Message[],
-            isLoaded: session?.isLoaded ?? false,
-            hasOlderMessages: session?.hasOlderMessages ?? false,
-            isLoadingOlder: session?.isLoadingOlder ?? false,
-            isFetching: session?.isFetching ?? false,
-            oldestSeq: session?.oldestSeq ?? 0,
-            newestSeq: session?.newestSeq ?? 0,
-            cachedBitmap: session?.cachedBitmap ?? 0,
-        };
-    }));
+    return useKeyedSelector(sessionMessagesLive, sessionId, selectSessionMessages, shallowEqual);
+}
+
+const noMessages: Message[] = [];
+
+/** Only what the chat screen draws; most writes replace `messages` and leave the rest alone. */
+function selectSessionMessages(entry: SessionMessages | undefined) {
+    return {
+        messages: entry?.messages ?? noMessages,
+        isLoaded: entry?.isLoaded ?? false,
+        hasOlderMessages: entry?.hasOlderMessages ?? false,
+        isLoadingOlder: entry?.isLoadingOlder ?? false,
+        isFetching: entry?.isFetching ?? false,
+        oldestSeq: entry?.oldestSeq ?? 0,
+        newestSeq: entry?.newestSeq ?? 0,
+        cachedBitmap: entry?.cachedBitmap ?? 0,
+    };
 }
 
 /** Whether a session needs a desktop session, and whether one is available right now. */
@@ -2630,21 +2640,38 @@ export function useSessionDesktop(sessionId: string): { required: boolean; avail
 }
 
 export function useSessionIsFetching(sessionId: string): boolean {
-    return storage(state => state.sessionMessages[sessionId]?.isFetching ?? false);
+    return useKeyedSelector(sessionMessagesLive, sessionId, (entry) => entry?.isFetching ?? false);
 }
 
 export function useMessage(sessionId: string, messageId: string): Message | null {
-    return storage(useShallow((state) => {
-        const session = state.sessionMessages[sessionId];
-        return session?.messagesMap[messageId] ?? null;
-    }));
+    return useKeyedSelector(sessionMessagesLive, sessionId, (entry) => entry?.messagesMap[messageId] ?? null);
 }
 
 export function useSessionUsage(sessionId: string) {
-    return storage(useShallow((state) => {
-        const session = state.sessionMessages[sessionId];
-        return session?.reducerState?.latestUsage ?? null;
-    }));
+    return useKeyedSelector(sessionMessagesLive, sessionId, (entry) => entry?.reducerState?.latestUsage ?? null);
+}
+
+const noResolvedPermissions: ReadonlySet<string> = new Set();
+
+/**
+ * Permission requests the message stream has already closed, by tool-call id.
+ *
+ * Answered requests leave `agentState.requests` only after the server acknowledges the state
+ * update. While the server socket is down that acknowledgement waits — minutes, in one observed
+ * session — so the session keeps reporting "permission required" after the user has answered.
+ * The `permission-result` envelope, on the other hand, is written to the log as soon as the CLI
+ * handles the answer and reaches every device over whichever channel is up. This is that answer,
+ * readable by anything that currently asks `agentState.requests`.
+ *
+ * It is not a history: the reducer drops ids the server's list no longer holds, so the set only
+ * covers requests the two reports currently disagree on.
+ */
+export function useResolvedPermissionIds(sessionId: string): ReadonlySet<string> {
+    return useKeyedSelector(
+        sessionMessagesLive,
+        sessionId,
+        (entry) => entry?.reducerState.resolvedPermissionIds ?? noResolvedPermissions,
+    );
 }
 
 export function useSettings(): Settings {
@@ -2725,20 +2752,21 @@ export function useLanSightings(): Record<string, LanSighting> {
  * the JS thread starved for tens of seconds. A boolean selector re-renders a row only when the
  * answer actually changes.
  */
-export function useSessionOnline(sessionId: string, machineId: string | undefined): boolean {
-    return storage((state) => resolveSessionReach(
-        sessionId,
-        machineId,
-        channelDrivers(state, state.localSettings.channelPriority),
-        Date.now(),
-    ).online);
+export function useSessionOnline(sessionId: string, _machineId: string | undefined): boolean {
+    // The answer is computed once per store write for every session (the same pass that decides
+    // whether the list changed), keyed by session id. `machineId` is retained in the signature
+    // because callers read it from the session; the projection uses that same field.
+    return useKeyedValue(sessionOnlineLive, sessionId) ?? false;
 }
 
 export function useSessionReach(sessionId: string, machineId: string | undefined): SessionReach {
+    // The server driver answers from the session itself (`active`/`activeAt`), which lives in the
+    // keyed store now, so this key has to wake the hook as well as the channel facts in the store.
+    useKeyedValue(sessionLive, sessionId);
     return storage(useShallow((state) => resolveSessionReach(
         sessionId,
         machineId,
-        channelDrivers(state, state.localSettings.channelPriority),
+        channelDrivers(withSessions(state), state.localSettings.channelPriority),
         Date.now(),
     )));
 }
@@ -2871,15 +2899,53 @@ export function useMachineBadgeInputs(): (machineId: string) => { reach: Machine
     );
 }
 
+/**
+ * One machine's glyph inputs, for a component that draws exactly one badge.
+ *
+ * The channel state gets a new object on every socket transition, so a builder has to be rebuilt
+ * with it — and a component handed that builder re-renders with it even when its own machine's
+ * glyphs did not move. This asks the drivers for one machine and keeps the previous answer while
+ * it is the same, so the badge subscribes to its own machine rather than to every channel fact.
+ */
+export function useMachineBadgeInputsFor(machineId: string | undefined): { reach: MachineReach; capability: MachineCapability; link: MachineLink } {
+    const channelState = storage(useShallow(selectChannelState));
+    const priority = storage(useShallow((state) => state.localSettings.channelPriority));
+    const previous = React.useRef<{ reach: MachineReach; capability: MachineCapability; link: MachineLink } | null>(null);
+    const next = React.useMemo(
+        () => machineBadgeInputs(channelDrivers(channelState, priority), machineId ?? ''),
+        [channelState, priority, machineId],
+    );
+    return React.useMemo(() => {
+        const last = previous.current;
+        if (last
+            && last.reach.server === next.reach.server
+            && last.reach.lan === next.reach.lan
+            && last.reach.relay === next.reach.relay
+            && last.capability.lan === next.capability.lan
+            && last.capability.relay === next.capability.relay
+            && last.link.server === next.link.server
+            && last.link.lan === next.link.lan
+            && last.link.relay === next.link.relay) {
+            return last;
+        }
+        previous.current = next;
+        return next;
+    }, [next]);
+}
+
 export function useSessionListViewData(): SessionListViewItem[] | null {
-    return storage((state) => state.isDataReady ? state.sessionListViewData : null);
+    const ready = storage((state) => state.isDataReady);
+    const data = useValueStore(sessionListViewDataLive);
+    return ready ? data : null;
 }
 
 export function useAllSessions(): Session[] {
-    return storage(useShallow((state) => {
-        if (!state.isDataReady) return [];
-        return Object.values(state.sessions).sort((a, b) => b.updatedAt - a.updatedAt);
-    }));
+    const ready = storage((state) => state.isDataReady);
+    const sessions = useAllKeyedValues(sessionLive);
+    return React.useMemo(
+        () => ready ? [...sessions].sort((a, b) => b.updatedAt - a.updatedAt) : [],
+        [ready, sessions],
+    );
 }
 
 export function useLocalSettingMutable<K extends keyof LocalSettings>(name: K): [LocalSettings[K], (value: LocalSettings[K]) => void] {
@@ -2911,8 +2977,15 @@ export function useProjectGitStatus(projectId: string | null) {
     return storage(useShallow((state) => projectId ? state.getProjectGitStatus(projectId) : null));
 }
 
+/**
+ * The project's git status, read out of `projectManager` — a plain in-memory map that cannot
+ * notify anyone. The status is written next to the session's own status, so that key is used as
+ * the wake signal; the value itself is read live, because the project entry is shared by every
+ * session in the same worktree and is updated from whichever of them fetched.
+ */
 export function useSessionProjectGitStatus(sessionId: string | null) {
-    return storage(useShallow((state) => sessionId ? state.getSessionProjectGitStatus(sessionId) : null));
+    useKeyedValue(sessionGitStatusLive, sessionId ?? '');
+    return sessionId ? projectManager.getSessionProjectGitStatus(sessionId) : null;
 }
 
 export function useLocalSetting<K extends keyof LocalSettings>(name: K): LocalSettings[K] {
@@ -2981,7 +3054,11 @@ export function useRealtimeMode(): 'idle' | 'speaking' {
  */
 const selectChannelState = (state: StorageState): ChannelState => ({
     socketStatus: state.socketStatus,
-    sessions: state.sessions,
+    // Non-reactive on purpose: the callers of this selector ask machine-level questions (badges,
+    // links, presence), where a session's own answer is never read. The snapshot is taken here
+    // only because the drivers' input names sessions. The one place a session's answer matters —
+    // the list build — reads the live store directly in `recomputeDerived`.
+    sessions: sessionLive.snapshot(),
     machines: state.machines,
     daemonSockets: state.daemonSockets,
     daemonSessionList: state.daemonSessionList,
@@ -3017,7 +3094,7 @@ export function useSocketStatus() {
 }
 
 export function useSessionGitStatus(sessionId: string): GitStatus | null {
-    return storage(useShallow((state) => state.sessionGitStatus[sessionId] ?? null));
+    return useKeyedValue(sessionGitStatusLive, sessionId) ?? null;
 }
 
 export function useIsDataReady(): boolean {
