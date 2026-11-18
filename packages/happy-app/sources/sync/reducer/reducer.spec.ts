@@ -3051,4 +3051,75 @@ describe('reducer', () => {
             }
         });
     });
+
+    describe('usage', () => {
+        it('updates latestUsage from a live agent message and carries the turn output forward', () => {
+            const state = createReducer();
+            reducer(state, [{
+                id: 'turn-end-1',
+                localId: null,
+                createdAt: 1,
+                role: 'event',
+                isSidechain: false,
+                content: { type: 'ready' },
+                usage: {
+                    input_tokens: 10,
+                    output_tokens: 500,
+                    cache_read_input_tokens: 1000,
+                    cache_creation_input_tokens: 0,
+                },
+            }]);
+
+            expect(state.latestUsage?.outputTokens).toBe(500);
+            expect(state.latestUsage?.contextSize).toBe(1010);
+
+            // A live per-inference envelope: it omits output_tokens (the assistant stream
+            // reports zero per content block), so the last turn total must survive.
+            reducer(state, [{
+                id: 'live-1',
+                localId: null,
+                createdAt: 2,
+                role: 'agent',
+                isSidechain: false,
+                content: [{ type: 'text', text: 'tick', uuid: 'live-1', parentUUID: null }],
+                usage: {
+                    input_tokens: 142,
+                    cache_read_input_tokens: 128_384,
+                    cache_creation_input_tokens: 0,
+                },
+            }]);
+
+            expect(state.latestUsage).toMatchObject({
+                inputTokens: 142,
+                cacheRead: 128_384,
+                contextSize: 128_526,
+                outputTokens: 500,
+            });
+        });
+
+        it('ignores usage older than the latest one', () => {
+            const state = createReducer();
+            reducer(state, [{
+                id: 'turn-end-2',
+                localId: null,
+                createdAt: 10,
+                role: 'event',
+                isSidechain: false,
+                content: { type: 'ready' },
+                usage: { input_tokens: 20, output_tokens: 30 },
+            }]);
+
+            reducer(state, [{
+                id: 'stale-1',
+                localId: null,
+                createdAt: 5,
+                role: 'agent',
+                isSidechain: false,
+                content: [{ type: 'text', text: 'stale', uuid: 'stale-1', parentUUID: null }],
+                usage: { input_tokens: 999 },
+            }]);
+
+            expect(state.latestUsage?.inputTokens).toBe(20);
+        });
+    });
 });

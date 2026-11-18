@@ -356,22 +356,6 @@ export type Metadata = {
    * it. The App draws its badge from this instead of asking the machine for four git commands.
    */
   gitStatus?: WorktreeStatus,
-  /** Periodic /context fetch result — provides real-time context window usage to the App. */
-  contextUsage?: {
-    currentTokens: number
-    maxTokens: number
-    pct: number
-    model?: string
-    breakdown?: {
-      systemPrompt: number
-      systemTools: number
-      customAgents: number
-      skills: number
-      messages: number
-      freeSpace: number
-    }
-    fetchedAt: number
-  } | null
 };
 
 export type A2AInboxMessage = {
@@ -451,7 +435,6 @@ export function sanitizeSessionMetadataForApp(metadata: Metadata): AppCompatible
     sandbox,
     profileId,
     dangerouslySkipPermissions,
-    contextUsage,
     gitStatus,
   } = metadata;
 
@@ -464,7 +447,6 @@ export function sanitizeSessionMetadataForApp(metadata: Metadata): AppCompatible
     ...(thoughtLevels !== undefined ? { thoughtLevels } : {}),
     ...(currentThoughtLevelCode !== undefined ? { currentThoughtLevelCode } : {}),
     ...(profileId !== undefined ? { profileId } : {}),
-    ...(contextUsage != null ? { contextUsage } : {}),
     path,
     host,
     ...(version !== undefined ? { version } : {}),

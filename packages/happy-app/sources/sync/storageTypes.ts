@@ -54,21 +54,6 @@ export const MetadataSchema = z.object({
     currentSandboxIsolation: z.string().optional(), // Current sandbox isolation level written by CLI ('off' | 'strict' | 'workspace' | 'custom')
     dangerouslySkipPermissions: z.boolean().nullish(), // Claude --dangerously-skip-permissions mode (or null when unknown)
     profileId: z.string().nullish(), // Active environment profile ID, synced from CLI
-	    contextUsage: z.object({
-	        currentTokens: z.number(),
-	        maxTokens: z.number(),
-	        pct: z.number(),
-	        model: z.string().optional(),
-	        breakdown: z.object({
-	            systemPrompt: z.number(),
-	            systemTools: z.number(),
-	            customAgents: z.number(),
-	            skills: z.number(),
-	            messages: z.number(),
-	            freeSpace: z.number(),
-	        }).optional(),
-	        fetchedAt: z.number().optional(),
-	    }).optional(),
 	    /**
 	     * The session's working tree, computed by the CLI when a tool may have written to it.
 	     *
