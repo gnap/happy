@@ -152,6 +152,17 @@ export type ReducerState = {
     sidechainBufferedResults: Map<string, { is_error: boolean; content: unknown; createdAt: number; permissions?: unknown }>; // tool_use_id -> buffered result (tool-result arrived before tool-call-start)
     bufferedResults: Map<string, { is_error: boolean; content: unknown; createdAt: number; permissions?: unknown }>; // same for main-chain
     permissions: Map<string, StoredPermission>; // Store permission details by ID for quick lookup
+    /**
+     * Tool-call ids whose permission the stream has already closed.
+     *
+     * `agentState.requests` is the server's list, and it only loses an id after the server
+     * acknowledges the state update — so while the server socket is down it keeps listing
+     * requests that were answered long ago, and every reader of it draws the session as still
+     * waiting on the user. The `permission-result` envelope arrives on every channel as soon as
+     * the CLI handles the answer; this holds those ids so that list can be read minus them. Only
+     * ids the current agentState still lists are kept (pruned at the top of `reducer`).
+     */
+    resolvedPermissionIds: Set<string>;
     localIds: Map<string, string>;
     messageIds: Map<string, string>; // originalId -> internalId
     /** Last message id that was a thinking message; used to merge streaming thinking chunks into one bubble */
@@ -217,6 +228,7 @@ export function createReducer(): ReducerState {
         sidechainBufferedResults: new Map(),
         bufferedResults: new Map(),
         permissions: new Map(),
+        resolvedPermissionIds: new Set(),
         messages: new Map(),
         localIds: new Map(),
         messageIds: new Map(),
@@ -262,6 +274,17 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
         }
         if (agentState?.completedRequests) {
             console.log(`[REDUCER] AgentState has ${Object.keys(agentState.completedRequests).length} completed requests`);
+        }
+    }
+
+    // `resolvedPermissionIds` only exists to hide requests the server still lists after the
+    // stream closed them. Once the server's own list drops an id, there is nothing left to hide;
+    // deleting costs no re-render because it cannot change what a reader computes from the list.
+    if (agentState?.requests) {
+        for (const id of state.resolvedPermissionIds) {
+            if (!agentState.requests[id]) {
+                state.resolvedPermissionIds.delete(id);
+            }
         }
     }
 
@@ -389,6 +412,11 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
         if (msg.role === 'event' && msg.content.type === 'permission-result') {
             state.messageIds.set(msg.id, msg.id);
             const permEv = msg.content;
+            // Copy-on-write: the set is a selector's answer, and readers hear about the closure
+            // through its identity changing.
+            if (!state.resolvedPermissionIds.has(permEv.call)) {
+                state.resolvedPermissionIds = new Set(state.resolvedPermissionIds).add(permEv.call);
+            }
             const messageId = state.toolIdToMessageId.get(permEv.call);
             if (messageId) {
                 const message = state.messages.get(messageId);

@@ -2651,6 +2651,29 @@ export function useSessionUsage(sessionId: string) {
     return useKeyedSelector(sessionMessagesLive, sessionId, (entry) => entry?.reducerState?.latestUsage ?? null);
 }
 
+const noResolvedPermissions: ReadonlySet<string> = new Set();
+
+/**
+ * Permission requests the message stream has already closed, by tool-call id.
+ *
+ * Answered requests leave `agentState.requests` only after the server acknowledges the state
+ * update. While the server socket is down that acknowledgement waits — minutes, in one observed
+ * session — so the session keeps reporting "permission required" after the user has answered.
+ * The `permission-result` envelope, on the other hand, is written to the log as soon as the CLI
+ * handles the answer and reaches every device over whichever channel is up. This is that answer,
+ * readable by anything that currently asks `agentState.requests`.
+ *
+ * It is not a history: the reducer drops ids the server's list no longer holds, so the set only
+ * covers requests the two reports currently disagree on.
+ */
+export function useResolvedPermissionIds(sessionId: string): ReadonlySet<string> {
+    return useKeyedSelector(
+        sessionMessagesLive,
+        sessionId,
+        (entry) => entry?.reducerState.resolvedPermissionIds ?? noResolvedPermissions,
+    );
+}
+
 export function useSettings(): Settings {
     return storage(useShallow((state) => state.settings));
 }

@@ -31,6 +31,7 @@ function makeFullReducerState(): ReducerState {
         status: 'approved',
         mode: 'auto',
     });
+    state.resolvedPermissionIds.add('perm1');
     state.localIds.set('local1', 'internal1');
     state.messageIds.set('real1', 'internal1');
     state.lastThinkingMessageId = 'think1';
@@ -134,6 +135,7 @@ describe('serializeReducerState / deserializeReducerState', () => {
         expect(restored.toolIdToMessageId.size).toBe(0);
         expect(restored.sidechainToolIdToMessageId.size).toBe(0);
         expect(restored.permissions.size).toBe(0);
+        expect(restored.resolvedPermissionIds.size).toBe(0);
         expect(restored.localIds.size).toBe(0);
         expect(restored.messageIds.size).toBe(0);
         expect(restored.lastThinkingMessageId).toBeNull();
@@ -159,6 +161,7 @@ describe('serializeReducerState / deserializeReducerState', () => {
         expect(perm?.tool).toBe('Bash');
         expect(perm?.status).toBe('approved');
         expect(perm?.arguments).toEqual({ command: 'ls' });
+        expect(restored.resolvedPermissionIds.has('perm1')).toBe(true);
 
         expect(restored.localIds.get('local1')).toBe('internal1');
         expect(restored.messageIds.get('real1')).toBe('internal1');
