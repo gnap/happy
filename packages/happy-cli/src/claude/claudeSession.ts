@@ -260,8 +260,6 @@ export type ClaudeSessionOpts = {
     // Dynamic parameters
     nextMessage: (signal?: AbortSignal) => Promise<{ message: string, mode: EnhancedMode, meta?: unknown } | null>,
     onReady: (result: SDKResultMessage) => void,
-    /** Called with accurate context size (and optional breakdown) from the running process after each normal turn. */
-    onContextUsage?: (usage: { totalTokens: number; maxTokens: number; breakdown?: { systemPrompt: number; systemTools: number; customAgents: number; skills: number; messages: number; freeSpace: number } }) => void,
     /** Called with raw markdown when the initial message is a /context local command. */
     onContextOutput?: (contextMarkdown: string) => void,
     isAborted: (toolCallId: string) => boolean,
