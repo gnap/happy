@@ -67,6 +67,8 @@ export interface PersistedReducerState {
     toolIdToMessageId: [string, string][];
     sidechainToolIdToMessageId: [string, string][];
     permissions: [string, PersistedStoredPermission][];
+    /** Optional so states written before this field existed still restore (as none resolved). */
+    resolvedPermissionIds?: string[];
     localIds: [string, string][];
     messageIds: [string, string][];
     lastThinkingMessageId: string | null;
@@ -135,6 +137,7 @@ export function serializeReducerState(state: ReducerState): PersistedReducerStat
         toolIdToMessageId: Array.from(state.toolIdToMessageId.entries()),
         sidechainToolIdToMessageId: Array.from(state.sidechainToolIdToMessageId.entries()),
         permissions: Array.from(state.permissions.entries()),
+        resolvedPermissionIds: Array.from(state.resolvedPermissionIds),
         localIds: Array.from(state.localIds.entries()),
         messageIds: Array.from(state.messageIds.entries()),
         lastThinkingMessageId: state.lastThinkingMessageId,
@@ -203,6 +206,7 @@ export function deserializeReducerState(persisted: PersistedReducerState): Reduc
         sidechainBufferedResults: new Map(), // transient — never persisted
         bufferedResults: new Map(), // transient — never persisted
         permissions: new Map(persisted.permissions),
+        resolvedPermissionIds: new Set(persisted.resolvedPermissionIds ?? []),
         localIds: new Map(persisted.localIds),
         messageIds: new Map(persisted.messageIds),
         lastThinkingMessageId: persisted.lastThinkingMessageId,

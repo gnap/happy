@@ -516,6 +516,41 @@ describe('reducer', () => {
                 expect(result.messages[0].tool.result).toEqual({ answers: ['Yes'] });
             }
         });
+
+        it('should record a resolved permission while agentState still lists the request', () => {
+            const state = createReducer();
+            // The incident shape: the answer was handled and written to the log, but the server
+            // has not acknowledged the state update, so its list still has the request.
+            const staleAgentState: AgentState = {
+                requests: {
+                    'tool-1': {
+                        tool: 'AskUserQuestion',
+                        arguments: { questions: [] },
+                        createdAt: 1000
+                    }
+                }
+            };
+            const resultEv: NormalizedMessage = {
+                id: 'msg-3',
+                localId: null,
+                createdAt: 3000,
+                role: 'event',
+                isSidechain: false,
+                content: {
+                    type: 'permission-result',
+                    call: 'tool-1',
+                    status: 'approved'
+                }
+            };
+
+            reducer(state, [resultEv], staleAgentState);
+            expect(state.resolvedPermissionIds.has('tool-1')).toBe(true);
+
+            // Once the server's own list drops it there is nothing left to hide, so the record
+            // goes with it rather than growing for the life of the session.
+            reducer(state, [], { requests: {} });
+            expect(state.resolvedPermissionIds.size).toBe(0);
+        });
     });
 
     describe('AgentState permissions', () => {
