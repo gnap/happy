@@ -1605,7 +1605,9 @@ function processUsageData(state: ReducerState, usage: UsageData, timestamp: numb
     if (!state.latestUsage || timestamp > state.latestUsage.timestamp) {
         state.latestUsage = {
             inputTokens: usage.input_tokens,
-            outputTokens: usage.output_tokens,
+            // Live per-inference envelopes omit it (the stream reports zero output per block);
+            // carry the last known turn total until turn-end replaces it.
+            outputTokens: usage.output_tokens ?? state.latestUsage?.outputTokens ?? 0,
             cacheCreation: usage.cache_creation_input_tokens || 0,
             cacheRead: usage.cache_read_input_tokens || 0,
             cacheCreationBreakdown: usage.cache_creation ? {

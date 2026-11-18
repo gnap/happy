@@ -1582,6 +1582,36 @@ describe('Zod Transform - WOLOG Content Normalization', () => {
             }
         });
 
+        it('attaches per-inference usage carried on a session envelope', () => {
+            const normalized = normalizeRawMessage('db-env-usage', null, 1, {
+                role: 'session',
+                content: {
+                    id: 'env-usage-1',
+                    time: 1,
+                    role: 'agent',
+                    turn: 'turn-1',
+                    usage: {
+                        input_tokens: 142,
+                        cache_read_input_tokens: 128_384,
+                        cache_creation_input_tokens: 0,
+                        model: 'glm-5.3',
+                    },
+                    ev: { t: 'text', text: 'tick' }
+                }
+            } as any);
+
+            expect(normalized?.role).toBe('agent');
+            expect(normalized?.usage).toEqual({
+                input_tokens: 142,
+                cache_read_input_tokens: 128_384,
+                cache_creation_input_tokens: 0,
+                contextSize: undefined,
+                context_window_tokens: undefined,
+                cache_creation: undefined,
+                model: 'glm-5.3',
+            });
+        });
+
         it('normalizes thinking text events', () => {
             const normalized = normalizeRawMessage('db-2', null, 1, {
                 ...base,

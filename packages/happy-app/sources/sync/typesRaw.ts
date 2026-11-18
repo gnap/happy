@@ -11,7 +11,9 @@ const usageDataSchema = z.object({
     input_tokens: z.number(),
     cache_creation_input_tokens: z.number().optional(),
     cache_read_input_tokens: z.number().optional(),
-    output_tokens: z.number(),
+    // Optional on live per-inference envelopes: the assistant stream reports zero output for
+    // every content block, so those payloads omit it and the App keeps the last turn's count.
+    output_tokens: z.number().optional(),
     service_tier: z.string().optional(),
     // Pre-computed context window size (may be provided by CLI for Cursor sessions
     // where input_tokens alone does not represent the full context window).
@@ -138,33 +140,39 @@ const sessionStartEventSchema = z.object({
     title: z.string().optional(),
 });
 
+/**
+ * Usage payload of one API call. Turn-end carries the turn rollup in this shape; individual
+ * envelopes carry the live per-call numbers so the context gauge moves while the turn runs.
+ * Cursor/Claude may use either snake_case or camelCase; all optional to be lenient.
+ */
+const sessionUsagePayloadSchema = z.object({
+    input_tokens: z.number().optional(),
+    inputTokens: z.number().optional(),
+    output_tokens: z.number().optional(),
+    outputTokens: z.number().optional(),
+    cache_creation_input_tokens: z.number().optional(),
+    cacheCreationInputTokens: z.number().optional(),
+    cache_read_input_tokens: z.number().optional(),
+    cacheReadInputTokens: z.number().optional(),
+    // Pre-computed by CLI; numerator (used context size)
+    contextSize: z.number().optional(),
+    context_size: z.number().optional(),
+    // Max context window parsed from init model display name (denominator)
+    context_window_tokens: z.number().optional(),
+    contextWindowTokens: z.number().optional(),
+    // Cache creation breakdown by TTL tier from Claude API
+    cache_creation: z.object({
+        ephemeral_5m_input_tokens: z.number(),
+        ephemeral_1h_input_tokens: z.number(),
+    }).optional(),
+    // Real provider-reported model from assistant message (e.g. "claude-sonnet-5").
+    model: z.string().optional(),
+});
+
 const sessionTurnEndEventSchema = z.object({
     t: z.literal('turn-end'),
     status: z.enum(['completed', 'failed', 'cancelled']),
-    // Usage fields from Cursor/Claude may use either snake_case or camelCase; all optional to be lenient
-    usage: z.object({
-        input_tokens: z.number().optional(),
-        inputTokens: z.number().optional(),
-        output_tokens: z.number().optional(),
-        outputTokens: z.number().optional(),
-        cache_creation_input_tokens: z.number().optional(),
-        cacheCreationInputTokens: z.number().optional(),
-        cache_read_input_tokens: z.number().optional(),
-        cacheReadInputTokens: z.number().optional(),
-        // Pre-computed by CLI; numerator (used context size)
-        contextSize: z.number().optional(),
-        context_size: z.number().optional(),
-        // Max context window parsed from init model display name (denominator)
-        context_window_tokens: z.number().optional(),
-        contextWindowTokens: z.number().optional(),
-        // Cache creation breakdown by TTL tier from Claude API
-        cache_creation: z.object({
-            ephemeral_5m_input_tokens: z.number(),
-            ephemeral_1h_input_tokens: z.number(),
-        }).optional(),
-        // Real provider-reported model from assistant message (e.g. "claude-sonnet-5").
-        model: z.string().optional(),
-    }).optional(),
+    usage: sessionUsagePayloadSchema.optional(),
     // /context snapshot from backgroundContextFetcher — authoritative context usage
     contextUsage: z.object({
         currentTokens: z.number(),
@@ -255,6 +263,11 @@ const sessionEnvelopeSchema = z.object({
         message: 'subagent must be a cuid2 value',
     }).optional(),
     taskCall: z.string().optional(),
+    /**
+     * Usage of the API call that produced this envelope. Sent only on the first envelope of a
+     * main-thread inference; turn-end later carries the authoritative rollup.
+     */
+    usage: sessionUsagePayloadSchema.optional(),
     ev: sessionEventSchema,
 }).passthrough().superRefine((envelope, ctx) => {
     if (envelope.ev.t === 'service' && envelope.role !== 'agent') {
@@ -746,7 +759,49 @@ export type NormalizedMessage = ({
     },
 };
 
+/**
+ * Usage carried on a single envelope, in the shape the reducer consumes.
+ *
+ * Live per-inference payloads omit `output_tokens` (the stream reports zero per content block);
+ * undefined fields are left out so `processUsageData` carries the last known value forward.
+ */
+function toEnvelopeUsage(raw: z.infer<typeof sessionUsagePayloadSchema>): UsageData | undefined {
+    const inputTokens = raw.input_tokens ?? raw.inputTokens;
+    const cacheCreation = raw.cache_creation_input_tokens ?? raw.cacheCreationInputTokens;
+    const cacheRead = raw.cache_read_input_tokens ?? raw.cacheReadInputTokens;
+    if (inputTokens === undefined && cacheCreation === undefined && cacheRead === undefined) {
+        return undefined;
+    }
+    const outputTokens = raw.output_tokens ?? raw.outputTokens;
+    return {
+        input_tokens: inputTokens ?? 0,
+        ...(outputTokens !== undefined ? { output_tokens: outputTokens } : {}),
+        cache_creation_input_tokens: cacheCreation,
+        cache_read_input_tokens: cacheRead,
+        contextSize: raw.contextSize ?? raw.context_size,
+        context_window_tokens: raw.context_window_tokens ?? raw.contextWindowTokens,
+        cache_creation: raw.cache_creation,
+        ...(raw.model ? { model: raw.model } : {}),
+    };
+}
+
 function normalizeSessionEnvelope(
+    envelope: SessionEnvelope,
+    localId: string | null,
+    createdAt: number,
+    meta: MessageMeta | undefined,
+): NormalizedMessage | null {
+    const normalized = normalizeSessionEnvelopeContent(envelope, localId, createdAt, meta);
+    // The envelope-level usage is the live per-inference report; turn-end keeps its own
+    // (authoritative) copy inside ev. Attach it to whatever visible message the envelope became.
+    if (!normalized || envelope.usage === undefined || normalized.role !== 'agent') {
+        return normalized;
+    }
+    const usage = toEnvelopeUsage(envelope.usage);
+    return usage ? { ...normalized, usage } : normalized;
+}
+
+function normalizeSessionEnvelopeContent(
     envelope: SessionEnvelope,
     localId: string | null,
     createdAt: number,

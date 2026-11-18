@@ -156,4 +156,27 @@ describe('createEnvelope', () => {
   it('validates role/event compatibility', () => {
     expect(() => createEnvelope('user', { t: 'service', text: 'internal event' })).toThrow();
   });
+
+  it('carries per-inference usage on the envelope', () => {
+    const envelope = createEnvelope(
+      'agent',
+      { t: 'text', text: 'tick' },
+      {
+        turn: 'turn-1',
+        usage: {
+          input_tokens: 142,
+          cache_read_input_tokens: 128_384,
+          cache_creation_input_tokens: 0,
+          model: 'glm-5.3',
+        },
+      },
+    );
+
+    expect(envelope.usage).toEqual({
+      input_tokens: 142,
+      cache_read_input_tokens: 128_384,
+      cache_creation_input_tokens: 0,
+      model: 'glm-5.3',
+    });
+  });
 });

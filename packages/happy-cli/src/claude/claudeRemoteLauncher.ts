@@ -258,10 +258,11 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
     // Real model name as reported by the assistant message itself (e.g. "claude-sonnet-5").
     // Unlike the configured model code (ANTHROPIC_MODEL / ANTHROPIC_DEFAULT_*_MODEL, which can
     // be any operator-chosen string), this reflects what the provider actually routed the turn to.
-    // Seeded from metadata.contextUsage.model (persisted by a prior process) so a freshly
-    // resumed/restarted process doesn't fall back to the configured model code for the turns
-    // before its first real assistant message arrives.
-    let lastRealModel: string | undefined = session.client.getMetadata()?.contextUsage?.model;
+    // Deliberately not persisted in session metadata: usage facts travel in the message stream,
+    // and a metadata write per turn would churn the session list. Until the first assistant
+    // message of a turn arrives the configured code is the only name available — fine, because
+    // the turn's usage payload is assembled after that message.
+    let lastRealModel: string | undefined;
 
     // Usage of the last main-thread API call this turn. That call's prompt is the actual context
     // at the end of the turn. Claude emits one assistant message per content block, so consecutive
@@ -857,22 +858,6 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                             session.client.sendSessionEvent({ type: 'message', message: msg });
                         } else {
                             session.client.closeClaudeSessionTurn('completed', extras);
-                            // Update metadata's contextUsage.model — the unified source for
-                            // the App's session header model display. Always writes, using
-                            // zero tokens as placeholder; token counts live in turn usage.
-                            if (lastRealModel) {
-                                // `void` does not catch: an unhandled rejection here would reach
-                                // the process handler and end the session.
-                                session.client.updateMetadata((m) => ({
-                                    ...m,
-                                    contextUsage: {
-                                        ...(m.contextUsage ?? { currentTokens: 0, maxTokens: 0, pct: 0, fetchedAt: Date.now() }),
-                                        model: lastRealModel,
-                                    },
-                                })).catch((error) => {
-                                    logger.debug('[launcher] Failed to persist context usage model', error);
-                                });
-                            }
                         }
                         if (session.claudeTurnActiveRef) {
                             session.claudeTurnActiveRef.current = false;

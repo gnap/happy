@@ -5,6 +5,7 @@ import { createId, isCuid } from '@paralleldrive/cuid2';
 import {
     closeClaudeTurnWithStatus,
     mapClaudeLogMessageToSessionEnvelopes,
+    type ClaudeSessionProtocolState,
 } from './sessionProtocolMapper';
 
 describe('mapClaudeLogMessageToSessionEnvelopes', () => {
@@ -110,6 +111,67 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
         expect(result.envelopes).toHaveLength(2);
         expect(result.envelopes[0].ev.t).toBe('turn-start');
         expect(result.envelopes[1].ev).toEqual({ t: 'text', text: 'working...' });
+    });
+
+    it('reports inference usage once per message id, on the envelope that carries content', () => {
+        const state: ClaudeSessionProtocolState = { currentTurnId: null };
+        const usage = {
+            input_tokens: 142,
+            cache_read_input_tokens: 128_384,
+            cache_creation_input_tokens: 0,
+            output_tokens: 0,
+        };
+        const mapAssistant = (id: string, content: unknown[]) => mapClaudeLogMessageToSessionEnvelopes({
+            type: 'assistant',
+            uuid: `u-${Math.random()}`,
+            message: { role: 'assistant', id, model: 'glm-5.3', content, usage },
+        } as any, state);
+
+        // The first content block of a call carries the numbers.
+        const first = mapAssistant('msg_1', [{ type: 'text', text: 'one' }]);
+        expect(first.envelopes.find((e) => e.ev.t === 'text')?.usage).toEqual({
+            input_tokens: 142,
+            cache_read_input_tokens: 128_384,
+            cache_creation_input_tokens: 0,
+            model: 'glm-5.3',
+        });
+
+        // A second block of the same call repeats them — the App must not reprocess.
+        const second = mapAssistant('msg_1', [{ type: 'text', text: 'two' }]);
+        expect(second.envelopes.find((e) => e.ev.t === 'text')?.usage).toBeUndefined();
+
+        // A thinking-only record produces no envelope, so it must not consume the report:
+        // the call is still owed to the next visible block.
+        const thinkingOnly = mapAssistant('msg_2', [{ type: 'thinking', thinking: 'internal' }]);
+        expect(thinkingOnly.envelopes.some((e) => e.usage !== undefined)).toBe(false);
+        const afterThinking = mapAssistant('msg_2', [{ type: 'text', text: 'visible' }]);
+        expect(afterThinking.envelopes.find((e) => e.ev.t === 'text')?.usage?.input_tokens).toBe(142);
+
+        // The next call reports again.
+        const nextCall = mapAssistant('msg_3', [{ type: 'text', text: 'three' }]);
+        expect(nextCall.envelopes.find((e) => e.ev.t === 'text')?.usage?.input_tokens).toBe(142);
+    });
+
+    it('never attaches usage to sidechain envelopes', () => {
+        const mappedSubagent = createId();
+        const state: ClaudeSessionProtocolState = {
+            currentTurnId: null,
+            providerSubagentToSessionSubagent: new Map<string, string>([['task-1', mappedSubagent]]),
+        };
+
+        const result = mapClaudeLogMessageToSessionEnvelopes({
+            type: 'assistant',
+            uuid: 'a-side-usage',
+            parent_tool_use_id: 'task-1',
+            message: {
+                role: 'assistant',
+                id: 'msg_side',
+                content: [{ type: 'text', text: 'sidechain text' }],
+                usage: { input_tokens: 900, output_tokens: 0 },
+            },
+        } as any, state);
+
+        expect(result.envelopes.every((e) => e.usage === undefined)).toBe(true);
     });
 
     it('maps tool use and tool result blocks to tool-call lifecycle', () => {

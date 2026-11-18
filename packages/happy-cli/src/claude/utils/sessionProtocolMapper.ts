@@ -4,6 +4,7 @@ import { logger } from '@/lib';
 import {
     createEnvelope,
     type SessionEnvelope,
+    type SessionInferenceUsage,
     type SessionTurnEndStatus,
 } from '@slopus/happy-wire';
 
@@ -33,6 +34,12 @@ export type ClaudeSessionProtocolState = {
     toolNamesByCall?: Map<string, string>;
     /** Number of upcoming non-sidechain user text messages to suppress (e.g. inbox turn prompts). */
     suppressNextUserTextCount?: number;
+    /**
+     * `message.id` of the last API call whose usage rode on an envelope. Claude emits one
+     * record per content block and every record of one call repeats the same numbers, so this
+     * is what keeps the App from reprocessing them block by block.
+     */
+    lastUsageMessageId?: string;
 };
 
 type ClaudeMapperResult = {
@@ -535,6 +542,45 @@ function closeTurn(
     envelopes.push(createEnvelope('agent', { t: 'turn-end', status, ...(extras ?? {}) }, { turn: state.currentTurnId }));
     state.currentTurnId = null;
     clearSubagentTracking(state);
+    // Usage dedupe is per call id; ids never repeat, but a turn boundary is the natural place
+    // to drop the reference so it cannot pin state across turns.
+    state.lastUsageMessageId = undefined;
+}
+
+/**
+ * Usage of the API call behind an assistant record, when this record is the one that reports it.
+ *
+ * Returns undefined for sidechain calls — a subagent's prompt is not this session's context —
+ * and for records repeating a call that already reported (same `message.id`). The caller attaches
+ * the value to the first envelope the record actually produces: a record whose blocks are all
+ * suppressed (thinking-only, a hidden Task card) must not consume it, or the call goes
+ * unreported until the next one.
+ *
+ * `output_tokens` is deliberately omitted: the assistant stream reports zero for every content
+ * block, so the turn-end rollup remains the only source for it.
+ */
+function pendingInferenceUsage(
+    state: ClaudeSessionProtocolState,
+    message: RawJSONLines,
+    providerSubagent: string | undefined,
+): { usage: SessionInferenceUsage; messageId?: string } | undefined {
+    if (providerSubagent) return undefined;
+    if (message.type !== 'assistant') return undefined;
+    const usage = message.message?.usage;
+    if (!usage) return undefined;
+    const rawId = (message.message as { id?: unknown }).id;
+    const messageId = typeof rawId === 'string' && rawId.length > 0 ? rawId : undefined;
+    if (messageId && messageId === state.lastUsageMessageId) return undefined;
+    return {
+        usage: {
+            input_tokens: usage.input_tokens,
+            cache_read_input_tokens: usage.cache_read_input_tokens ?? 0,
+            cache_creation_input_tokens: usage.cache_creation_input_tokens ?? 0,
+            ...(usage.cache_creation ? { cache_creation: usage.cache_creation } : {}),
+            ...(typeof message.message?.model === 'string' ? { model: message.message.model } : {}),
+        },
+        messageId,
+    };
 }
 
 function toolTitle(name: string, input: unknown): string {
@@ -688,10 +734,19 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
         const taskCallId = subagent ? getTaskCallBySubagent(state).get(subagent) : undefined;
         maybeEmitSubagentStart(state, turnId, subagent, envelopes);
         const blocks = Array.isArray(message.message?.content) ? message.message.content : [];
+        // Usage rides on the first envelope this record produces (see pendingInferenceUsage).
+        const pendingUsage = pendingInferenceUsage(state, message, providerSubagent);
+        let usageAttached = false;
+        const takeUsage = (): { usage?: SessionInferenceUsage } => {
+            if (!pendingUsage || usageAttached) return {};
+            usageAttached = true;
+            state.lastUsageMessageId = pendingUsage.messageId;
+            return { usage: pendingUsage.usage };
+        };
 
         for (const block of blocks) {
             if (block.type === 'text' && typeof block.text === 'string') {
-                envelopes.push(createEnvelope('agent', { t: 'text', text: block.text }, { turn: turnId, subagent, ...(taskCallId ? { taskCall: taskCallId } : {}) }));
+                envelopes.push(createEnvelope('agent', { t: 'text', text: block.text }, { turn: turnId, subagent, ...(taskCallId ? { taskCall: taskCallId } : {}), ...takeUsage() }));
                 continue;
             }
 
@@ -778,7 +833,7 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
                     title,
                     description: title,
                     args,
-                }, { turn: turnId, subagent, ...(taskCallId ? { taskCall: taskCallId } : {}) }));
+                }, { turn: turnId, subagent, ...(taskCallId ? { taskCall: taskCallId } : {}), ...takeUsage() }));
                 const buffered = consumeBufferedSubagentMessages(state, call);
                 for (const bufferedMessage of buffered) {
                     const replay = mapClaudeLogMessageToSessionEnvelopesInternal(bufferedMessage, state);
