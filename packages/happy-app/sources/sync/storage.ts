@@ -1199,6 +1199,12 @@ export const storage = create<StorageState>()((set, get) => {
                 mergedSessions[session.id] = {
                     ...session,
                     presence,
+                    // The uid lives in metadata, which is the only channel that can carry it: the
+                    // server stores it encrypted and never sees it. Lift it onto the row so it is
+                    // persisted with the list cache and available without decrypting again. A
+                    // refresh that could not decrypt metadata must not erase an id already held —
+                    // absence is "not said this time", not "there is none".
+                    sessionUid: session.sessionUid ?? session.metadata?.sessionUid ?? heldSessions[session.id]?.sessionUid,
                     draft: existingDraft || savedDraft || session.draft || null,
                     permissionMode: resolvedPermissionMode,
                     modelMode: resolvedModelMode,
