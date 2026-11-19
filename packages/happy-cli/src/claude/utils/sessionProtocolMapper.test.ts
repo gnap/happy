@@ -233,6 +233,32 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
         expect(result.envelopes[1].ev).toEqual({ t: 'text', text: 'sidechain text' });
     });
 
+    it('does not read a main-thread message as a subagent through parentUuid', () => {
+        // The SDK converter chains parentUuid across the whole stream, so a main-thread record
+        // that follows a subagent record points at it. The subagent's card was from an earlier
+        // turn, so its mapping no longer exists: inheriting here buffers the message (inside the
+        // subagent) instead of emitting it, and the App never sees the reply.
+        const state: ClaudeSessionProtocolState = {
+            currentTurnId: 'turn-1',
+            uuidToProviderSubagent: new Map<string, string>([['a-side-1', 'task-from-last-turn']]),
+        };
+
+        const result = mapClaudeLogMessageToSessionEnvelopes({
+            type: 'assistant',
+            uuid: 'a-main-1',
+            parentUuid: 'a-side-1',
+            isSidechain: false,
+            message: {
+                role: 'assistant',
+                content: [{ type: 'text', text: 'the reply' }],
+            },
+        } as any, state);
+
+        expect(result.envelopes).toEqual([
+            expect.objectContaining({ ev: { t: 'text', text: 'the reply' } }),
+        ]);
+    });
+
     it('hides Task/Agent, shows Skill/TaskCreate/TaskUpdate/TaskOutput/TaskStop as cards', () => {
         const state = { currentTurnId: 'turn-active' };
 
