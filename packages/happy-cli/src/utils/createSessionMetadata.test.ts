@@ -1,5 +1,10 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { SandboxConfig } from '@/persistence';
+
+vi.mock('@/api/sessionUid', () => ({
+    resolveSessionUid: (tag: string) => `uid-for-${tag}`,
+}));
+
 import { createSessionMetadata } from './createSessionMetadata';
 
 function createSandboxConfig(overrides: Partial<SandboxConfig> = {}): SandboxConfig {
@@ -70,5 +75,22 @@ describe('createSessionMetadata', () => {
         });
 
         expect(metadata.dangerouslySkipPermissions).toBe(true);
+    });
+
+    it("carries the lineage's uid, resolved from the tag so a resume keeps it", () => {
+        const { metadata } = createSessionMetadata({
+            flavor: 'codex',
+            machineId: 'machine-6',
+            sessionTag: 'tag-6',
+        });
+
+        expect(metadata.sessionUid).toBe('uid-for-tag-6');
+        expect(metadata.sessionTag).toBeUndefined();
+    });
+
+    it('leaves the uid out when the caller has no tag', () => {
+        const { metadata } = createSessionMetadata({ flavor: 'gemini', machineId: 'machine-7' });
+
+        expect(metadata.sessionUid).toBeUndefined();
     });
 });

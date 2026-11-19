@@ -554,6 +554,7 @@ export async function runAcp(opts: RunAcpOptions): Promise<void> {
     flavor: resolveSessionFlavor(opts.agentName),
     machineId: settings.machineId,
     startedBy: opts.startedBy,
+    sessionTag,
     sandbox: settings.sandboxConfig,
   });
 

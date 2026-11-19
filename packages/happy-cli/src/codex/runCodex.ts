@@ -113,6 +113,7 @@ export async function runCodex(opts: {
         flavor: 'codex',
         machineId,
         startedBy: opts.startedBy,
+        sessionTag,
         sandbox: sandboxConfig,
     });
 

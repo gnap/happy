@@ -409,6 +409,7 @@ export async function runCursor(opts: {
     flavor: 'cursor',
     machineId,
     startedBy: opts.startedBy,
+    sessionTag,
     path: workspacePath,
     dangerouslySkipPermissions: false,
   });
