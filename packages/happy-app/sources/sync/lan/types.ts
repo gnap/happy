@@ -72,8 +72,14 @@ export type PublishedLanEndpoints = {
 };
 
 export type LanSessionSummary = {
-    happySessionId: string;
-    /** The CLI's own tag, set before the server issues an id. */
+    /**
+     * The server's id for the session, absent until the session has registered.
+     *
+     * The daemon mints the tag below before it launches the process, so a row it has scheduled
+     * is listed — and addressable — before there is an id. Key such a row by `tag`.
+     */
+    happySessionId?: string;
+    /** The CLI's own tag, set before the server issues an id, and kept after. */
     tag?: string;
     /**
      * The session's metadata, ciphertext and revision. Mirrored by the daemon from the session's
@@ -105,6 +111,18 @@ export type LanSessionSummary = {
      * the only party that can draw it.
      */
     restartingSince?: number;
+    /**
+     * The machine's projection of what this row is doing, and the spec revision behind it.
+     *
+     * The daemon computes these; the App draws them rather than re-deriving a phase from
+     * `isAlive` and timestamps. `phase` stays a plain string here because a newer machine may
+     * name one this build has not heard of — an unknown value is drawn as `Unknown`, not dropped.
+     */
+    phase?: string;
+    generation?: number;
+    observedGeneration?: number;
+    observedAt?: number;
+    reason?: string;
 };
 
 /**

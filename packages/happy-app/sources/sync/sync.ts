@@ -56,6 +56,7 @@ import { channelDrivers as buildChannelDrivers, relayOriginFrom } from './channe
 import { channelAvailability } from './channels/resolve';
 import { candidateInputsFor, orderedCandidates } from './channels/candidates';
 import { attemptFromStatus, carryOperation, type CarryOutcome, type HealthRecorder } from './channels/execute';
+import { dropDeletedDaemonSessionRows } from './daemonSessionList';
 import { fetchToolContent, fetchSessionListing, fetchSessionDiff, fetchPreviewGrant, previewUrlFor, type SessionListing } from './lan/client';
 import { downloadSessionFileFromDaemon, downloadSessionFolderFromDaemon } from './lan/fileDownload';
 import { getGitStatusFiles as getGitStatusFilesViaRpc, parseGitStatusFiles, type GitStatusFiles } from './gitStatusFiles';
@@ -4699,6 +4700,20 @@ class Sync {
                     ? updateData.body.restartingAt ?? null
                     : session.restartingAt;
 
+                // The projection beside the timestamp is runtime state, not persisted session
+                // state: it goes to the in-memory store below, where the next listing and the
+                // next push meet, and a server refresh cannot freeze it into the cache.
+                if (updateData.body.phase !== undefined || updateData.body.generation !== undefined) {
+                    storage.getState().applySessionRuntime([{
+                        sessionId: updateData.body.id,
+                        phase: updateData.body.phase ?? undefined,
+                        generation: updateData.body.generation ?? undefined,
+                        observedGeneration: updateData.body.observedGeneration ?? undefined,
+                        observedAt: updateData.body.observedAt ?? undefined,
+                        reason: updateData.body.reason ?? undefined,
+                    }]);
+                }
+
                 // Do not set seq from updateData.seq (global); keep session.seq as session-internal so it matches GET /v1/sessions
                 this.applySessions([{
                     ...session,
@@ -6223,23 +6238,52 @@ class Sync {
         // overwrite the owner's answer would flip a live session to offline depending on the order
         // the machines happened to answer in. The owner is the one whose summary matters; an
         // importer's copy is only a name in a list.
-        const byId = new Map<string, { summary: LanSessionSummary; machineId: string; via: DaemonRoute }>();
+        // Keyed by server id, or by the CLI's tag for a row the daemon listed before the server
+        // named it. The tag is what makes a scheduled spawn visible at all: it is the one name the
+        // machine can mint itself, and the same tag is what the row keeps when it registers.
+        const byKey = new Map<string, { summary: LanSessionSummary; machineId: string; via: DaemonRoute }>();
         for (const answer of answers) {
             for (const summary of answer.sessions) {
-                const id = summary.happySessionId;
-                if (!id) continue;
-                const previous = byId.get(id);
+                const key = summary.happySessionId ?? summary.tag;
+                if (!key) continue;
+                const previous = byKey.get(key);
                 if (!previous || (summary.origin !== 'server' && previous.summary.origin === 'server')) {
-                    byId.set(id, { summary, machineId: answer.machineId, via: answer.via });
+                    byKey.set(key, { summary, machineId: answer.machineId, via: answer.via });
                 }
             }
         }
-        const sessions = [...byId.values()].map(({ summary, via }) => ({ ...summary, via }));
+        const sessions = [...byKey.values()].map(({ summary, machineId, via }) => ({ ...summary, via, machineId }));
         // Daemon-numbered from here until a server answer replaces it: a session's `seq` in this
         // list is the daemon's own counter, and comparisons against the server's axis must not
         // read it (see `serverAxisSeq`).
         this.sessionsListAxis = 'daemon';
         storage.getState().applyDaemonSessionList(sessions);
+        // The projection from the listing goes to the runtime store, not the session rows: what a
+        // machine says now must not be frozen into the list cache. A row that says nothing about
+        // it (an older daemon) contributes nothing and leaves the stored answer alone.
+        const runtime = dropDeletedDaemonSessionRows(
+            [...byKey.values()].map(({ summary }) => summary),
+            storage.getState().deletedSessions,
+        ).flatMap((summary) => {
+            const sessionId = summary.happySessionId;
+            if (!sessionId) return [];
+            if (summary.phase === undefined && summary.generation === undefined
+                && summary.observedGeneration === undefined && summary.observedAt === undefined
+                && summary.reason === undefined) {
+                return [];
+            }
+            return [{
+                sessionId,
+                phase: summary.phase,
+                generation: summary.generation,
+                observedGeneration: summary.observedGeneration,
+                observedAt: summary.observedAt,
+                reason: summary.reason,
+            }];
+        });
+        if (runtime.length > 0) {
+            storage.getState().applySessionRuntime(runtime);
+        }
 
         // The daemon's state is the complete list, including sessions imported from the server:
         // rows it names are created here, and rows it says it archived are deleted. The server's
@@ -6249,7 +6293,12 @@ class Sync {
         const catalogIds = new Set<string>();
         const catalogRows: Session[] = [];
         const now = Date.now();
-        for (const [id, { summary, machineId }] of byId) {
+        for (const [, { summary, machineId }] of byKey) {
+            // A tag-only row has no server id, so there is no catalog entry to create for it. It is
+            // still in `daemonSessionList`, which is where a pending row is drawn from until the
+            // webhook names it and a later listing carries the id.
+            const id = summary.happySessionId;
+            if (!id) continue;
             catalogIds.add(id);
             const existing = knownSessions[id];
             let metadata = existing?.metadata ?? null;
