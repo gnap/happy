@@ -74,6 +74,25 @@ export const UpdateSessionBodySchema = z.object({
    * restarting for good.
    */
   restartingAt: z.number().nullish(),
+  /**
+   * The machine's projection of what this session is doing, and the spec revision it is doing.
+   *
+   * `restartingAt` is the narrow fact that predates this: a timestamp only, so the reader could
+   * age it out. These are the same machine-authored statements in the form the roster uses, so
+   * the App can draw a phase from a push instead of re-deriving one from timestamps, and can
+   * tell whether the row it is drawing is at the latest generation.
+   *
+   * A plain string rather than an enum: a newer machine may name a phase this build has not
+   * heard of, and rejecting the whole frame would lose the fields it does understand. Readers
+   * treat an unknown value as `Unknown`.
+   */
+  phase: z.string().nullish(),
+  generation: z.number().int().nonnegative().nullish(),
+  /** The generation the machine's phase was computed from; ahead of `generation` after a new spec. */
+  observedGeneration: z.number().int().nonnegative().nullish(),
+  observedAt: z.number().nullish(),
+  /** Why the phase is what it is, when the machine can say (e.g. `generation-ahead`). */
+  reason: z.string().nullish(),
 });
 export type UpdateSessionBody = z.infer<typeof UpdateSessionBodySchema>;
 

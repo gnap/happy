@@ -28,6 +28,7 @@ import websocket, { type WebSocket } from '@fastify/websocket';
 import { logger } from '@/ui/logger';
 import type { SessionLogEntry } from '@/api/sessionLog';
 import type { ArchiveSessionResult } from './types';
+import type { SessionCondition, SessionPhase } from './sessionStatus';
 
 /** How long an issued bearer token stays valid. Short because it travels over cleartext. */
 const TOKEN_TTL_MS = 90_000;
@@ -123,6 +124,29 @@ export type LanSessionSummary = {
    * looks like from anywhere else, because nothing reports the session while it happens.
    */
   restartingSince?: number;
+  /**
+   * What this machine says the session is, projected in one place (`sessionStatusOf`) so every
+   * reader gets the same answer.
+   *
+   * Additive alongside `isAlive` and `restartingSince`, which keep their exact meaning: this is
+   * the phase derived from those facts, not a replacement for them. A reader that does not know
+   * about it loses nothing, and one that does can say "starting" instead of guessing from an
+   * alive-but-unnamed row.
+   */
+  phase?: SessionPhase;
+  /** The spec revision the phase is reconciled against; `0` when this machine has no spec. */
+  generation?: number;
+  /**
+   * The spec revision the phase reflects. Below `generation` means a newer spec is accepted but
+   * not converged — a restart in flight, or a process that has not registered yet.
+   */
+  observedGeneration?: number;
+  /** When the phase was last justified by a fact, in epoch milliseconds. */
+  observedAt?: number;
+  /** A short explanation of the phase. */
+  reason?: string;
+  /** The facts behind the phase, for a reader that wants more than the phase. */
+  conditions?: SessionCondition[];
 };
 
 /** How a reader names a session: by the id the server issued, or by the tag the CLI owns. */
@@ -307,7 +331,13 @@ export type LanServerOptions = {
    * and touches nothing else on the machine. Absent means this daemon does not offer it, and a
    * caller falls back to whatever route it has left.
    */
-  restartSession?: (sessionId: string, sandboxConfig?: unknown, requiresDesktop?: boolean) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
+  restartSession?: (
+    sessionId: string,
+    sandboxConfig?: unknown,
+    requiresDesktop?: boolean,
+    expectGeneration?: number,
+    mode?: 'wait' | 'accept',
+  ) => Promise<import('./types').RestartSessionResult>;
   /**
    * A control call the *session* acts on, forwarded to its process: abort the turn in flight, or
    * answer a permission request it is waiting on.
@@ -749,12 +779,18 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     if (!opts.restartSession) {
       return reply.code(404).send({ error: 'this daemon does not restart sessions' });
     }
-    const requested = typeof (request.body as { requiresDesktop?: unknown } | null)?.requiresDesktop === 'boolean'
-      ? (request.body as { requiresDesktop: boolean }).requiresDesktop
+    const body = request.body as { requiresDesktop?: unknown; expect?: unknown; generation?: unknown } | null;
+    const requested = typeof body?.requiresDesktop === 'boolean' ? body.requiresDesktop : undefined;
+    // Additive request fields: an older caller sends neither and keeps the blocking answer.
+    // `generation` makes a repeat land on the state its first ask reached; `expect: accepted`
+    // answers once the machine has taken the work rather than once it has finished.
+    const expectAccepted = body?.expect === 'accepted';
+    const generation = typeof body?.generation === 'number' && Number.isInteger(body.generation) && body.generation >= 0
+      ? body.generation
       : undefined;
-    logger.debug(`[lan] restart ${sessionId} from=${clientAddress(request)} desktop=${requested ?? 'keep'}`);
-    const result = await opts.restartSession(sessionId, undefined, requested);
-    logger.debug(`[lan] restart ${sessionId} success=${result.success}${result.error ? ` error=${result.error}` : ''}`);
+    logger.debug(`[lan] restart ${sessionId} from=${clientAddress(request)} desktop=${requested ?? 'keep'} expect=${expectAccepted ? 'accepted' : 'wait'} generation=${generation ?? '-'}`);
+    const result = await opts.restartSession(sessionId, undefined, requested, generation, expectAccepted ? 'accept' : 'wait');
+    logger.debug(`[lan] restart ${sessionId} success=${result.success} accepted=${result.accepted} stage=${result.stage}${result.error ? ` error=${result.error}` : ''}`);
     return reply.send({ v: LAN_PROTOCOL_VERSION, ...result });
   });
 
@@ -876,9 +912,27 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     const result = opts.archiveSession(sessionId);
     logger.debug(`[lan] archive ${sessionId} from=${clientAddress(request)} applied=${result.applied} known=${result.known}`);
     if (!result.applied) {
-      return reply.code(404).send({ error: 'the machine could not record the deletion' });
+      return reply.code(404).send({
+        error: 'the machine could not record the deletion',
+        success: false,
+        accepted: false,
+        stage: 'failed',
+        // Additive: older readers stop at the status code and the `error` string.
+        ref: sessionId,
+        reason: 'not-recorded',
+      });
     }
-    return reply.send({ v: LAN_PROTOCOL_VERSION });
+    return reply.send({
+      v: LAN_PROTOCOL_VERSION,
+      // Additive: an older reader ignores all of this and treats the 200 as the answer it
+      // always was. The deletion is synchronous, so it has already reached its end state.
+      success: true,
+      accepted: true,
+      stage: 'done',
+      ref: sessionId,
+      phase: 'Archived',
+      ...(result.tag ? { tag: result.tag } : {}),
+    });
   });
 
   app.post('/lan/sessions/:sessionId/control', { bodyLimit: CONTROL_BODY_LIMIT_BYTES }, async (request, reply) => {

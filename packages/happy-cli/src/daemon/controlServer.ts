@@ -10,6 +10,7 @@ import { logger } from '@/ui/logger';
 import { Metadata } from '@/api/types';
 import { TrackedSession, type ArchiveSessionResult } from './types';
 import { SpawnSessionOptions, SpawnSessionResult } from '@/modules/common/registerCommonHandlers';
+import type { RestartSessionResult } from './types';
 import { extractA2aText, extractA2aTitle } from '@/a2a/parse';
 import { sendA2aMessage } from './sendA2aMessage';
 
@@ -32,7 +33,7 @@ export function startDaemonControlServer({
   stopSessionByPid: (pid: number) => boolean;
   port: number;
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
-  restartSession: (sessionId: string, sandboxConfig?: unknown, requiresDesktop?: boolean) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
+  restartSession: (sessionId: string, sandboxConfig?: unknown, requiresDesktop?: boolean, expectGeneration?: number, mode?: 'wait' | 'accept') => Promise<RestartSessionResult>;
   archiveSession: (sessionId: string) => ArchiveSessionResult;
   requestShutdown: () => void;
   onHappySessionWebhook: (sessionId: string, metadata: Metadata) => void;
@@ -194,13 +195,25 @@ export function startDaemonControlServer({
           agent: z.enum(['claude', 'codex', 'cursor', 'cursor-acp', 'gemini']).optional(),
           environmentVariables: z.record(z.string()).optional(),
           resumeSessionTag: z.string().optional(),
-          sandboxConfig: z.any().optional()
+          sandboxConfig: z.any().optional(),
+          /** `accepted` answers when a process exists, not when it has registered. */
+          expect: z.enum(['accepted']).optional(),
+          /** The spec revision the caller observed; a restart may carry it. */
+          generation: z.number().int().min(0).optional(),
         }),
         response: {
           200: z.object({
             success: z.boolean(),
             sessionId: z.string().optional(),
-            approvedNewDirectoryCreation: z.boolean().optional()
+            approvedNewDirectoryCreation: z.boolean().optional(),
+            // Additive: old callers read success/sessionId and ignore everything below.
+            accepted: z.boolean().optional(),
+            stage: z.string().optional(),
+            ref: z.string().optional(),
+            tag: z.string().optional(),
+            generation: z.number().optional(),
+            phase: z.string().optional(),
+            reason: z.string().optional(),
           }),
           409: z.object({
             success: z.boolean(),
@@ -210,15 +223,25 @@ export function startDaemonControlServer({
           }),
           500: z.object({
             success: z.boolean(),
-            error: z.string().optional()
+            error: z.string().optional(),
+            accepted: z.boolean().optional(),
+            stage: z.string().optional(),
+            ref: z.string().optional(),
+            generation: z.number().optional(),
+            phase: z.string().optional(),
+            reason: z.string().optional(),
           })
         }
       }
     }, async (request, reply) => {
-      const { directory, sessionId, agent, environmentVariables, resumeSessionTag, sandboxConfig } = request.body;
+      const { directory, sessionId, agent, environmentVariables, resumeSessionTag, sandboxConfig, expect, generation } = request.body;
 
-      logger.debug(`[CONTROL SERVER] Spawn session request: dir=${directory}, sessionId=${sessionId || 'new'}, agent=${agent ?? 'default'}, sandbox=${sandboxConfig ? 'yes' : 'no'}`);
-      const result = await spawnSession({ directory, sessionId, agent, environmentVariables, resumeSessionTag, sandboxConfig });
+      logger.debug(`[CONTROL SERVER] Spawn session request: dir=${directory}, sessionId=${sessionId || 'new'}, agent=${agent ?? 'default'}, sandbox=${sandboxConfig ? 'yes' : 'no'}, expect=${expect ?? 'blocking'}`);
+      const result = await spawnSession({
+        directory, sessionId, agent, environmentVariables, resumeSessionTag, sandboxConfig,
+        ...(expect === 'accepted' ? { expectAccepted: true } : {}),
+        ...(generation !== undefined ? { generation } : {}),
+      });
 
       switch (result.type) {
         case 'success':
@@ -227,15 +250,39 @@ export function startDaemonControlServer({
             reply.code(500);
             return {
               success: false,
+              accepted: false,
+              stage: 'failed',
+              reason: 'no-session-id',
               error: 'Failed to spawn session: no session ID returned'
             };
           }
           return {
             success: true,
             sessionId: result.sessionId,
-            approvedNewDirectoryCreation: true
+            approvedNewDirectoryCreation: true,
+            // Additive: the blocking answer has always meant "registered", so the phase is
+            // Running rather than Starting. Older callers see the same fields as before.
+            accepted: true,
+            stage: 'running',
+            ref: result.sessionId,
+            ...(result.tag ? { tag: result.tag } : {}),
+            ...(result.generation !== undefined ? { generation: result.generation } : {}),
+            phase: 'Running',
           };
-        
+
+        case 'accepted':
+          // A process exists; the server has not named the session yet. `ref` is the tag because
+          // that is the only name the session has at this point.
+          return {
+            success: true,
+            accepted: true,
+            stage: 'starting',
+            ref: result.ref,
+            tag: result.tag,
+            generation: result.generation,
+            phase: result.phase,
+          };
+
         case 'requestToApproveDirectoryCreation':
           reply.code(409); // Conflict - user input needed
           return { 
@@ -249,6 +296,9 @@ export function startDaemonControlServer({
           reply.code(500);
           return { 
             success: false,
+            accepted: false,
+            stage: 'failed',
+            reason: 'spawn-failed',
             error: result.errorMessage
           };
       }
@@ -258,21 +308,39 @@ export function startDaemonControlServer({
     typed.post('/restart-session', {
       schema: {
         body: z.object({
-          sessionId: z.string()
+          sessionId: z.string(),
+          requiresDesktop: z.boolean().optional(),
+          /** `accepted` answers when the machine has taken the restart, not when it finishes. */
+          expect: z.enum(['accepted']).optional(),
+          /** The generation the caller observed; a repeat is answered, not repeated. */
+          generation: z.number().int().min(0).optional(),
         }),
         response: {
           200: z.object({
             success: z.boolean(),
             newSessionId: z.string().optional(),
-            error: z.string().optional()
+            error: z.string().optional(),
+            // Additive: the shape older callers already read is unchanged above.
+            accepted: z.boolean().optional(),
+            stage: z.string().optional(),
+            ref: z.string().optional(),
+            generation: z.number().optional(),
+            phase: z.string().optional(),
+            reason: z.string().optional(),
+            message: z.string().optional(),
           })
         }
       }
     }, async (request) => {
-      const { sessionId } = request.body;
-      logger.debug(`[CONTROL SERVER] Restart session request: ${sessionId}`);
-      const result = await restartSession(sessionId, undefined, typeof (request.body as any)?.requiresDesktop === 'boolean' ? (request.body as any).requiresDesktop : undefined);
-      return result;
+      const { sessionId, requiresDesktop, expect, generation } = request.body;
+      logger.debug(`[CONTROL SERVER] Restart session request: ${sessionId}, expect=${expect ?? 'wait'}, generation=${generation ?? '-'}`);
+      return restartSession(
+        sessionId,
+        undefined,
+        typeof requiresDesktop === 'boolean' ? requiresDesktop : undefined,
+        generation,
+        expect === 'accepted' ? 'accept' : 'wait',
+      );
     });
 
     // Archive (permanently remove from list) a stopped session
