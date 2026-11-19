@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { serializerCompiler, validatorCompiler, ZodTypeProvider } from 'fastify-type-provider-zod';
 import { logger } from '@/ui/logger';
 import { Metadata } from '@/api/types';
-import { TrackedSession } from './types';
+import { TrackedSession, type ArchiveSessionResult } from './types';
 import { SpawnSessionOptions, SpawnSessionResult } from '@/modules/common/registerCommonHandlers';
 import { extractA2aText, extractA2aTitle } from '@/a2a/parse';
 import { sendA2aMessage } from './sendA2aMessage';
@@ -33,7 +33,7 @@ export function startDaemonControlServer({
   port: number;
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
   restartSession: (sessionId: string, sandboxConfig?: unknown, requiresDesktop?: boolean) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
-  archiveSession: (sessionId: string) => boolean;
+  archiveSession: (sessionId: string) => ArchiveSessionResult;
   requestShutdown: () => void;
   onHappySessionWebhook: (sessionId: string, metadata: Metadata) => void;
   onSessionEnding: (sessionId: string, pid: number, reason: string, exitCode?: number, archive?: boolean) => void;
@@ -286,8 +286,8 @@ export function startDaemonControlServer({
     }, async (request) => {
       const { sessionId } = request.body;
       logger.debug(`[CONTROL SERVER] Archive session request: ${sessionId}`);
-      const success = archiveSession(sessionId);
-      return { success };
+      const result = archiveSession(sessionId);
+      return { success: result.applied };
     });
 
     // Session pre-announces its exit reason before dying

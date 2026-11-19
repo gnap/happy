@@ -37,6 +37,28 @@ describe('LifecycleLog', () => {
         expect(log.record({ op: 'created', tag: 'tag-2', sessionId: 'cmt123' }).sessionId).toBe('cmt123');
     });
 
+    it('records a deletion by session id alone, for a row this machine no longer holds', () => {
+        // The App may be deleting a session the daemon's snapshot lost — the catalog was cleaned,
+        // or the row was only ever on the server. The delete still has to reach the server, and the
+        // id is what the server addresses; the tag is only how older readers name the row.
+        const log = logAt();
+        expect(log.record({ op: 'deleted', sessionId: 'cmt123' })).toMatchObject({
+            rev: 1,
+            op: 'deleted',
+            sessionId: 'cmt123',
+        });
+        expect(log.read()[0]).toEqual({ rev: 1, at: expect.any(Number), op: 'deleted', sessionId: 'cmt123' });
+    });
+
+    it('reads a deletion with no name at all as a torn line, not as a fact', () => {
+        // Neither address is a statement anyone could act on, so a line carrying neither is not
+        // something this version wrote.
+        const dir = mkdtempSync(join(tmpdir(), 'happy-lifecycle-'));
+        const file = join(dir, 'lifecycle.jsonl');
+        writeFileSync(file, '{"rev":1,"at":1,"op":"deleted"}\n', 'utf8');
+        expect(new LifecycleLog(file).read()).toEqual([]);
+    });
+
     it('drops a torn tail rather than failing the read, and stops there', () => {
         // The only way this file grows is an append, so a line that does not parse is a crash
         // mid-write. Skipping it would silently reorder whatever followed.

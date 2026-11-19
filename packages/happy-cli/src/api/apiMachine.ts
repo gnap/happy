@@ -14,6 +14,7 @@ import { encodeBase64, decodeBase64, encrypt, decrypt } from './encryption';
 import { backoff } from '@/utils/time';
 import { isBun, isNode } from '@/utils/runtime';
 import { RpcHandlerManager } from './rpc/RpcHandlerManager';
+import type { ArchiveSessionResult } from '../daemon/types';
 
 /** How long a best-effort daemon-state write may take before the caller moves on. */
 const DAEMON_STATE_WRITE_TIMEOUT_MS = 2000;
@@ -111,7 +112,7 @@ interface DaemonToServerEvents {
 type MachineRpcHandlers = {
     spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
     stopSession: (sessionId: string) => boolean;
-    archiveSession: (sessionId: string) => boolean;
+    archiveSession: (sessionId: string) => ArchiveSessionResult;
     restartSession: (sessionId: string, sandboxConfig?: any, requiresDesktop?: boolean) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
     requestShutdown: () => void;
 }
@@ -195,12 +196,28 @@ export class ApiMachineClient {
             }
 
             // Stop first if still running
-            stopSession(sessionId);
+            const stopped = stopSession(sessionId);
 
-            // Then archive from stopped list
+            // Then record the deletion. This is applied even when the machine has no row for the
+            // id: the tombstone is what the server replay consumes, and it is the App's delete.
             const archived = archiveSession(sessionId);
-            logger.debug(`[API MACHINE] killSession: ${sessionId} — stopped=${archived}`);
-            return { success: true, message: archived ? 'Session archived' : 'Session stopped' };
+            logger.debug(`[API MACHINE] killSession: ${sessionId} — stopped=${stopped} applied=${archived.applied} known=${archived.known}`);
+            // `success` remains for older Apps; accepted/applied/reason are what a newer one reads.
+            // A stopped process and a recorded deletion are different facts, and the caller now
+            // gets both instead of a single boolean that hid the one that did not happen.
+            return {
+                success: archived.applied,
+                accepted: true,
+                applied: archived.applied,
+                stopped,
+                known: archived.known,
+                reason: archived.applied
+                    ? (stopped ? 'stopped-and-archived' : 'archived')
+                    : 'archive-failed',
+                message: archived.applied
+                    ? (stopped ? 'Session stopped and archived' : 'Session archived')
+                    : 'Session could not be archived',
+            };
         });
 
         // Register restart session handler.

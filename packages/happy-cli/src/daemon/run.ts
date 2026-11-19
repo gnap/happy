@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import * as tmp from 'tmp';
 
 import { ApiClient } from '@/api/api';
-import { TrackedSession } from './types';
+import { TrackedSession, type ArchiveSessionResult } from './types';
 import { MachineMetadata, DaemonState, Metadata } from '@/api/types';
 import { SpawnSessionOptions, SpawnSessionResult } from '@/modules/common/registerCommonHandlers';
 import { appendResumeAfterSeqCliArgs } from '@/utils/resumeAfterSeq';
@@ -559,6 +559,23 @@ export async function startDaemon(): Promise<void> {
       stoppedSessions.delete(sessionId);
     };
 
+    /**
+     * Commit a deletion, then project it into the snapshot.
+     *
+     * The append is the transaction: once it returns, every reader can replay the fact, and a
+     * crash before the snapshot is written costs nothing — the next start rebuilds the tombstone
+     * from the log. Repeating it is suppressed, because every tombstone in this map came from this
+     * function (or was backfilled from the log at startup), so a second entry would only grow the
+     * file.
+     */
+    const commitArchive = (sessionId: string, tag?: string): void => {
+      if (archivedSessionIds[sessionId] !== undefined) {
+        return;
+      }
+      lifecycleLog.record({ op: 'deleted', sessionId, ...(tag ? { tag } : {}) });
+      markSessionArchived(sessionId);
+    };
+
     /** Derive human-readable exit reason from code/signal when no webhook reason was given. */
     const resolveExitReason = (code: number | null, signal: string | null | undefined): string => {
       if (signal) {
@@ -595,8 +612,9 @@ export async function startDaemon(): Promise<void> {
           // App-initiated archive (killSession RPC): do not keep in list
           logger.debug(`[DAEMON RUN] Session ${session.happySessionId} (PID ${pid}) archived by app, removing from list`);
           if (session.happySessionId) {
-            markSessionArchived(session.happySessionId);
+            commitArchive(session.happySessionId, session.sessionTag);
             persistNow();
+            announceLifecycle();
           }
         } else {
           // Process exited on its own (pause / signal / crash): keep visible until user archives
@@ -695,8 +713,9 @@ export async function startDaemon(): Promise<void> {
         if (archive) session.pendingArchive = true;
         logger.debug(`[DAEMON RUN] Session ending (self-reported): ${sessionId} PID ${pid} reason="${reason}" archive=${archive ?? false}`);
         if (archive) {
-          markSessionArchived(sessionId);
+          commitArchive(sessionId, session.sessionTag ?? sessions[sessionId]?.sessionTag);
           persistNow();
+          announceLifecycle();
         }
       } else {
         // Process already evicted — still record for history if it matches a recently-exited entry
@@ -707,8 +726,9 @@ export async function startDaemon(): Promise<void> {
           logger.debug(`[DAEMON RUN] Session ending (self-reported, already evicted): ${sessionId} PID ${pid} reason="${reason}"`);;
         }
         if (archive) {
-          markSessionArchived(sessionId);
+          commitArchive(sessionId, recent?.sessionTag ?? sessions[sessionId]?.sessionTag);
           persistNow();
+          announceLifecycle();
         }
       }
     };
@@ -1440,27 +1460,24 @@ export async function startDaemon(): Promise<void> {
 
     // Handle child process exit
 
-    /** Remove a stopped session from the visible list (explicit user action). */
-    const archiveSession = (sessionId: string): boolean => {
+    /**
+     * Remove a session from this machine's list (explicit user action).
+     *
+     * The tombstone is written for *every* id, including one this machine has no row for. An
+     * unknown id is not a failure: the App is asking for a deletion, the server addresses sessions
+     * by id, and the replay can carry the delete without this machine ever having held the row.
+     * Refusing here is what made the App's delete look applied while the server kept serving the
+     * session.
+     */
+    const archiveSession = (sessionId: string): ArchiveSessionResult => {
+      const stored = sessions[sessionId];
+      const tracked = stoppedSessions.get(sessionId)
+        ?? [...pidToTrackedSession.values()].find((session) => session.happySessionId === sessionId);
+      const known = tracked !== undefined || stored !== undefined;
+      const tag = tracked?.sessionTag || stored?.sessionTag || undefined;
       // Written first: an archived session is a fact every reader has to be able to replay, and the
       // tracking below is what stops being able to tell them.
-      //
-      // A session the server named but this machine never ran is in the durable catalog with
-      // `origin: 'server'`; it has no stopped process and no tracked PID, and deleting it still
-      // has to produce the log entry that the server replay consumes.
-      const stored = sessions[sessionId];
-      const archived = stoppedSessions.get(sessionId)
-        ?? [...pidToTrackedSession.values()].find((session) => session.happySessionId === sessionId)
-        ?? stored;
-      if (!archived) {
-        return false;
-      }
-      const tag = archived.sessionTag || stored?.sessionTag || '';
-      // An empty tag is allowed here: `replayToServer` addresses the deletion by session id, and
-      // the tag is only how older readers name a row. Recorded even when it is empty, because the
-      // delete is the transaction.
-      lifecycleLog.record({ op: 'deleted', tag, sessionId });
-      announceLifecycle();
+      commitArchive(sessionId, tag);
       let removed = stoppedSessions.delete(sessionId);
       if (removed) {
         logger.debug(`[DAEMON RUN] Archived session ${sessionId}`);
@@ -1474,11 +1491,9 @@ export async function startDaemon(): Promise<void> {
           break;
         }
       }
-      // The tombstone is also what keeps an imported server-only row out of the roster until the
-      // server's copy is gone; it is a state fact, not just a side effect of a live process.
-      markSessionArchived(sessionId);
+      announceLifecycle();
       persistNow();
-      return true;
+      return { applied: true, known, ...(tag ? { tag } : {}) };
     };
 
     /**
@@ -1488,7 +1503,7 @@ export async function startDaemon(): Promise<void> {
      * different road. Archiving alone would remove the row while leaving the process running, and
      * a session whose row is gone but whose process is not is the orphan this exists to prevent.
      */
-    const deleteSessionFromApp = (sessionId: string): boolean => {
+    const deleteSessionFromApp = (sessionId: string): ArchiveSessionResult => {
       stopSession(sessionId);
       return archiveSession(sessionId);
     };
@@ -1530,20 +1545,69 @@ export async function startDaemon(): Promise<void> {
     /** One replay at a time: two walks over the same entries would send the same DELETE twice. */
     let replayingLifecycle = false;
     /**
+     * A fact arrived while a walk was in flight.
+     *
+     * The walk reads the log once at its start; an append after that read is not in the entries it
+     * is carrying, so the walk can finish "at the end" while the log has already moved. This is how
+     * that fact gets its own walk instead of waiting for the heartbeat.
+     */
+    let lifecycleReplayRequested = false;
+    /** One pending retry, so a burst of lifecycle events does not become a burst of walks. */
+    let lifecycleReplayTimer: ReturnType<typeof setTimeout> | null = null;
+    /** Walks that made no progress in a row. Any progress resets it. */
+    let lifecycleReplayFailures = 0;
+    /**
+     * The wait before each retry, before the cap.
+     *
+     * The first is short because a failed deletion is a user's action and the usual cause is a
+     * blip; the tail keeps a machine that cannot reach the server from asking more often than
+     * every half hour. The heartbeat still calls the walk, so a timer lost to suspension is not a
+     * channel that never tries again.
+     */
+    const LIFECYCLE_REPLAY_DELAYS_MS = [2_000, 5_000, 15_000, 60_000, 5 * 60_000, 15 * 60_000, 30 * 60_000];
+
+    const scheduleLifecycleReplay = (delayMs: number): void => {
+      if (lifecycleReplayTimer) {
+        clearTimeout(lifecycleReplayTimer);
+      }
+      // Spread the machines that are retrying the same server rather than letting them pulse in
+      // step. The delay itself is the useful part; the jitter only keeps them out of lockstep.
+      const wait = Math.round(delayMs * (0.8 + Math.random() * 0.4));
+      lifecycleReplayTimer = setTimeout(() => {
+        lifecycleReplayTimer = null;
+        void replayLifecycleToServer();
+      }, wait);
+      lifecycleReplayTimer.unref?.();
+    };
+
+    /**
      * Tells the server about the endings in this machine's log.
      *
      * The server is the slow channel — on a machine whose connection takes a minute to come up,
      * doing this inline would mean a deletion that lands only when the network cooperates — so it
      * has a cursor of its own and this walks whatever is past it, whenever what is past it changes.
+     *
+     * A walk that lands nothing is retried on its own ladder, not left to the next lifecycle event.
+     * The cursor is the only thing that moves a deletion forward, and nothing in the machine's log
+     * changes when the network does.
      */
     const replayLifecycleToServer = async (): Promise<void> => {
       if (replayingLifecycle) {
+        lifecycleReplayRequested = true;
         return;
       }
       replayingLifecycle = true;
+      lifecycleReplayRequested = false;
+      let from = 0;
+      let to = 0;
+      let revision = 0;
+      let readOk = false;
       try {
-        const from = readServerCursor();
-        const to = await replayToServer(lifecycleLog.read(), from, {
+        from = readServerCursor();
+        const entries = lifecycleLog.read();
+        revision = entries.length === 0 ? 0 : entries[entries.length - 1].rev;
+        readOk = true;
+        to = await replayToServer(entries, from, {
           // Where this machine says it can be reached. The server stores the blob without decoding
           // it, and a client reads it while it is here — a projection of the log entry, not the
           // record, which is why a write that does not land simply leaves the cursor where it is.
@@ -1588,9 +1652,50 @@ export async function startDaemon(): Promise<void> {
         if (to !== from) {
           logger.debug(`[DAEMON RUN] Lifecycle replay to server: rev ${from} → ${to}`);
         }
+      } catch (error) {
+        // A walk that throws landed nothing past `from`; treated like any other refusal instead of
+        // escaping as an unhandled rejection from `announceLifecycle`'s fire-and-forget call.
+        logger.debug('[DAEMON RUN] Lifecycle replay: walk failed', { error: String(error) });
       } finally {
         replayingLifecycle = false;
       }
+
+      const requestedAgain = lifecycleReplayRequested;
+      lifecycleReplayRequested = false;
+
+      if (!readOk) {
+        const delay = LIFECYCLE_REPLAY_DELAYS_MS[Math.min(lifecycleReplayFailures, LIFECYCLE_REPLAY_DELAYS_MS.length - 1)];
+        lifecycleReplayFailures += 1;
+        logger.debug(`[DAEMON RUN] Lifecycle replay: log or cursor unreadable; retry ${lifecycleReplayFailures} in ~${delay}ms`);
+        scheduleLifecycleReplay(delay);
+        return;
+      }
+      if (to >= revision) {
+        lifecycleReplayFailures = 0;
+        if (requestedAgain) {
+          // The log moved after this walk read it. One more pass picks that fact up now rather
+          // than waiting for the heartbeat.
+          scheduleLifecycleReplay(0);
+          return;
+        }
+        // Nothing is waiting. Any timer was armed for a state that no longer exists.
+        if (lifecycleReplayTimer) {
+          clearTimeout(lifecycleReplayTimer);
+          lifecycleReplayTimer = null;
+        }
+        return;
+      }
+      if (to > from) {
+        // The walk landed something and stopped at the next refusal. The ladder is for a channel
+        // that is not moving at all; this one is, so try again soon.
+        lifecycleReplayFailures = 0;
+        scheduleLifecycleReplay(LIFECYCLE_REPLAY_DELAYS_MS[0]);
+        return;
+      }
+      const delay = LIFECYCLE_REPLAY_DELAYS_MS[Math.min(lifecycleReplayFailures, LIFECYCLE_REPLAY_DELAYS_MS.length - 1)];
+      lifecycleReplayFailures += 1;
+      logger.debug(`[DAEMON RUN] Lifecycle replay: rev ${to}/${revision} still pending; retry ${lifecycleReplayFailures} in ~${delay}ms`);
+      scheduleLifecycleReplay(delay);
     };
 
 /** Nonces already spent, so a lifted signature cannot be used a second time. */
@@ -2755,6 +2860,31 @@ export async function startDaemon(): Promise<void> {
       // Legacy format detected — migrate once, then persist new format.
       sessions = migrateLegacySessionState(prevState);
       logger.debug(`[DAEMON RUN] Migrated ${Object.keys(sessions).length} session(s) from legacy parallel-map format`);
+    }
+
+    // The log is the record; the snapshot's map is a projection, and the two can disagree after a
+    // crash or a cleaned state file. Fold both ways:
+    //  - a tombstone in the log whose snapshot entry was lost still has to suppress the row;
+    //  - a tombstone only in an older snapshot predates this log, so backfill it — otherwise the
+    //    server replay would never hear about a deletion this machine has been enforcing locally.
+    {
+      const loggedDeletions = new Set<string>();
+      for (const entry of lifecycleLog.read()) {
+        if (entry.op === 'deleted' && entry.sessionId) {
+          loggedDeletions.add(entry.sessionId);
+          if (archivedSessionIds[entry.sessionId] === undefined) {
+            archivedSessionIds[entry.sessionId] = entry.at;
+          }
+        }
+      }
+      for (const [sessionId, at] of Object.entries({ ...archivedSessionIds })) {
+        if (loggedDeletions.has(sessionId)) {
+          continue;
+        }
+        const tag = sessions[sessionId]?.sessionTag;
+        lifecycleLog.record({ op: 'deleted', sessionId, at, ...(tag ? { tag } : {}) });
+        logger.debug(`[DAEMON RUN] Backfilled lifecycle tombstone for ${sessionId}`);
+      }
     }
 
     // Verify PIDs from persisted sessions are actually dead. If a PID survived the

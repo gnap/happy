@@ -10,6 +10,7 @@ import { Readable } from 'node:stream';
 import nacl from 'tweetnacl';
 import { startLanServer, lanProofFor, LAN_PROTOCOL_VERSION, type LanHistory, type LanServerHandle, type LanSessionSummary } from './lanServer';
 import { accountProofMessage } from './accountProof';
+import type { ArchiveSessionResult } from './types';
 
 const SECRET = new Uint8Array(32).fill(3);
 const WRONG_SECRET = new Uint8Array(32).fill(4);
@@ -136,7 +137,7 @@ let sessionDiffHandler: ((args: { sessionId: string; path: string }) => Promise<
 let restartHandler: ((sessionId: string) => Promise<{ success: boolean; newSessionId?: string; error?: string }>) | undefined;
 /** Sessions the archive route was asked to delete, in order. Unset by default, like restart. */
 let archived: string[] = [];
-let archiveHandler: ((sessionId: string) => boolean) | undefined;
+let archiveHandler: ((sessionId: string) => ArchiveSessionResult) | undefined;
 
 let server: LanServerHandle | null = null;
 /** What a socket reader should be handed on connect; mutable so one test can set it. */
@@ -487,7 +488,7 @@ describe('lanServer read-only API', () => {
         it('records the deletion and says so', async () => {
             archiveHandler = (sessionId) => {
                 archived.push(sessionId);
-                return true;
+                return { applied: true, known: true };
             };
             await start();
             const token = await getToken();
@@ -499,10 +500,27 @@ describe('lanServer read-only API', () => {
             expect(archived).toEqual(['sess-1']);
         });
 
-        it('says 404 for a session this machine has nothing to delete', async () => {
-            // The one answer that belongs to another channel: the server may still hold the row,
-            // so the caller's own delete path continues there.
-            archiveHandler = () => false;
+        it('records a deletion for a session this machine no longer holds', async () => {
+            // The row may have been pruned, or only ever lived on the server. The id is what the
+            // server addresses, so the tombstone is still the transaction; a 404 here is what used
+            // to send the caller down a road that left the server's row alive.
+            archiveHandler = (sessionId) => {
+                archived.push(sessionId);
+                return { applied: true, known: false };
+            };
+            await start();
+            const token = await getToken();
+
+            const res = await fetch(url('/lan/sessions/sess-1/archive'), signed('/lan/sessions/sess-1/archive', { token }));
+
+            expect(res.status).toBe(200);
+            expect(archived).toEqual(['sess-1']);
+        });
+
+        it('says 404 when the machine could not record the deletion', async () => {
+            // The remaining reason for the route's negative answer: the fact could not be written.
+            // The caller's own delete path may still try the server.
+            archiveHandler = () => ({ applied: false, known: false });
             await start();
             const token = await getToken();
 
@@ -524,7 +542,7 @@ describe('lanServer read-only API', () => {
         it('is not reachable without a token', async () => {
             archiveHandler = (sessionId) => {
                 archived.push(sessionId);
-                return true;
+                return { applied: true, known: true };
             };
             await start();
 

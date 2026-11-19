@@ -27,6 +27,7 @@ import fastify, { type FastifyInstance } from 'fastify';
 import websocket, { type WebSocket } from '@fastify/websocket';
 import { logger } from '@/ui/logger';
 import type { SessionLogEntry } from '@/api/sessionLog';
+import type { ArchiveSessionResult } from './types';
 
 /** How long an issued bearer token stays valid. Short because it travels over cleartext. */
 const TOKEN_TTL_MS = 90_000;
@@ -212,7 +213,7 @@ export type LanServerOptions = {
   /** Sessions this machine has archived, so a reader can apply deletions from the same state. */
   getTombstones?: () => Array<{ sessionId: string; tag?: string; at: number }>;
   /** Archive locally and record the delete transaction; the daemon replays it to the server. */
-  archiveSession?: (sessionId: string) => boolean;
+  archiveSession?: (sessionId: string) => ArchiveSessionResult;
   /**
    * What this machine is running against what it has on disk.
    *
@@ -872,10 +873,10 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     if (!requireAccountProof(request, { operation: 'archive', target: sessionId })) {
       return reply.code(403).send({ error: 'account proof required' });
     }
-    const archived = opts.archiveSession(sessionId);
-    logger.debug(`[lan] archive ${sessionId} from=${clientAddress(request)} archived=${archived}`);
-    if (!archived) {
-      return reply.code(404).send({ error: 'no session by that id on this machine' });
+    const result = opts.archiveSession(sessionId);
+    logger.debug(`[lan] archive ${sessionId} from=${clientAddress(request)} applied=${result.applied} known=${result.known}`);
+    if (!result.applied) {
+      return reply.code(404).send({ error: 'the machine could not record the deletion' });
     }
     return reply.send({ v: LAN_PROTOCOL_VERSION });
   });

@@ -7,6 +7,23 @@ import { ChildProcess } from 'child_process';
 import type { SandboxConfig } from '@/persistence';
 
 /**
+ * What `archiveSession` did, rather than whether it "succeeded".
+ *
+ * A deletion is a fact written to this machine's log, so it has an outcome even when the machine
+ * never held the row: the tombstone is applied, `known` is false, and the server replay consumes
+ * it by id. Separating the two is what stops an unknown session from being reported as a failure
+ * (and then silently doing nothing, which is how the server kept a row the App had deleted).
+ */
+export type ArchiveSessionResult = {
+    /** The tombstone is in the log. Anything else means the caller has to retry or ask another road. */
+    applied: boolean;
+    /** This machine had a row for the session before the tombstone. */
+    known: boolean;
+    /** The CLI's tag, when this machine knew it. */
+    tag?: string;
+};
+
+/**
  * Session tracking for daemon
  */
 export interface TrackedSession {
