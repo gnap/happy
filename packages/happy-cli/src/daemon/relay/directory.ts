@@ -28,7 +28,21 @@
 import type { LanSessionSummary } from '../lanServer';
 
 /** One session as the directory describes it. */
-export type DirectorySession = Pick<LanSessionSummary, 'happySessionId' | 'tag' | 'isAlive' | 'origin' | 'restartingSince'>;
+export type DirectorySession = Pick<
+  LanSessionSummary,
+  | 'happySessionId'
+  | 'tag'
+  | 'isAlive'
+  | 'origin'
+  | 'restartingSince'
+  // The machine's projection, so an App can draw a row — including one for a session that has no
+  // server id yet — without opening a channel to ask. All of it is small and stable while idle.
+  | 'phase'
+  | 'generation'
+  | 'observedGeneration'
+  | 'observedAt'
+  | 'reason'
+>;
 
 /**
  * The directory rows for a roster, dropping everything the relay would not serve.
@@ -48,6 +62,11 @@ export function directoryRows(summaries: readonly LanSessionSummary[]): Director
       isAlive: summary.isAlive,
       ...(summary.origin === undefined ? {} : { origin: summary.origin }),
       ...(summary.restartingSince === undefined ? {} : { restartingSince: summary.restartingSince }),
+      ...(summary.phase === undefined ? {} : { phase: summary.phase }),
+      ...(summary.generation === undefined ? {} : { generation: summary.generation }),
+      ...(summary.observedGeneration === undefined ? {} : { observedGeneration: summary.observedGeneration }),
+      ...(summary.observedAt === undefined ? {} : { observedAt: summary.observedAt }),
+      ...(summary.reason === undefined ? {} : { reason: summary.reason }),
     });
   }
   return rows;

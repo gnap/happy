@@ -255,6 +255,13 @@ describe('relay', () => {
             agentState: 'y'.repeat(4096),
             dataEncryptionKey: 'z'.repeat(1024),
             origin: 'server',
+            // The machine's projection is small and is what an App draws a row from, so it rides
+            // along instead of being dropped with the blobs.
+            phase: 'Running',
+            generation: 4,
+            observedGeneration: 4,
+            observedAt: 1_234,
+            reason: 'registered',
         }];
         d.ws.send(JSON.stringify({ t: 'sessions', sessions }));
 
@@ -271,7 +278,17 @@ describe('relay', () => {
         // moved, and a stream's first frame queued behind them is what read as "did not open".
         expect(answer.machines[0]).toEqual({
             tag: d.tag,
-            sessions: [{ happySessionId: 's1', tag: 't1', isAlive: true, origin: 'server' }],
+            sessions: [{
+                happySessionId: 's1',
+                tag: 't1',
+                isAlive: true,
+                origin: 'server',
+                phase: 'Running',
+                generation: 4,
+                observedGeneration: 4,
+                observedAt: 1_234,
+                reason: 'registered',
+            }],
             reachable: null,
         });
 

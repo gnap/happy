@@ -30,12 +30,12 @@ import type { LanEndpoint } from './lanEndpoints';
 
 export type LifecycleOp = 'created' | 'deleted' | 'reachable';
 
-/** A session this machine started, or archived. */
-export type LifecycleSessionEntry = {
+/** A session this machine started. */
+export type LifecycleCreatedEntry = {
     /** Position in the log, 1-based and monotonic. A reader's cursor is the last entry it applied. */
     rev: number;
     at: number;
-    op: 'created' | 'deleted';
+    op: 'created';
     /** The CLI's own name for the session, which exists before the server has issued anything. */
     tag: string;
     /** The server's session id, once there is one. */
@@ -43,6 +43,26 @@ export type LifecycleSessionEntry = {
     directory?: string;
     agent?: string;
 };
+
+/**
+ * A session this machine was asked to remove.
+ *
+ * Either name is enough. The tag is what this machine and older readers know the session by; the
+ * session id is what the server addresses. A deletion for an id this machine never held is still a
+ * fact — it is how the App's delete reaches the server when the local catalog has lost the row —
+ * so the entry may carry the id alone.
+ */
+export type LifecycleDeletedEntry = {
+    rev: number;
+    at: number;
+    op: 'deleted';
+    tag?: string;
+    sessionId?: string;
+    directory?: string;
+    agent?: string;
+};
+
+export type LifecycleSessionEntry = LifecycleCreatedEntry | LifecycleDeletedEntry;
 
 /**
  * Where this machine could be reached, as of `at`.
@@ -61,19 +81,37 @@ export type LifecycleReachableEntry = {
 
 export type LifecycleEntry = LifecycleSessionEntry | LifecycleReachableEntry;
 
+/**
+ * What `record` accepts.
+ *
+ * A creation has to name its tag — that is the only name it has before the server answers. A
+ * deletion may name either the tag or the session id (or both); the id-only form is what lets an
+ * App delete a session this machine's snapshot no longer holds.
+ */
+export type LifecycleFactInput =
+    | { op: 'created'; tag: string; sessionId?: string; directory?: string; agent?: string; at?: number }
+    | { op: 'deleted'; tag: string; sessionId?: string; directory?: string; agent?: string; at?: number }
+    | { op: 'deleted'; tag?: string; sessionId: string; directory?: string; agent?: string; at?: number };
+
 const asEntry = (line: string): LifecycleEntry | null => {
     try {
-        const parsed = JSON.parse(line) as { rev?: unknown; at?: unknown; op?: unknown; tag?: unknown; endpoints?: unknown };
+        const parsed = JSON.parse(line) as { rev?: unknown; at?: unknown; op?: unknown; tag?: unknown; sessionId?: unknown; endpoints?: unknown };
         if (typeof parsed.rev !== 'number' || typeof parsed.at !== 'number') {
             return null;
         }
         if (parsed.op === 'reachable') {
             return Array.isArray(parsed.endpoints) ? (parsed as LifecycleReachableEntry) : null;
         }
-        if (parsed.op !== 'created' && parsed.op !== 'deleted') {
-            return null;
+        if (parsed.op === 'created') {
+            return typeof parsed.tag === 'string' ? (parsed as LifecycleCreatedEntry) : null;
         }
-        return typeof parsed.tag === 'string' ? (parsed as LifecycleSessionEntry) : null;
+        if (parsed.op === 'deleted') {
+            // One name is enough: a deletion learned from an id alone is still addressable.
+            return typeof parsed.tag === 'string' || typeof parsed.sessionId === 'string'
+                ? (parsed as LifecycleDeletedEntry)
+                : null;
+        }
+        return null;
     } catch {
         return null;
     }
@@ -143,7 +181,7 @@ export class LifecycleLog {
      * because the log is what other parties replay: a fact this machine acted on but did not write
      * is a fact nobody else can be told.
      */
-    record(entry: { op: 'created' | 'deleted'; tag: string; sessionId?: string; directory?: string; agent?: string; at?: number }): LifecycleSessionEntry {
+    record(entry: LifecycleFactInput): LifecycleSessionEntry {
         return this.append({ ...entry, at: entry.at ?? Date.now() });
     }
 

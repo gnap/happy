@@ -147,10 +147,37 @@ export interface SpawnSessionOptions {
     resumeAfterSeq?: number;
     /** Per-session sandbox config override. Falls back to settings.json if omitted. */
     sandboxConfig?: import('@/persistence').SandboxConfig;
+    /**
+     * The spec revision this spawn realizes. Absent means 0; a restart passes the bumped one so
+     * the process it starts, the record it writes and its status projection agree.
+     */
+    generation?: number;
+    /**
+     * Return as soon as the process is launched, without waiting for the session to register.
+     *
+     * Only meaningful for a caller that asked to be told "accepted" rather than "finished": the
+     * blocking answer is the default because most callers need the server id.
+     */
+    expectAccepted?: boolean;
+    /** Whether this spawn creates a session or replaces one; recorded in the pending spec. */
+    spawnReason?: 'create' | 'restart';
+    /** The session this spawn replaces, when `spawnReason` is `restart`. */
+    replacesSessionId?: string;
 }
 
 export type SpawnSessionResult =
-    | { type: 'success'; sessionId: string }
+    | {
+        type: 'success';
+        sessionId: string;
+        /** The lineage tag, known before the id existed and still useful beside it. */
+        tag?: string;
+        generation?: number;
+    }
+    /**
+     * The machine has taken responsibility and a process exists; the session has not registered
+     * yet, so there is no server id. Only produced when the caller asked for `expectAccepted`.
+     */
+    | { type: 'accepted'; ref: string; tag: string; generation: number; phase: 'Scheduling' | 'Starting' }
     | { type: 'requestToApproveDirectoryCreation'; directory: string }
     | { type: 'error'; errorMessage: string };
 
