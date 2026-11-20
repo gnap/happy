@@ -33,7 +33,7 @@ import { startLanServer, accountFingerprintOf, type LanServerHandle, type LanSes
 import { SidecarHub } from './sidecarHub';
 import { RESTARTING_TTL_MS, expiredRestarting } from './restartTracker';
 import { restartDecision } from './restartDecision';
-import { foldLifecycleSpecs, LifecycleLog } from './lifecycleLog';
+import { foldLifecycleSpecs, LifecycleLog, type LifecycleSpec } from './lifecycleLog';
 import { replayToServer } from './lifecycleServerReplay';
 import { ACCOUNT_PROOF_WINDOW_MS } from './accountProof';
 import nacl from 'tweetnacl';
@@ -42,6 +42,7 @@ import { versionStateOf } from './versionState';
 import { sessionTagOf } from './sessionTag';
 import { mergeSessionRoster } from './sessionRoster';
 import { sessionStatusOf, type SessionPhase, type SessionStatusFacts } from './sessionStatus';
+import { decideReconcile, nextReconcileProgress, type ReconcileProgress, type ReconcileSpec } from './lifecycleReconciler';
 import { BUILD_VERSION } from '../version';
 import type { ApiMachineClient } from '@/api/apiMachine';
 import { readSessionKey } from '@/api/sessionKeyPersistence';
@@ -649,6 +650,10 @@ export async function startDaemon(): Promise<void> {
           pid: session.pid ?? existing?.pid ?? -1,
           status: 'stopped',
           lastSeq: existing?.lastSeq ?? -1,
+          // The generation the process realized outlives the process. Dropping it here would
+          // leave the record looking like it never observed the want it did, and the reconciler
+          // would read an ordinary exit as a restart that never happened.
+          generation: session.generation ?? existing?.generation,
           // Losing this here would turn a desktop session into a daemon one the moment it exits.
           ...(session.requiresDesktop || existing?.requiresDesktop ? { requiresDesktop: true } : {}),
           exitReason: session.exitReason ?? existing?.exitReason,
@@ -870,6 +875,15 @@ export async function startDaemon(): Promise<void> {
 
       logger.debug(`[DAEMON RUN] Session webhook: ${sessionId}, PID: ${pid}, started by: ${sessionMetadata.startedBy || 'unknown'}`);
       logger.debug(`[DAEMON RUN] Current tracked sessions before webhook: ${Array.from(pidToTrackedSession.keys()).join(', ')}`);
+      // A process that reports after its session was archived is the orphan the archive was meant
+      // to remove, not a session coming back. Registering it would append a newer `created` and
+      // undo the want; the tombstone is the stronger statement, so the process is signalled
+      // instead. This is the half the reconciler cannot finish when it had no tracked PID to stop.
+      if (archivedSessionIds[sessionId]) {
+        logger.debug(`[DAEMON RUN] Session ${sessionId} reported after being archived; stopping PID ${pid}`);
+        signalSession({ pid }, 'SIGTERM');
+        return;
+      }
       if (!replaceDuplicateActiveSessions(sessionId, pid)) {
         return;
       }
@@ -1748,6 +1762,28 @@ export async function startDaemon(): Promise<void> {
     const lifecycleLog = new LifecycleLog(join(configuration.happyHomeDir, 'daemon-lifecycle.jsonl'));
 
     /**
+     * The folded specs, rebuilt when the log moves.
+     *
+     * The roster asks for a spec per row, and both the LAN listing and the relay's directory ask
+     * for the whole roster on a timer; folding the file each time would turn a read that is cheap
+     * into a disk read per row. Every writer announces, so that is where the cache is dropped.
+     */
+    let foldedSpecs: Map<string, LifecycleSpec> | undefined;
+    const specsOf = (): Map<string, LifecycleSpec> => {
+      foldedSpecs ??= foldLifecycleSpecs(lifecycleLog.read());
+      return foldedSpecs;
+    };
+    /** The newest want for a row this machine has, by tag first and id second. */
+    const specFor = (sessionId: string | undefined, tag: string | undefined): LifecycleSpec | undefined => {
+      const folded = specsOf();
+      const byTag = tag === undefined ? undefined : folded.get(tag);
+      if (byTag !== undefined) {
+        return byTag;
+      }
+      return sessionId === undefined ? undefined : folded.get(sessionId);
+    };
+
+    /**
      * Tells whoever is reading on a live socket that the log has moved.
      *
      * A hint, not the entry: the reader asks for what it missed, with its own cursor. That is what
@@ -1931,7 +1967,20 @@ export async function startDaemon(): Promise<void> {
 /** Nonces already spent, so a lifted signature cannot be used a second time. */
     const accountProofNonces = new Map<string, number>();
 
+    /**
+     * Installed by the reconciler below.
+     *
+     * The log moving is the one event that can create an outstanding want, and it is also the
+     * moment a new generation makes a blocked verdict obsolete — so the sweep is triggered here
+     * rather than by a poll that would spend most of its ticks finding nothing.
+     */
+    let requestLifecycleReconcile: (() => void) | null = null;
+
     const announceLifecycle = (): void => {
+      // The folded view is stale the moment the log grows.
+      foldedSpecs = undefined;
+      // A want that no process has realized is this daemon's to act on, not only to announce.
+      requestLifecycleReconcile?.();
       // The readers on a socket, and the server — which is one of them, just slower.
       void replayLifecycleToServer();
       // The relay is a reader too, but not one that asks: it answers for this machine, so it is
@@ -1968,6 +2017,381 @@ export async function startDaemon(): Promise<void> {
      * finished restart keeps answering repeats on its own.
      */
     const lastRestartFinishedAt = new Map<string, number>();
+
+    /**
+     * What this daemon has done about each want that the facts do not reflect yet.
+     *
+     * In memory, not on disk: it is the retry budget of an attempt, not a fact about a session.
+     * A daemon restart starts the ladder again, which is the honest reading of a fresh process.
+     */
+    const reconcileProgress = new Map<string, ReconcileProgress>();
+    let reconcileTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconcileTimerDueAt = Number.POSITIVE_INFINITY;
+    let reconcileRunning = false;
+    /** A trigger that arrived during a sweep, which must run again as soon as it ends. */
+    let reconcileRequested = false;
+
+    /** Whether a PID this daemon knows of can be signalled right now. */
+    const pidAlive = (pid: number | undefined): boolean => {
+      if (pid === undefined || pid <= 0) {
+        return false;
+      }
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    /** The live process a spec names, if one is tracked right now. */
+    const trackedSessionForSpec = (spec: LifecycleSpec): TrackedSession | undefined => {
+      const tracked = [...pidToTrackedSession.values()];
+      if (spec.sessionId !== undefined) {
+        const byId = tracked.find((session) => session.happySessionId === spec.sessionId);
+        if (byId !== undefined) {
+          return byId;
+        }
+      }
+      return spec.tag === undefined
+        ? undefined
+        : tracked.find((session) => session.sessionTag === spec.tag);
+    };
+
+    /** A spawn this machine has accepted for the spec and not seen register. */
+    const pendingSpawnForSpec = (spec: LifecycleSpec): PendingSpawnSpec | undefined => {
+      if (spec.tag !== undefined) {
+        const byTag = pendingSpawns.get(spec.tag);
+        if (byTag !== undefined) {
+          return byTag;
+        }
+      }
+      if (spec.sessionId !== undefined) {
+        for (const pending of pendingSpawns.values()) {
+          if (pending.replacesSessionId === spec.sessionId) {
+            return pending;
+          }
+        }
+      }
+      return undefined;
+    };
+
+    /**
+     * The facts behind a spec, resolved the same way the roster resolves them.
+     *
+     * The observation has to be the roster's own projection, or the daemon would act on a reading
+     * no reader is given: the same precedence of tombstone, restart, live process and record.
+     */
+    const observeSpec = (spec: LifecycleSpec, now: number): SessionStatusFacts => {
+      const tracked = trackedSessionForSpec(spec);
+      const alive = tracked !== undefined && tracked.exitTime === undefined && pidAlive(tracked.pid);
+      const stored = spec.sessionId === undefined ? undefined : sessions[spec.sessionId];
+      const pending = pendingSpawnForSpec(spec);
+      const restartingSince = spec.sessionId === undefined ? undefined : restartingStartedAt.get(spec.sessionId);
+      const archivedAt = spec.sessionId === undefined ? undefined : archivedSessionIds[spec.sessionId];
+      // A process from before this daemon that the tracked index has not adopted yet: it can be
+      // seen (the PID answers) but not stopped, so a newer want has to wait for it instead of
+      // spending attempts against it. Read as `Restarting` only while it is the reason the want is
+      // outstanding; once it rejoins, the ordinary live facts take over and the replacement runs.
+      const awaitingRejoin = stored !== undefined
+        && stored.status === 'running'
+        && stored.exitTime === undefined
+        && pidAlive(stored.pid)
+        && (stored.generation ?? 0) < spec.generation;
+      return {
+        ...(alive && tracked !== undefined
+          ? { live: { pid: tracked.pid, spawnTime: tracked.spawnTime, lastHeartbeat: tracked.lastHeartbeat } }
+          : {}),
+        registered: tracked?.happySessionId !== undefined,
+        ...(pending !== undefined ? { schedulingSince: pending.requestedAt } : {}),
+        ...(restartingSince !== undefined
+          ? { restartingSince }
+          : awaitingRejoin
+            ? { restartingSince: now }
+            : {}),
+        ...(stored !== undefined
+          ? {
+              stored: {
+                origin: stored.origin,
+                status: stored.status,
+                exitReason: stored.exitReason,
+                exitTime: stored.exitTime,
+                lastHeartbeat: stored.lastHeartbeat,
+                updatedAt: stored.updatedAt,
+                generation: stored.generation,
+              },
+            }
+          : {}),
+        ...(archivedAt !== undefined ? { archivedAt } : {}),
+        generation: spec.generation,
+        now,
+      };
+    };
+
+    type ResumeTarget = { directory: string; agent: NonNullable<SpawnSessionOptions['agent']> };
+
+    /** An agent name from a record that may predate the field, read as the default it used. */
+    const resumeAgent = (agent: string | undefined): ResumeTarget['agent'] =>
+      (agent || 'claude') as ResumeTarget['agent'];
+
+    /**
+     * Where to start the process again.
+     *
+     * The record is the normal answer; a tag-only spec whose row was lost with the state file
+     * falls back to the log entry, because the log is the thing that outlived the snapshot.
+     */
+    const resumeTargetOf = (spec: LifecycleSpec): ResumeTarget | undefined => {
+      const persisted = spec.sessionId === undefined ? undefined : sessions[spec.sessionId];
+      if (persisted?.directory) {
+        return { directory: persisted.directory, agent: resumeAgent(persisted.agent) };
+      }
+      const tracked = trackedSessionForSpec(spec);
+      if (tracked?.directory) {
+        return { directory: tracked.directory, agent: resumeAgent(tracked.agent) };
+      }
+      const stopped = spec.sessionId === undefined ? undefined : stoppedSessions.get(spec.sessionId);
+      if (stopped?.directory) {
+        return { directory: stopped.directory, agent: resumeAgent(stopped.agent) };
+      }
+      const pending = pendingSpawnForSpec(spec);
+      if (pending !== undefined) {
+        return { directory: pending.directory, agent: resumeAgent(pending.agent) };
+      }
+      const entries = lifecycleLog.read();
+      for (let i = entries.length - 1; i >= 0; i -= 1) {
+        const entry = entries[i];
+        if (entry.op === 'reachable') {
+          continue;
+        }
+        const sameTag = spec.tag !== undefined && entry.tag === spec.tag;
+        const sameId = spec.sessionId !== undefined && entry.sessionId === spec.sessionId;
+        if ((sameTag || sameId) && entry.directory) {
+          return { directory: entry.directory, agent: resumeAgent(entry.agent) };
+        }
+      }
+      return undefined;
+    };
+
+    /** The server id a spec can be applied to, when one of the names this machine knows maps to one. */
+    const sessionIdOfSpec = (spec: LifecycleSpec): string | undefined => {
+      if (spec.sessionId !== undefined) {
+        return spec.sessionId;
+      }
+      const tracked = trackedSessionForSpec(spec);
+      if (tracked?.happySessionId !== undefined) {
+        return tracked.happySessionId;
+      }
+      if (spec.tag === undefined) {
+        return undefined;
+      }
+      return Object.values(sessions).find((row) => row.sessionTag === spec.tag)?.sessionId;
+    };
+
+    /**
+     * Realize a `running` want that no process has observed.
+     *
+     * The same spawn the restart path performs, with the generation the want was stated at, so the
+     * record and the status agree once it registers. The profile is recovered the same way, or a
+     * process started to satisfy a restart would come up without the credentials its last turn
+     * carried.
+     */
+    const performResume = async (spec: LifecycleSpec, key: string, now: number): Promise<void> => {
+      const target = resumeTargetOf(spec);
+      const sessionId = sessionIdOfSpec(spec);
+      if (target === undefined) {
+        logger.debug(`[DAEMON RUN] Reconcile: no directory for ${key}; cannot resume generation ${spec.generation}`);
+        return;
+      }
+      const persisted = sessionId === undefined ? undefined : sessions[sessionId];
+      const tracked = trackedSessionForSpec(spec);
+      const stopped = sessionId === undefined ? undefined : stoppedSessions.get(sessionId);
+      // The process from before this daemon is still there but has not rejoined the tracked index,
+      // so it cannot be stopped yet. Waiting is the only safe answer: starting now would put two
+      // processes behind one tag, and the next sweep can replace it once it has reconnected.
+      if (tracked === undefined && persisted?.status === 'running' && pidAlive(persisted.pid)) {
+        logger.debug(`[DAEMON RUN] Reconcile: PID ${persisted.pid} for ${key} has not rejoined yet; not starting beside it`);
+        return;
+      }
+      // A live process at the old generation is what the newer want replaces. Stopping it is the
+      // first half of the act the restart path performs; the spawn below is the second.
+      const live = [...pidToTrackedSession.entries()].filter(([, session]) =>
+        session.exitTime === undefined
+        && pidAlive(session.pid)
+        && ((sessionId !== undefined && session.happySessionId === sessionId)
+          || (spec.tag !== undefined && session.sessionTag === spec.tag)));
+      if (sessionId !== undefined) {
+        // The auto-respawn path shares this budget: whichever of the two is about to start a
+        // process, the other should not start a second one for the same session. Written before
+        // the stop, because the exit it causes is exactly what the budget has to absorb.
+        lastSpawnAttemptBySessionId[sessionId] = now;
+      }
+      if (live.length > 0) {
+        logger.debug(`[DAEMON RUN] Reconcile: stopping ${live.length} live process(es) for ${key} before resuming generation ${spec.generation}`);
+        for (const [pid, session] of live) {
+          terminateTrackedProcess(pid, session, `reconciling ${key}`);
+        }
+        await waitForPidsToExit(live.map(([pid]) => pid), 5_000, new Map(live));
+      }
+      const recoveredProfile = sessionId === undefined
+        ? null
+        : await Promise.race([
+            fetchSessionProfileMeta(sessionId),
+            delay(PROFILE_META_DEADLINE_MS).then(() => null),
+          ]);
+      logger.debug(`[DAEMON RUN] Reconcile: resuming ${key} at generation ${spec.generation}`);
+      const result = await spawnSession({
+        directory: target.directory,
+        agent: target.agent,
+        ...(spec.tag !== undefined ? { resumeSessionTag: spec.tag } : {}),
+        environmentVariables: recoveredProfile?.environmentVariables ?? undefined,
+        ...(typeof recoveredProfile?.proxyViaRelay === 'boolean'
+          ? { proxyViaRelay: recoveredProfile.proxyViaRelay }
+          : {}),
+        ...(persisted?.sandbox ? { sandboxConfig: persisted.sandbox } : {}),
+        generation: spec.generation,
+        spawnReason: 'restart',
+        ...(sessionId !== undefined ? { replacesSessionId: sessionId } : {}),
+        expectAccepted: true,
+        ...((persisted?.requiresDesktop ?? tracked?.requiresDesktop ?? stopped?.requiresDesktop)
+          ? { requiresDesktop: true }
+          : {}),
+      });
+      if (result.type === 'error') {
+        logger.debug(`[DAEMON RUN] Reconcile: resume of ${key} failed: ${result.errorMessage}`);
+      } else if (result.type === 'requestToApproveDirectoryCreation') {
+        logger.debug(`[DAEMON RUN] Reconcile: directory ${result.directory} for ${key} is gone; not resuming`);
+      }
+    };
+
+    /**
+     * Realize an `archived` want whose effect has not landed.
+     *
+     * The same pair the App's delete uses — stop the process, then write the tombstone — because
+     * an archived row with a live process behind it is the orphan this exists to prevent. The
+     * tombstone is only written when this machine does not already hold one, which is what
+     * `commitArchive` decides; a retry of an applied archive costs nothing.
+     */
+    const performArchive = (spec: LifecycleSpec): void => {
+      const sessionId = sessionIdOfSpec(spec);
+      if (sessionId === undefined) {
+        logger.debug(`[DAEMON RUN] Reconcile: archived want for ${spec.tag ?? spec.sessionId ?? '?'} has no id to apply`);
+        return;
+      }
+      const applied = stopSession(sessionId);
+      const result = archiveSession(sessionId);
+      forgetPendingSpawnsFor(sessionId, spec.tag);
+      persistNow();
+      logger.debug(`[DAEMON RUN] Reconcile: applied archived want for ${sessionId} (process stopped: ${applied}, tombstone: ${result.applied})`);
+    };
+
+    const reconcileSpecOf = (spec: LifecycleSpec, key: string): ReconcileSpec => ({
+      key,
+      lifecycle: spec.lifecycle,
+      generation: spec.generation,
+      at: spec.at,
+      ...(spec.tag !== undefined ? { tag: spec.tag } : {}),
+      ...(spec.sessionId !== undefined ? { sessionId: spec.sessionId } : {}),
+    });
+
+    const scheduleLifecycleReconcile = (delayMs: number): void => {
+      const dueAt = Date.now() + Math.max(0, delayMs);
+      // A sooner request wins; a later one leaves the existing timer alone. Without this, an
+      // announcement arriving during a sweep would be postponed by the ladder it was meant to
+      // short-circuit.
+      if (reconcileTimer !== null && dueAt >= reconcileTimerDueAt) {
+        return;
+      }
+      if (reconcileTimer !== null) {
+        clearTimeout(reconcileTimer);
+      }
+      reconcileTimerDueAt = dueAt;
+      reconcileTimer = setTimeout(() => {
+        reconcileTimer = null;
+        reconcileTimerDueAt = Number.POSITIVE_INFINITY;
+        // A sweep of its own must not end in an unhandled rejection: the next sweep is what
+        // retries, and a failure here is one attempt, not a dead reconciler.
+        void runLifecycleReconcile().catch((error: unknown) => {
+          logger.debug('[DAEMON RUN] Reconcile sweep failed:', error);
+        });
+      }, Math.max(0, delayMs));
+      reconcileTimer.unref?.();
+    };
+
+    /**
+     * Act once on every want, then schedule the earliest retry.
+     *
+     * The whole table is read every time, rather than the spec that triggered the sweep: a spec
+     * can become actionable because something else changed (a spawn timed out, a restart ended),
+     * and the comparison is cheap beside a single spawn.
+     */
+    const runLifecycleReconcile = async (): Promise<void> => {
+      if (reconcileRunning) {
+        // The log can move while a spawn is being prepared. The running sweep read its specs
+        // before that entry existed, so it is not allowed to be the last word on it.
+        reconcileRequested = true;
+        return;
+      }
+      reconcileRunning = true;
+      const now = Date.now();
+      try {
+        const seen = new Set<string>();
+        for (const spec of specsOf().values()) {
+          const key = spec.tag ?? spec.sessionId;
+          if (key === undefined) {
+            continue;
+          }
+          seen.add(key);
+          const observation = sessionStatusOf(observeSpec(spec, now));
+          const progress = reconcileProgress.get(key);
+          const reconcileSpec = reconcileSpecOf(spec, key);
+          const decision = decideReconcile({
+            spec: reconcileSpec,
+            observation: { phase: observation.phase, observedGeneration: observation.observedGeneration },
+            ...(progress !== undefined ? { progress } : {}),
+            now,
+          });
+          const next = nextReconcileProgress(decision, reconcileSpec, progress, now);
+          if (next === undefined) {
+            reconcileProgress.delete(key);
+          } else {
+            reconcileProgress.set(key, next);
+          }
+          try {
+            if (decision.kind === 'resume') {
+              await performResume(spec, key, now);
+            } else if (decision.kind === 'archive') {
+              performArchive(spec);
+            }
+          } catch (error) {
+            // One session's failure must not stop the others from being reconciled. The attempt
+            // was already counted, so the ladder still applies and the reason is on the record.
+            logger.debug(`[DAEMON RUN] Reconcile: action for ${key} failed:`, error);
+          }
+        }
+        for (const key of [...reconcileProgress.keys()]) {
+          if (!seen.has(key)) {
+            reconcileProgress.delete(key);
+          }
+        }
+        // The earliest outstanding retry. A blocked want has no next attempt, on purpose: only a
+        // newer generation (which announces) or a daemon restart reopens it.
+        let earliest = Number.POSITIVE_INFINITY;
+        for (const progress of reconcileProgress.values()) {
+          earliest = Math.min(earliest, progress.nextAttemptAt);
+        }
+        if (Number.isFinite(earliest)) {
+          scheduleLifecycleReconcile(Math.max(0, earliest - Date.now()));
+        }
+      } finally {
+        reconcileRunning = false;
+        if (reconcileRequested) {
+          reconcileRequested = false;
+          scheduleLifecycleReconcile(0);
+        }
+      }
+    };
+
+    requestLifecycleReconcile = () => scheduleLifecycleReconcile(0);
 
     /**
      * The LAN/relay fan-out. Declared here, above the restart path that pushes through it: a
@@ -2713,11 +3137,26 @@ export async function startDaemon(): Promise<void> {
           // and a control result cannot drift apart.
           const statusFor = (
             sessionId: string | undefined,
-            facts: Omit<SessionStatusFacts, 'stored' | 'now'>,
+            tag: string | undefined,
+            facts: Omit<SessionStatusFacts, 'stored' | 'now' | 'desired' | 'reconciliation'>,
           ) => {
             const stored = sessionId ? sessions[sessionId] : undefined;
+            // The log is what the machine wants; the facts are what it can see. Every row carries
+            // both, so a reader can tell a settled row from one this daemon is still working on.
+            const spec = specFor(sessionId, tag);
+            const progress = spec === undefined
+              ? undefined
+              : reconcileProgress.get(spec.tag ?? spec.sessionId ?? '');
+            const blocked = spec !== undefined
+              && progress?.blocked !== undefined
+              && progress.generation === spec.generation
+              ? progress
+              : undefined;
             return sessionStatusOf({
               ...facts,
+              // The newest want is the revision the phase is being reconciled against. A tracked
+              // process still carrying the previous one is exactly the gap this exposes.
+              ...(spec ? { generation: spec.generation } : {}),
               ...(stored ? {
                 stored: {
                   origin: stored.origin,
@@ -2727,6 +3166,17 @@ export async function startDaemon(): Promise<void> {
                   lastHeartbeat: stored.lastHeartbeat,
                   updatedAt: stored.updatedAt,
                   generation: stored.generation,
+                },
+              } : {}),
+              ...(spec ? {
+                desired: { lifecycle: spec.lifecycle, generation: spec.generation, at: spec.at },
+              } : {}),
+              ...(blocked?.blocked ? {
+                reconciliation: {
+                  reason: blocked.blocked.reason,
+                  since: blocked.blocked.at,
+                  attempts: blocked.attempts,
+                  blocked: true,
                 },
               } : {}),
               now,
@@ -2752,7 +3202,7 @@ export async function startDaemon(): Promise<void> {
                 ? false
                 : (() => { try { process.kill(session.pid, 0); return true; } catch { return false; } })();
               const restartingSince = restartingSinceOf(session.happySessionId);
-              const status = statusFor(session.happySessionId, {
+              const status = statusFor(session.happySessionId, session.sessionTag, {
                 // A tracked session that has exited is still in the index for a moment; the record
                 // and the exit, not the index, are what describe it then.
                 ...(isAlive ? { live: { pid: session.pid, spawnTime: session.spawnTime, lastHeartbeat: session.lastHeartbeat } } : {}),
@@ -2812,7 +3262,7 @@ export async function startDaemon(): Promise<void> {
             return {
               ...summary,
               ...(restartingSince !== undefined ? { restartingSince } : {}),
-              ...statusFor(summary.happySessionId, {
+              ...statusFor(summary.happySessionId, summary.tag, {
                 registered: false,
                 ...(restartingSince !== undefined ? { restartingSince } : {}),
               }),
@@ -2833,7 +3283,7 @@ export async function startDaemon(): Promise<void> {
                 startedBy: 'daemon',
                 isAlive: false,
                 restartingSince: at,
-                ...statusFor(id, { restartingSince: at }),
+                ...statusFor(id, sessions[id]?.sessionTag, { restartingSince: at }),
               });
             }
           }
@@ -2854,7 +3304,7 @@ export async function startDaemon(): Promise<void> {
               startedBy: 'daemon',
               isAlive: false,
               ...(spec.requiresDesktop ? { desktop: { required: true, available: sidecarHub?.usable ?? false } } : {}),
-              ...statusFor(spec.replacesSessionId, {
+              ...statusFor(spec.replacesSessionId, spec.tag, {
                 schedulingSince: spec.requestedAt,
                 generation: spec.generation,
               }),
@@ -3479,7 +3929,15 @@ export async function startDaemon(): Promise<void> {
         });
         logger.debug(`[DAEMON RUN] Backfilled lifecycle tombstone for ${sessionId}`);
       }
+      // Those appends bypassed `announceLifecycle`; a roster read may already have cached the
+      // fold from before them.
+      foldedSpecs = undefined;
     }
+
+    // A want the previous process accepted and did not realize is this process's to finish: a
+    // restart that died between the append and the spawn, most of all. The PID check below has
+    // not run yet, so the observation is the record's — which is the honest reading at this point.
+    scheduleLifecycleReconcile(0);
 
     // Verify PIDs from persisted sessions are actually dead. If a PID survived the
     // daemon restart (detached child), mark it running — the session will reconnect
@@ -3528,6 +3986,7 @@ export async function startDaemon(): Promise<void> {
           lastHeartbeat: entry.lastHeartbeat,
           sandbox: entry.sandbox,
           scopeUnit: entry.scopeUnit,
+          ...(entry.generation !== undefined ? { generation: entry.generation } : {}),
           ...(entry.requiresDesktop ? { requiresDesktop: true } : {}),
         });
       }
@@ -3552,6 +4011,7 @@ export async function startDaemon(): Promise<void> {
           sessionTag: entry.sessionTag,
           agent: entry.agent as any,
           scopeUnit: entry.scopeUnit,
+          ...(entry.generation !== undefined ? { generation: entry.generation } : {}),
         });
         stoppedFallbackCount++;
       }
@@ -3879,6 +4339,9 @@ export async function startDaemon(): Promise<void> {
       // A deletion the server refused is retried from the same cursor: the machine's log does not
       // change when the network does, so this is the only thing that ever pushes it forward again.
       void replayLifecycleToServer();
+      // The sweep's own timers cover every retry it scheduled; this is the once-a-minute check
+      // that catches a want whose timer never fired (a clock jump, a stopped event loop).
+      requestLifecycleReconcile?.();
 
       // A restart whose grace has run out and which never said it finished is called off here —
       // a daemon that died mid-restart, say, or one whose new process never came back. Readers age

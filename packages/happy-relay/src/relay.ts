@@ -144,6 +144,25 @@ type DirectorySession = {
     observedGeneration?: number;
     observedAt?: number;
     reason?: string;
+    /**
+     * What the owning machine wants the row to be, when it has stated a want.
+     *
+     * Relayed like the phase: the relay does not decide what a lifecycle means, and a value this
+     * build has not heard of is passed through for the App to draw or ignore.
+     */
+    desiredLifecycle?: string;
+    /**
+     * A want the machine's facts do not reflect yet. `blocked: true` is the machine saying it has
+     * stopped trying; a directory reader should draw the row as stuck rather than as working.
+     */
+    divergence?: {
+        desired: string;
+        generation: number;
+        reason: string;
+        since: number;
+        attempts?: number;
+        blocked?: boolean;
+    };
 };
 
 /**
@@ -151,9 +170,36 @@ type DirectorySession = {
  *
  * A row without either name cannot be asked for by a client, so there is nothing it would add.
  */
+/**
+ * One divergence as relayed: the fields with the types they must have, and nothing else.
+ *
+ * A row is republished to every App, so a malformed object is dropped rather than passed through
+ * as untyped JSON. The optional fields are only copied when they are the type they claim; a
+ * `blocked` that is the string `"false"` is not a verdict anyone should render.
+ */
+function divergence(entry: unknown): DirectorySession['divergence'] {
+    if (!entry || typeof entry !== 'object') return undefined;
+    const value = entry as {
+        desired?: unknown; generation?: unknown; reason?: unknown; since?: unknown;
+        attempts?: unknown; blocked?: unknown;
+    };
+    if (typeof value.desired !== 'string' || typeof value.reason !== 'string') return undefined;
+    if (typeof value.generation !== 'number' || !Number.isFinite(value.generation)) return undefined;
+    if (typeof value.since !== 'number' || !Number.isFinite(value.since)) return undefined;
+    const row: NonNullable<DirectorySession['divergence']> = {
+        desired: value.desired,
+        generation: value.generation,
+        reason: value.reason,
+        since: value.since,
+    };
+    if (typeof value.attempts === 'number' && Number.isFinite(value.attempts)) row.attempts = value.attempts;
+    if (typeof value.blocked === 'boolean') row.blocked = value.blocked;
+    return row;
+}
+
 function directorySession(entry: unknown): DirectorySession | null {
     if (!entry || typeof entry !== 'object') return null;
-    const session = entry as { happySessionId?: unknown; tag?: unknown; isAlive?: unknown; origin?: unknown; restartingSince?: unknown; phase?: unknown; generation?: unknown; observedGeneration?: unknown; observedAt?: unknown; reason?: unknown };
+    const session = entry as { happySessionId?: unknown; tag?: unknown; isAlive?: unknown; origin?: unknown; restartingSince?: unknown; phase?: unknown; generation?: unknown; observedGeneration?: unknown; observedAt?: unknown; reason?: unknown; desiredLifecycle?: unknown; divergence?: unknown };
     const row: DirectorySession = { isAlive: session.isAlive === true };
     if (typeof session.happySessionId === 'string') row.happySessionId = session.happySessionId;
     if (typeof session.tag === 'string') row.tag = session.tag;
@@ -166,6 +212,9 @@ function directorySession(entry: unknown): DirectorySession | null {
         if (typeof value === 'number' && Number.isFinite(value)) row[key] = value;
     }
     if (typeof session.reason === 'string') row.reason = session.reason;
+    if (typeof session.desiredLifecycle === 'string') row.desiredLifecycle = session.desiredLifecycle;
+    const narrowed = divergence(session.divergence);
+    if (narrowed !== undefined) row.divergence = narrowed;
     return row;
 }
 

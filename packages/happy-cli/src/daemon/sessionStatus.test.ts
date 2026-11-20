@@ -147,4 +147,84 @@ describe('sessionStatusOf', () => {
         expect(status.generation).toBe(0);
         expect(status.observedGeneration).toBe(0);
     });
+
+    it('reports a stopped process below the wanted generation as divergence', () => {
+        // A restart was accepted (generation 2) but the record still describes the process that
+        // realized generation 1. The row is Stopped and the want is outstanding.
+        const status = sessionStatusOf({
+            stored: { origin: 'daemon', status: 'stopped', exitTime: 3_000, generation: 1 },
+            desired: { lifecycle: 'running', generation: 2, at: 2_000 },
+            now: 5_000,
+        });
+
+        expect(status.phase).toBe('Stopped');
+        expect(status.observedGeneration).toBe(1);
+        expect(status.desiredLifecycle).toBe('running');
+        expect(status.divergence).toEqual({
+            desired: 'running',
+            generation: 2,
+            reason: 'want-not-observed',
+            since: 2_000,
+        });
+    });
+
+    it('does not call a realized-and-stopped session divergent', () => {
+        // There is no "stopped" spec. The process did realize generation 2 before exiting; a
+        // later wake is the App's message path, not a missing want.
+        const status = sessionStatusOf({
+            stored: { origin: 'daemon', status: 'stopped', exitTime: 3_000, generation: 2 },
+            desired: { lifecycle: 'running', generation: 2, at: 2_000 },
+            now: 5_000,
+        });
+
+        expect(status.desiredLifecycle).toBe('running');
+        expect(status.divergence).toBeUndefined();
+    });
+
+    it('reports an archive whose process is still present as divergence', () => {
+        const status = sessionStatusOf({
+            live: { pid: 10, spawnTime: 1_000 },
+            registered: true,
+            stored: { origin: 'daemon', status: 'running', generation: 1 },
+            desired: { lifecycle: 'archived', generation: 2, at: 2_000 },
+            now: 5_000,
+        });
+
+        expect(status.phase).toBe('Running');
+        expect(status.divergence).toMatchObject({
+            desired: 'archived',
+            generation: 2,
+            reason: 'spec-archived',
+        });
+    });
+
+    it('does not report divergence after the archived want is applied', () => {
+        const status = sessionStatusOf({
+            archivedAt: 4_000,
+            desired: { lifecycle: 'archived', generation: 2, at: 2_000 },
+            now: 5_000,
+        });
+
+        expect(status.phase).toBe('Archived');
+        expect(status.desiredLifecycle).toBe('archived');
+        expect(status.divergence).toBeUndefined();
+    });
+
+    it('lets the reconciler say why it is retrying or blocked', () => {
+        const status = sessionStatusOf({
+            stored: { origin: 'daemon', status: 'stopped', exitTime: 3_000, generation: 1 },
+            desired: { lifecycle: 'running', generation: 2, at: 2_000 },
+            reconciliation: { reason: 'spawn-failed', since: 2_500, attempts: 5, blocked: true },
+            now: 5_000,
+        });
+
+        expect(status.divergence).toEqual({
+            desired: 'running',
+            generation: 2,
+            reason: 'spawn-failed',
+            since: 2_500,
+            attempts: 5,
+            blocked: true,
+        });
+    });
 });

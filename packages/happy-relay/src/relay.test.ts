@@ -384,6 +384,18 @@ describe('relay', () => {
             observedGeneration: 4,
             observedAt: 1_234,
             reason: 'registered',
+            // The want beside the observation: whether the machine is still working on the row,
+            // and why it stopped if it did. Same reason as the phase — a directory reader draws
+            // a stuck row from it without opening a channel.
+            desiredLifecycle: 'running',
+            divergence: {
+                desired: 'running',
+                generation: 5,
+                reason: 'want-not-observed',
+                since: 1_500,
+                attempts: 5,
+                blocked: true,
+            },
         }];
         d.ws.send(JSON.stringify({ t: 'sessions', sessions }));
 
@@ -410,6 +422,15 @@ describe('relay', () => {
                 observedGeneration: 4,
                 observedAt: 1_234,
                 reason: 'registered',
+                desiredLifecycle: 'running',
+                divergence: {
+                    desired: 'running',
+                    generation: 5,
+                    reason: 'want-not-observed',
+                    since: 1_500,
+                    attempts: 5,
+                    blocked: true,
+                },
             }],
             reachable: null,
         });
