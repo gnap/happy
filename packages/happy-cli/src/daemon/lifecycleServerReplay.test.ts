@@ -104,6 +104,34 @@ describe('replayToServer', () => {
         expect(advance).toHaveBeenLastCalledWith(3);
     });
 
+    it('carries the effect of a deletion that also states the wanted lifecycle', async () => {
+        // The spec is fields beside the effect, not a separate entry: the server still has one
+        // deletion to perform, and the fact that the machine wants the session archived is not a
+        // reason to perform it more than once.
+        const remove = vi.fn(async (_sessionId: string) => true);
+        const at = await replayToServer(
+            [{ rev: 1, at: 0, op: 'deleted', tag: 'tag-1', sessionId: 's1', lifecycle: 'archived', generation: 4 }],
+            0,
+            { remove, advance: () => undefined, ...noReachable },
+        );
+        expect(remove).toHaveBeenCalledTimes(1);
+        expect(remove).toHaveBeenCalledWith('s1');
+        expect(at).toBe(1);
+    });
+
+    it('passes over a restated running want, which the server learns from the session itself', async () => {
+        // A restart repeats `created` with a newer generation. The server has no spec to update:
+        // it is a channel, and the creation it already has is the registration that names the row.
+        const remove = vi.fn(async (_sessionId: string) => true);
+        const at = await replayToServer(
+            [{ rev: 1, at: 0, op: 'created', tag: 'tag-1', sessionId: 's1', lifecycle: 'running', generation: 2 }],
+            0,
+            { remove, advance: () => undefined, ...noReachable },
+        );
+        expect(remove).not.toHaveBeenCalled();
+        expect(at).toBe(1);
+    });
+
     it('leaves the cursor before an address that did not land, so the newer one is not applied early', async () => {
         // Applying the later entry while the earlier one is still owed would be the same address
         // written in the wrong order — and the older one would then overwrite the newer.

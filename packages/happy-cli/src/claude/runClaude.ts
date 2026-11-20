@@ -48,6 +48,7 @@ import {
     reassertNetworkProxy,
     resetNetworkProxyPolicy,
     stripNetworkProxyKeys,
+    profileEnvChanged,
 } from '@/utils/networkProxy';
 
 /** JavaScript runtime to use for spawning Claude Code */
@@ -711,21 +712,9 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                     messageEnv,
                     process.env,
                 );
-                const envKeysNow = Object.keys(currentClaudeEnvVars)
-                    .filter((k) => (currentClaudeEnvVars as Record<string, string>)[k] !== undefined)
-                    .sort();
-                const envKeysNext = Object.keys(candidateClaudeEnv)
-                    .filter((k) => (candidateClaudeEnv as Record<string, string>)[k] !== undefined)
-                    .sort();
-                if (
-                    envKeysNow.length !== envKeysNext.length ||
-                    !envKeysNow.every(
-                        (k, i) =>
-                            k === envKeysNext[i] &&
-                            (currentClaudeEnvVars as Record<string, string>)[k] ===
-                                (candidateClaudeEnv as Record<string, string>)[k],
-                    )
-                ) {
+                // Proxy keys are compared out: they are replaced before the agent ever sees them,
+                // so a profile that still names a hop would otherwise look changed every message.
+                if (profileEnvChanged(currentClaudeEnvVars, candidateClaudeEnv)) {
                     envChanged = true;
                 }
             }

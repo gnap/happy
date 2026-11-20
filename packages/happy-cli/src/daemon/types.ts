@@ -22,6 +22,14 @@ export type ArchiveSessionResult = {
     known: boolean;
     /** The CLI's tag, when this machine knew it. */
     tag?: string;
+    /**
+     * The generation of the archived spec this attempt wrote, when it wrote one.
+     *
+     * Absent when the deletion was already recorded — a retried request is still applied, and the
+     * same want is not numbered twice. Read-only for callers: the number is this machine's, and
+     * the App uses it to line up what it observed with what was asked for.
+     */
+    generation?: number;
 };
 
 /**

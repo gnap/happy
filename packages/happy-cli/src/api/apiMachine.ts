@@ -268,6 +268,7 @@ export class ApiMachineClient {
                 ...(archived.applied ? { phase: 'Archived' } : {}),
                 stopped,
                 known: archived.known,
+                ...(archived.generation !== undefined ? { generation: archived.generation } : {}),
                 reason: archived.applied
                     ? (stopped ? 'stopped-and-archived' : 'archived')
                     : 'archive-failed',
