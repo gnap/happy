@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { LifecycleLog } from './lifecycleLog';
+import { LifecycleLog, foldLifecycleSpecs } from './lifecycleLog';
 
 const logAt = () => new LifecycleLog(join(mkdtempSync(join(tmpdir(), 'happy-lifecycle-')), 'lifecycle.jsonl'));
 
@@ -120,6 +120,53 @@ describe('LifecycleLog', () => {
         const dir = mkdtempSync(join(tmpdir(), 'happy-lifecycle-'));
         const file = join(dir, 'lifecycle.jsonl');
         writeFileSync(file, '{"rev":1,"at":1,"op":"reachable"}\n{"rev":2,"at":2,"op":"created"}\n', 'utf8');
+        expect(new LifecycleLog(file).read()).toEqual([]);
+    });
+
+    it('states the desired lifecycle and generation on the fact itself', () => {
+        // The spec is not a second file or a second op: it is fields of the entry that already
+        // carries the effect, so the append is the whole transaction. An older reader ignores the
+        // fields; a reader that knows them can tell which want the machine is working on.
+        const log = logAt();
+        log.record({ op: 'created', tag: 'a', sessionId: 's1', lifecycle: 'running', generation: 0 });
+        log.record({ op: 'deleted', tag: 'a', sessionId: 's1', lifecycle: 'archived', generation: 3 });
+
+        expect(log.read()).toMatchObject([
+            { op: 'created', tag: 'a', lifecycle: 'running', generation: 0 },
+            { op: 'deleted', tag: 'a', lifecycle: 'archived', generation: 3 },
+        ]);
+    });
+
+    it('folds the newest want per session, with old entries read as what they meant', () => {
+        // A log written before the spec existed still answers the question: a creation wanted the
+        // session running, a deletion wanted it archived. A later want supersedes an earlier one.
+        const log = logAt();
+        log.record({ op: 'created', tag: 'a' });
+        log.record({ op: 'created', tag: 'a', sessionId: 's1', lifecycle: 'running', generation: 2 });
+        log.record({ op: 'created', tag: 'b', sessionId: 's2' });
+
+        const specs = foldLifecycleSpecs(log.read());
+        expect(specs.get('a')).toMatchObject({ lifecycle: 'running', generation: 2, sessionId: 's1' });
+        expect(specs.get('b')).toMatchObject({ lifecycle: 'running', generation: 0, sessionId: 's2' });
+    });
+
+    it('folds a deletion into an archived spec, keyed by id when that is the only name', () => {
+        // A session this machine no longer holds is still a spec target: the id is what the log
+        // has, and saying it should be archived is the whole point of the entry.
+        const log = logAt();
+        log.record({ op: 'deleted', sessionId: 'cmt123', lifecycle: 'archived', generation: 1 });
+
+        expect(foldLifecycleSpecs(log.read()).get('cmt123')).toMatchObject({
+            lifecycle: 'archived',
+            generation: 1,
+            sessionId: 'cmt123',
+        });
+    });
+
+    it('reads a lifecycle that contradicts its op as a torn line, not as a fact', () => {
+        const dir = mkdtempSync(join(tmpdir(), 'happy-lifecycle-'));
+        const file = join(dir, 'lifecycle.jsonl');
+        writeFileSync(file, '{"rev":1,"at":1,"op":"created","tag":"a","lifecycle":"archived"}\n', 'utf8');
         expect(new LifecycleLog(file).read()).toEqual([]);
     });
 

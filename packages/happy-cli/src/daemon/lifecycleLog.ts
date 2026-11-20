@@ -22,6 +22,18 @@
  * server connection was up — the one situation where a client has no other way to learn it. As an
  * entry it costs one local append, and every channel carries it: the LAN reader asks for it, the
  * server and the relay each get it replayed to them at their own pace.
+ *
+ * The log also carries the **desired** state, not only what happened: `lifecycle` says whether this
+ * machine wants the session running or archived, and `generation` numbers successive wants. This is
+ * the machine's own spec — the server is one of its channels, never the place that decides it.
+ *
+ * The spec rides on the existing `created` / `deleted` ops as additive fields rather than an `op:
+ * 'spec'` of its own. That is a compatibility requirement, not a shortcut: an older daemon reading
+ * this file stops at an op it does not know (a torn line is the only thing it can assume a bad line
+ * is), which would hide every entry after the first spec. Old readers already accept `created` and
+ * `deleted` and ignore fields they do not use, so a spec stated this way is replayed by every
+ * version. A deletion is therefore one line that is both the desired state and its effect — the
+ * append is still the transaction, and there is no window in which one is true and the other is not.
  */
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
@@ -30,7 +42,10 @@ import type { LanEndpoint } from './lanEndpoints';
 
 export type LifecycleOp = 'created' | 'deleted' | 'reachable';
 
-/** A session this machine started. */
+/** What this machine wants a session to be. Absent on entries written before the spec existed. */
+export type LifecycleDesiredState = 'running' | 'archived';
+
+/** A session this machine started, or wants running. */
 export type LifecycleCreatedEntry = {
     /** Position in the log, 1-based and monotonic. A reader's cursor is the last entry it applied. */
     rev: number;
@@ -42,6 +57,22 @@ export type LifecycleCreatedEntry = {
     sessionId?: string;
     directory?: string;
     agent?: string;
+    /**
+     * The desired lifecycle this entry states.
+     *
+     * Optional because entries written before the spec existed say nothing about it; a `created`
+     * entry is a statement that the session should run either way, so a reader that finds it absent
+     * reads `running`. A later statement for the same session — a restart, for instance — repeats
+     * this op with a new generation rather than inventing a second way to say it.
+     */
+    lifecycle?: 'running';
+    /**
+     * Which successive want this is, starting at 0 for the creation.
+     *
+     * A reader compares it with the generation the machine has observed: `observed < desired` means
+     * the want has not been realized yet. Absent on entries written before the spec existed.
+     */
+    generation?: number;
 };
 
 /**
@@ -51,6 +82,10 @@ export type LifecycleCreatedEntry = {
  * session id is what the server addresses. A deletion for an id this machine never held is still a
  * fact — it is how the App's delete reaches the server when the local catalog has lost the row —
  * so the entry may carry the id alone.
+ *
+ * The same line is also the desired state that produced it: `lifecycle: 'archived'` with the
+ * generation of that want. The append is the transaction, so there is no moment at which the
+ * deletion has happened but the spec still says the session should run.
  */
 export type LifecycleDeletedEntry = {
     rev: number;
@@ -60,6 +95,8 @@ export type LifecycleDeletedEntry = {
     sessionId?: string;
     directory?: string;
     agent?: string;
+    lifecycle?: 'archived';
+    generation?: number;
 };
 
 export type LifecycleSessionEntry = LifecycleCreatedEntry | LifecycleDeletedEntry;
@@ -89,23 +126,37 @@ export type LifecycleEntry = LifecycleSessionEntry | LifecycleReachableEntry;
  * App delete a session this machine's snapshot no longer holds.
  */
 export type LifecycleFactInput =
-    | { op: 'created'; tag: string; sessionId?: string; directory?: string; agent?: string; at?: number }
-    | { op: 'deleted'; tag: string; sessionId?: string; directory?: string; agent?: string; at?: number }
-    | { op: 'deleted'; tag?: string; sessionId: string; directory?: string; agent?: string; at?: number };
+    | { op: 'created'; tag: string; sessionId?: string; directory?: string; agent?: string; lifecycle?: 'running'; generation?: number; at?: number }
+    | { op: 'deleted'; tag: string; sessionId?: string; directory?: string; agent?: string; lifecycle?: 'archived'; generation?: number; at?: number }
+    | { op: 'deleted'; tag?: string; sessionId: string; directory?: string; agent?: string; lifecycle?: 'archived'; generation?: number; at?: number };
 
 const asEntry = (line: string): LifecycleEntry | null => {
     try {
-        const parsed = JSON.parse(line) as { rev?: unknown; at?: unknown; op?: unknown; tag?: unknown; sessionId?: unknown; endpoints?: unknown };
+        const parsed = JSON.parse(line) as {
+            rev?: unknown; at?: unknown; op?: unknown; tag?: unknown; sessionId?: unknown;
+            endpoints?: unknown; lifecycle?: unknown; generation?: unknown;
+        };
         if (typeof parsed.rev !== 'number' || typeof parsed.at !== 'number') {
             return null;
         }
         if (parsed.op === 'reachable') {
             return Array.isArray(parsed.endpoints) ? (parsed as LifecycleReachableEntry) : null;
         }
+        if (parsed.generation !== undefined && typeof parsed.generation !== 'number') {
+            return null;
+        }
         if (parsed.op === 'created') {
+            // A lifecycle that contradicts the op is not a line this version wrote: `created` is
+            // this machine saying it wants the session, so it can only ever say `running`.
+            if (parsed.lifecycle !== undefined && parsed.lifecycle !== 'running') {
+                return null;
+            }
             return typeof parsed.tag === 'string' ? (parsed as LifecycleCreatedEntry) : null;
         }
         if (parsed.op === 'deleted') {
+            if (parsed.lifecycle !== undefined && parsed.lifecycle !== 'archived') {
+                return null;
+            }
             // One name is enough: a deletion learned from an id alone is still addressable.
             return typeof parsed.tag === 'string' || typeof parsed.sessionId === 'string'
                 ? (parsed as LifecycleDeletedEntry)
@@ -116,6 +167,48 @@ const asEntry = (line: string): LifecycleEntry | null => {
         return null;
     }
 };
+
+/** The desired state a session is in after replaying the log, and the generation that states it. */
+export type LifecycleSpec = {
+    lifecycle: LifecycleDesiredState;
+    generation: number;
+    at: number;
+    tag?: string;
+    sessionId?: string;
+};
+
+/**
+ * The newest desired state of every session the log names.
+ *
+ * Keyed by the tag when the entry carries one, because that is the name this machine has from the
+ * moment it schedules a session and the one a later statement repeats. An entry known only by the
+ * server id — a deletion for a row this machine no longer holds — is keyed by that id instead; it
+ * is a spec for a session whose local lineage this machine can no longer name.
+ *
+ * Entries written before the spec existed carry neither field; they are read as what they meant:
+ * a `created` entry wants the session running, a `deleted` entry wants it archived, generation 0.
+ * That is what lets a log from an older machine fold into the same picture.
+ */
+export function foldLifecycleSpecs(entries: readonly LifecycleEntry[]): Map<string, LifecycleSpec> {
+    const specs = new Map<string, LifecycleSpec>();
+    for (const entry of entries) {
+        if (entry.op !== 'created' && entry.op !== 'deleted') {
+            continue;
+        }
+        const key = entry.tag ?? entry.sessionId;
+        if (key === undefined) {
+            continue;
+        }
+        specs.set(key, {
+            lifecycle: entry.lifecycle ?? (entry.op === 'created' ? 'running' : 'archived'),
+            generation: entry.generation ?? 0,
+            at: entry.at,
+            ...(entry.tag !== undefined ? { tag: entry.tag } : {}),
+            ...(entry.sessionId !== undefined ? { sessionId: entry.sessionId } : {}),
+        });
+    }
+    return specs;
+}
 
 export class LifecycleLog {
     constructor(private readonly file: string) {}

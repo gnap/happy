@@ -932,6 +932,9 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       ref: sessionId,
       phase: 'Archived',
       ...(result.tag ? { tag: result.tag } : {}),
+      // The generation of the archived want this attempt wrote. Absent on a retry that found the
+      // deletion already recorded, because that attempt stated no new want.
+      ...(result.generation !== undefined ? { generation: result.generation } : {}),
     });
   });
 
