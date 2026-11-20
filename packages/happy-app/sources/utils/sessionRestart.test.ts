@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { RESTART_GRACE_MS, restartWithinGrace, sessionIsRestarting } from './sessionRestart';
+import { RESTART_GRACE_MS, ownerReportsPresent, restartWithinGrace, sessionIsRestarting } from './sessionRestart';
 
 const T0 = 1_000_000;
 
@@ -43,5 +43,30 @@ describe('restartWithinGrace', () => {
         // them would show a session as restarting in one and not in the other.
         const now = T0 + RESTART_GRACE_MS - 1;
         expect(restartWithinGrace(T0, now)).toBe(sessionIsRestarting({ restartingAt: T0 }, now));
+    });
+});
+
+describe('ownerReportsPresent', () => {
+    it('takes a live process as present', () => {
+        expect(ownerReportsPresent({ isAlive: true }, T0)).toBe(true);
+    });
+
+    it('does not read a restart as the session being gone', () => {
+        // The daemon lists a session it is replacing with no process and the timestamp of the
+        // swap. That negative is about the process; the session is still the machine's.
+        expect(ownerReportsPresent({ isAlive: false, restartingSince: T0 }, T0 + 1_000)).toBe(true);
+        expect(ownerReportsPresent({ isAlive: false, restartingSince: T0 }, T0 + RESTART_GRACE_MS - 1)).toBe(true);
+    });
+
+    it('believes the negative again once the restart should have finished', () => {
+        // A restart that never brought the session back must stop claiming it is coming, or a
+        // stopped session would read as one still on its way.
+        expect(ownerReportsPresent({ isAlive: false, restartingSince: T0 }, T0 + RESTART_GRACE_MS)).toBe(false);
+    });
+
+    it('leaves a row with no restart marker to its own answer', () => {
+        // Older daemons and a session that was simply stopped carry nothing to soften the fact.
+        expect(ownerReportsPresent({ isAlive: false }, T0)).toBe(false);
+        expect(ownerReportsPresent({ isAlive: false, restartingSince: null }, T0)).toBe(false);
     });
 });

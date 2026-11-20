@@ -50,3 +50,26 @@ export function sessionIsRestarting(
 ): boolean {
     return restartWithinGrace(session.restartingAt, now);
 }
+
+/**
+ * Whether the machine that lists a session still has it, even with no process behind it.
+ *
+ * The daemon lists a session it is restarting with `isAlive: false` and `restartingSince` set: the
+ * old process is gone and the new one has not registered yet. That negative is a fact about the
+ * *process*, not about the session — the machine is in the middle of replacing it and the row is
+ * coming back. Read on its own it is the owner's last word, and an owner's "not reaching" is what
+ * settles a session as offline everywhere above the channels (the status line, the host counts,
+ * the section a row is sorted into). That is how a restart came to read as a session that had
+ * stopped: greyed out, demoted under the date headers, and lifted back a moment later.
+ *
+ * The grace is the same one the status line applies to the same timestamp, so "restarting" in the
+ * words and "not offline" in the plumbing cannot disagree about whether a restart is in flight.
+ * Outside it the owner's negative stands, which is what keeps a restart that never brought the
+ * session back from reading as one still in progress.
+ */
+export function ownerReportsPresent(
+    row: { isAlive: boolean; restartingSince?: number | null },
+    now: number = Date.now()
+): boolean {
+    return row.isAlive || restartWithinGrace(row.restartingSince, now);
+}

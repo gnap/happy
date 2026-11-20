@@ -7,6 +7,7 @@ import { channelsFor, operationSupported } from './resolve';
 import type { ChannelDriver } from './types';
 import type { DaemonConnectionState } from '@/sync/lan/daemonConnections';
 import { candidateKey } from './health';
+import { RESTART_GRACE_MS } from '@/utils/sessionRestart';
 
 /** A store slice with nothing in it, so each test states only what it is about. */
 const state = (over: Partial<ChannelState> = {}): ChannelState => ({
@@ -260,6 +261,39 @@ describe('what the drivers say about a machine', () => {
         expect(machineOf({ socketStatus: 'auth_error' }, 'server')?.reachable).toBe(true);
         expect(machineOf({ socketStatus: 'disconnected' }, 'server')?.reachable).toBe(false);
         expect(machineOf({ socketStatus: 'error' }, 'server')?.reachable).toBe(false);
+    });
+});
+
+describe('what the drivers say about a session', () => {
+    const sessionOf = (over: Partial<ChannelState>, channel: ChannelDriver['channel'], now = 0) =>
+        channelDrivers(state(over), ['lan', 'relay', 'server'])
+            .find((driver) => driver.channel === channel)!
+            .session('sess-1', 'machine-1', now);
+
+    it('takes the owning machine\'s listing as the answer', () => {
+        const listed = { isAlive: true, via: 'lan', at: 10 };
+        expect(sessionOf({ daemonSessionList: { 'sess-1': listed } }, 'lan', 20))
+            .toEqual({ reaching: true, fromOwner: true, seenAt: 10 });
+    });
+
+    it('does not call a restarting session offline', () => {
+        // The daemon lists a session it is replacing with no process and the timestamp of the
+        // swap. Read as an owner's negative, that is what demoted the row mid-restart.
+        const restarting = { isAlive: false, via: 'lan', at: 10, restartingSince: 1_000 };
+        expect(sessionOf({ daemonSessionList: { 'sess-1': restarting } }, 'lan', 1_500)?.reaching).toBe(true);
+    });
+
+    it('believes the owner\'s negative once the restart is past its grace', () => {
+        const restarting = { isAlive: false, via: 'lan', at: 10, restartingSince: 1_000 };
+        expect(sessionOf({ daemonSessionList: { 'sess-1': restarting } }, 'lan', 1_000 + RESTART_GRACE_MS))
+            .toEqual({ reaching: false, fromOwner: true, seenAt: 10 });
+    });
+
+    it('reads the relay directory the same way, so two routes cannot disagree', () => {
+        const entry = { at: 10, sessions: [{ happySessionId: 'sess-1', isAlive: false, restartingSince: 1_000 }] };
+        expect(sessionOf({ relayDirectory: { 'machine-1': entry } }, 'relay', 1_500)?.reaching).toBe(true);
+        expect(sessionOf({ relayDirectory: { 'machine-1': entry } }, 'relay', 1_000 + RESTART_GRACE_MS)?.reaching)
+            .toBe(false);
     });
 });
 
