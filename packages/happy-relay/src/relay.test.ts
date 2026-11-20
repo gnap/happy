@@ -1,5 +1,6 @@
 import { describe, expect, it, afterEach } from 'bun:test';
 import nacl from 'tweetnacl';
+import { createServer as createTcpServer, type Server as TcpServer, type Socket as TcpSocket } from 'node:net';
 import { startRelay, tagOfPublicKey, REGISTER_CONTEXT, type RelayHandle } from './relay';
 
 let relay: RelayHandle | null = null;
@@ -22,6 +23,30 @@ async function connectDaemon(port: number, pair = nacl.sign.keyPair(), sign = tr
     return { ws, frames, closed, tag: tagOfPublicKey(pair.publicKey) };
 }
 const until = async (fn: () => boolean) => { for (let i = 0; i < 100 && !fn(); i++) await Bun.sleep(20); };
+
+/**
+ * A target for the egress tests: it echoes what it is given and remembers its sockets, so a test
+ * can tell a pipe the relay opened from one it has since closed.
+ */
+async function startEchoTarget(): Promise<{ port: number; sockets: Set<TcpSocket>; close: () => Promise<void> }> {
+    const sockets = new Set<TcpSocket>();
+    const server: TcpServer = createTcpServer((socket) => {
+        sockets.add(socket);
+        socket.on('close', () => sockets.delete(socket));
+        socket.on('error', () => { /* the relay's close is the test's business */ });
+        socket.on('data', (chunk) => socket.write(chunk));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address() as { port: number };
+    return {
+        port: address.port,
+        sockets,
+        close: () => new Promise<void>((resolve) => {
+            for (const socket of sockets) socket.destroy();
+            server.close(() => resolve());
+        }),
+    };
+}
 
 describe('relay', () => {
     /**
@@ -410,5 +435,90 @@ describe('relay', () => {
         hub.send({ t: 'open', id: 5, tag: 'c'.repeat(32), path: '/lan/socket' });
         await until(() => hub.reply('close', 5).length === 1);
         expect(hub.reply('close', 5)[0]).toMatchObject({ code: 4502, reason: 'offline' });
+    });
+
+    /**
+     * The raw pipe.
+     *
+     * The daemon uses this to reach a SOCKS5 hop that only the relay can dial; the relay is a
+     * byte pipe and deliberately knows nothing about SOCKS5 or about what is being proxied. What
+     * these tests pin down is that the pipe carries bytes in both directions, that the daemon is
+     * told when it cannot have one, and that a pipe never outlives the connection that owns it.
+     */
+    it('pipes bytes to a target the daemon names, crediting both directions', async () => {
+        relay = startRelay({ port: 0 });
+        const target = await startEchoTarget();
+        try {
+            const d = await connectDaemon(relay.port);
+            await until(() => d.frames.some((f) => f.t === 'ok'));
+
+            d.ws.send(JSON.stringify({ t: 'eg-open', id: 1, host: '127.0.0.1', port: target.port }));
+            await until(() => d.frames.some((f) => f.t === 'eg-ok'));
+            expect(d.frames.some((f) => f.t === 'eg-ok')).toBe(true);
+            expect(target.sockets.size).toBe(1);
+
+            d.ws.send(JSON.stringify({ t: 'eg-data', id: 1, d: Buffer.from('hello').toString('base64') }));
+            await until(() => d.frames.some((f) => f.t === 'eg-data'));
+            // The echo comes back as the same base64 the daemon sent.
+            const echoed = Buffer.from(d.frames.find((f) => f.t === 'eg-data').d, 'base64').toString();
+            expect(echoed).toBe('hello');
+            // And the bytes it handed over are credited once they have left for the target, which
+            // is what keeps the daemon from growing an unbounded queue here.
+            await until(() => d.frames.some((f) => f.t === 'eg-credit'));
+            expect(d.frames.find((f) => f.t === 'eg-credit')).toMatchObject({ id: 1, n: 5 });
+
+            d.ws.send(JSON.stringify({ t: 'eg-close', id: 1 }));
+            await until(() => target.sockets.size === 0);
+            expect(target.sockets.size).toBe(0);
+        } finally {
+            await target.close();
+        }
+    });
+
+    it('answers a connect that cannot be made rather than leaving the daemon waiting', async () => {
+        relay = startRelay({ port: 0 });
+        const d = await connectDaemon(relay.port);
+        await until(() => d.frames.some((f) => f.t === 'ok'));
+
+        // Port 1 on loopback: no listener, and connecting is refused rather than timing out.
+        d.ws.send(JSON.stringify({ t: 'eg-open', id: 7, host: '127.0.0.1', port: 1 }));
+        await until(() => d.frames.some((f) => f.t === 'eg-err'));
+        expect(d.frames.find((f) => f.t === 'eg-err')).toMatchObject({ id: 7 });
+    });
+
+    it('caps how many pipes one daemon can hold', async () => {
+        relay = startRelay({ port: 0 });
+        const target = await startEchoTarget();
+        try {
+            const d = await connectDaemon(relay.port);
+            await until(() => d.frames.some((f) => f.t === 'ok'));
+            for (let i = 0; i < 33; i++) {
+                d.ws.send(JSON.stringify({ t: 'eg-open', id: i, host: '127.0.0.1', port: target.port }));
+            }
+            await until(() => d.frames.filter((f) => f.t === 'eg-ok' || f.t === 'eg-err').length >= 33);
+            expect(d.frames.filter((f) => f.t === 'eg-ok')).toHaveLength(32);
+            expect(d.frames.filter((f) => f.t === 'eg-err')).toHaveLength(1);
+            expect(d.frames.find((f) => f.t === 'eg-err')).toMatchObject({ message: 'too many streams' });
+        } finally {
+            await target.close();
+        }
+    });
+
+    it('closes every pipe when the daemon that owns them goes away', async () => {
+        relay = startRelay({ port: 0 });
+        const target = await startEchoTarget();
+        try {
+            const d = await connectDaemon(relay.port);
+            await until(() => d.frames.some((f) => f.t === 'ok'));
+            d.ws.send(JSON.stringify({ t: 'eg-open', id: 3, host: '127.0.0.1', port: target.port }));
+            await until(() => d.frames.some((f) => f.t === 'eg-ok'));
+            expect(target.sockets.size).toBe(1);
+
+            d.ws.close();
+            await until(() => target.sockets.size === 0);
+            expect(target.sockets.size).toBe(0);
+        } finally {
+            await target.close();
+        }
     });
 });
