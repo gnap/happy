@@ -122,6 +122,7 @@ export const it: TranslationStructure = {
         lastSeen: ({ time }: { time: string }) => `visto l'ultima volta ${time}`,
         permissionRequired: 'permesso richiesto',
         restarting: 'Riavvio…',
+        deleting: 'Eliminazione…',
         activeNow: 'Attivo ora',
         unknown: 'sconosciuto',
         creating: 'Creazione…',

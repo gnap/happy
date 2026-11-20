@@ -99,6 +99,7 @@ export const en: TranslationStructure = {
         lastSeen: ({ time }: { time: string }) => `last seen ${time}`,
         permissionRequired: 'permission required',
         restarting: 'Restarting…',
+        deleting: 'Deleting…',
         activeNow: 'Active now',
         unknown: 'unknown',
         creating: 'Creating…',

@@ -662,64 +662,13 @@ export async function getToolCallFullContent(
 /**
  * Permanently delete a session.
  *
- * Where a machine that owns the session can be reached, the deletion is asked of *it*: it records
- * the removal in its own log and replays it to the server on its own cursor, which is what makes
- * the session stay deleted after this App has forgotten it. The server's delete remains for the
- * sessions no machine channel can take — a machine that is gone, or a build without the route —
- * and for the row the machine has never heard of.
+ * The policy lives in `sync.sessionDelete` because the retry ladder and the channels are already
+ * there: a machine-owned row is asked of its machine and the intent is kept until the machine
+ * records it, while the server's delete remains only for rows with no machine owner and for
+ * machines whose build predates the archive route.
  */
 export async function sessionDelete(sessionId: string): Promise<{ success: boolean; message?: string }> {
-    try {
-        const outcome = await sync.archiveSession(sessionId);
-        if (outcome.kind === 'archived') {
-            // The machine has the durable answer; the App drops the row now rather than waiting for
-            // the server to hear about it, which is minutes away when the server channel is down.
-            storage.getState().deleteSession(sessionId);
-            return { success: true };
-        }
-        if (outcome.kind === 'refused') {
-            // The machine answered and said no. Asking the server would be the same account by
-            // another road, and would report the machine's answer as if no one had given one.
-            return {
-                success: false,
-                message: outcome.body || 'The machine refused to delete this session'
-            };
-        }
-
-        // No machine channel answered, or the machine does not have this session: the server's
-        // delete is the remaining road.
-        const response = await apiSocket.request(`/v1/sessions/${sessionId}`, {
-            method: 'DELETE'
-        });
-
-        if (response.ok) {
-            return { success: true };
-        }
-
-        // Session already deleted on another device — silently remove from local state.
-        if (response.status === 404) {
-            storage.getState().deleteSession(sessionId);
-            return { success: true };
-        }
-
-        // For other server errors, still clean up locally — the user explicitly asked
-        // to delete and the session may already be gone. Only block on 403 (forbidden).
-        if (response.status !== 403) {
-            storage.getState().deleteSession(sessionId);
-            return { success: true };
-        }
-
-        const error = await response.text();
-        return {
-            success: false,
-            message: error || 'Failed to delete session'
-        };
-    } catch (_error) {
-        // Network error — server unreachable. Clean up locally anyway since the
-        // session is likely already gone from the server (deleted from another device).
-        storage.getState().deleteSession(sessionId);
-        return { success: true };
-    }
+    return sync.sessionDelete(sessionId);
 }
 
 // Export types for external use

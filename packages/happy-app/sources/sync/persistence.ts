@@ -371,6 +371,56 @@ export function saveDeletedSessions(deletions: Record<string, number>) {
     saveSessionMap('session-deletions', deletions);
 }
 
+/**
+ * A deletion this device has asked for but the owning machine has not recorded yet.
+ *
+ * `deletedSessions` above is the *result*: the row is gone and stays gone. This is the intent
+ * before it, kept separately so that a delete outlives the app process while the machine that owns
+ * the session is unreachable — and so the row can keep its place, marked as deleting, instead of
+ * vanishing before any machine has agreed. The server is not asked to stand in for the machine: a
+ * row that names a machine belongs to it, and an offline machine is late, not absent.
+ */
+export type PendingSessionDelete = {
+    sessionId: string;
+    /** The machine that owns the row, and the only one that can turn the intent into a fact. */
+    machineId: string;
+    /** When the person asked. */
+    at: number;
+    /** Attempts made so far; drives the backoff. */
+    attempts: number;
+    /** The next moment an attempt is worth making. */
+    nextAttemptAt: number;
+    /** The last reason an attempt did not land, for the status line. */
+    lastError?: string;
+};
+
+/**
+ * Deletions waiting for their owning machine.
+ *
+ * Keyed by session id. A malformed entry is dropped rather than retried forever: this map is
+ * rewritten by this build only, and a session id that cannot name a machine cannot be delivered.
+ */
+export function loadPendingSessionDeletes(): Record<string, PendingSessionDelete> {
+    const raw = loadSessionMap<PendingSessionDelete>('session-delete-intents', 'session delete intents');
+    const intents: Record<string, PendingSessionDelete> = {};
+    for (const [sessionId, intent] of Object.entries(raw)) {
+        if (
+            intent
+            && typeof intent.machineId === 'string'
+            && typeof intent.at === 'number'
+            && typeof intent.attempts === 'number'
+            && typeof intent.nextAttemptAt === 'number'
+        ) {
+            intents[sessionId] = { ...intent, sessionId };
+        }
+    }
+    return intents;
+}
+
+export function savePendingSessionDeletes(intents: Record<string, PendingSessionDelete>): void {
+    saveSessionMap('session-delete-intents', intents);
+}
+
 export function loadProfile(): Profile {
     const profile = mmkv.getString('profile');
     if (profile) {
