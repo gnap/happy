@@ -1060,6 +1060,7 @@ export const es: TranslationStructure = {
         proxyRoute: 'Ruta del relay',
         proxyRouteDescription: 'Envía este perfil por una ruta con nombre que sirve la máquina, como "personal". La ruta se define en el relay; la máquina la expone en un puerto fijo. Déjalo vacío para usar el interruptor de arriba.',
         proxyRoutePlaceholder: 'personal',
+        proxyRouteNone: 'Sin ruta',
 
         addProfileTitle: 'Agregar Nuevo Perfil',
         delete: {

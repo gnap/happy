@@ -1060,6 +1060,7 @@ export const zhHant: TranslationStructure = {
         proxyRoute: '中繼路由',
         proxyRouteDescription: '讓此設定檔經本機提供的具名路由發出，例如 "personal"。路由定義在中繼上，本機只在固定連接埠上暴露它。留空則使用上面的開關。',
         proxyRoutePlaceholder: 'personal',
+        proxyRouteNone: '不使用路由',
 
         addProfileTitle: '新增設定檔',
         delete: {

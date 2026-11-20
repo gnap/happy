@@ -1082,6 +1082,7 @@ export const ru: TranslationStructure = {
         proxyRoute: 'Маршрут ретранслятора',
         proxyRouteDescription: 'Отправляет этот профиль через именованный маршрут, который предоставляет машина, например "personal". Маршрут задан на ретрансляторе; машина открывает его на фиксированном порту. Оставьте пустым, чтобы использовать переключатель выше.',
         proxyRoutePlaceholder: 'personal',
+        proxyRouteNone: 'Без маршрута',
 
         addProfileTitle: 'Добавить Новый Профиль',
         delete: {
