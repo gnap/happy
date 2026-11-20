@@ -9,7 +9,7 @@ import { getBuiltInProfileDocumentation } from '@/sync/profileUtils';
 import { EnvironmentVariablesList } from '@/components/EnvironmentVariablesList';
 import { Switch } from '@/components/Switch';
 import { useAllMachines } from '@/sync/storage';
-import { collectProxyRoutes } from '@/sync/proxyRoutes';
+import { collectProxyRoutes, DIRECT_ROUTE } from '@/sync/proxyRoutes';
 
 export interface ProfileEditFormProps {
     profile: AIBackendProfile;
@@ -147,21 +147,20 @@ export function ProfileEditForm({
                         </Pressable>
                         {routePickerOpen && (
                             <View style={formStyles.routeList}>
-                                {[undefined, ...knownRoutes].map((route) => {
-                                    const selected = route === undefined
-                                        ? !proxyRoute.trim()
-                                        : proxyRoute.trim() === route;
+                                {[DIRECT_ROUTE, ...knownRoutes.filter((name) => name !== DIRECT_ROUTE)].map((route) => {
+                                    const current = proxyRoute.trim() || DIRECT_ROUTE;
+                                    const selected = current === route;
                                     return (
                                         <Pressable
-                                            key={route ?? '__none__'}
+                                            key={route}
                                             style={[formStyles.routeOption, selected && formStyles.routeOptionActive]}
                                             onPress={() => {
-                                                setProxyRoute(route ?? '');
+                                                setProxyRoute(route);
                                                 setRoutePickerOpen(false);
                                             }}
                                         >
                                             <Text style={formStyles.routeOptionText}>
-                                                {route ?? t('profiles.proxyRouteNone')}
+                                                {route === DIRECT_ROUTE ? t('profiles.proxyRouteNone') : route}
                                             </Text>
                                             {selected && (
                                                 <Ionicons name="checkmark" size={18} color={theme.colors.button.primary.tint} />

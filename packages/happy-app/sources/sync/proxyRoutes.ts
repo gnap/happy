@@ -1,4 +1,14 @@
 /**
+ * The reserved route name meaning "no proxy at all".
+ *
+ * It is not a route a machine serves: it is the profile saying the agent should reach the
+ * network with nothing in its environment pointing elsewhere. Kept in the picker as a value
+ * rather than as the absence of one, because a profile that still names a SOCKS5 hop would
+ * otherwise keep routing when its route is cleared.
+ */
+export const DIRECT_ROUTE = 'direct';
+
+/**
  * The relay route names a profile editor can offer.
  *
  * Routes are machine-level: each daemon publishes the names it serves, names only. A profile is
