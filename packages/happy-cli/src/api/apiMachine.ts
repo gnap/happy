@@ -147,8 +147,10 @@ export class ApiMachineClient {
     }: MachineRpcHandlers) {
         // Register spawn session handler
         this.rpcHandlerManager.registerHandler('spawn-happy-session', async (params: any) => {
-            const { directory, sessionId, machineId, approvedNewDirectoryCreation, agent, token, environmentVariables, sandboxConfig, requiresDesktop, expect, generation } = params || {};
-            logger.debug(`[API MACHINE] Spawning session with params: ${JSON.stringify(params)}`);
+            const { directory, sessionId, machineId, approvedNewDirectoryCreation, agent, token, environmentVariables, sandboxConfig, requiresDesktop, expect, generation, proxyViaRelay } = params || {};
+            // Keys only: the values carry provider tokens, and a profile can name its SOCKS5 hop
+            // there too — a URL with credentials this log has no business holding.
+            logger.debug(`[API MACHINE] Spawning session in ${directory ?? '(none)'} agent=${agent ?? '(default)'} envKeys=${Object.keys(environmentVariables ?? {}).join(',') || '(none)'} proxyViaRelay=${typeof proxyViaRelay === 'boolean' ? proxyViaRelay : '(unset)'}`);
 
             if (!directory) {
                 throw new Error('Directory is required');
@@ -159,6 +161,7 @@ export class ApiMachineClient {
                 ...(requiresDesktop === true ? { requiresDesktop: true } : {}),
                 ...(expect === 'accepted' ? { expectAccepted: true } : {}),
                 ...(typeof generation === 'number' ? { generation } : {}),
+                ...(typeof proxyViaRelay === 'boolean' ? { proxyViaRelay } : {}),
             });
 
             switch (result.type) {

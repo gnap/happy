@@ -26,6 +26,7 @@ export function startDaemonControlServer({
   requestShutdown,
   onHappySessionWebhook,
   onSessionEnding,
+  onProxyConfig,
 }: {
   getChildren: () => TrackedSession[];
   getRecentlyExited: () => TrackedSession[];
@@ -38,6 +39,15 @@ export function startDaemonControlServer({
   requestShutdown: () => void;
   onHappySessionWebhook: (sessionId: string, metadata: Metadata) => void;
   onSessionEnding: (sessionId: string, pid: number, reason: string, exitCode?: number, archive?: boolean) => void;
+  /**
+   * A session's proxy route. `null` forgets it.
+   *
+   * The daemon serves a loopback HTTP proxy for sessions whose profile chose a route — a SOCKS5
+   * hop, the relay, or both; this is how the session — which is where the profile is resolved —
+   * tells the daemon where to send its requests. A route without `socks5` means the relay is the
+   * egress and dials the targets itself. The daemon never learns the route any other way.
+   */
+  onProxyConfig: (token: string, config: { socks5?: string; viaRelay: boolean; label?: string } | null) => void;
 }): Promise<{ port: number; stop: () => Promise<void> }> {
   return new Promise((resolve) => {
     const app = fastify({
@@ -196,6 +206,8 @@ export function startDaemonControlServer({
           environmentVariables: z.record(z.string()).optional(),
           resumeSessionTag: z.string().optional(),
           sandboxConfig: z.any().optional(),
+          /** Whether this session's traffic goes through the relay. Absent means no. */
+          proxyViaRelay: z.boolean().optional(),
           /** `accepted` answers when a process exists, not when it has registered. */
           expect: z.enum(['accepted']).optional(),
           /** The spec revision the caller observed; a restart may carry it. */
@@ -234,13 +246,14 @@ export function startDaemonControlServer({
         }
       }
     }, async (request, reply) => {
-      const { directory, sessionId, agent, environmentVariables, resumeSessionTag, sandboxConfig, expect, generation } = request.body;
+      const { directory, sessionId, agent, environmentVariables, resumeSessionTag, sandboxConfig, expect, generation, proxyViaRelay } = request.body;
 
       logger.debug(`[CONTROL SERVER] Spawn session request: dir=${directory}, sessionId=${sessionId || 'new'}, agent=${agent ?? 'default'}, sandbox=${sandboxConfig ? 'yes' : 'no'}, expect=${expect ?? 'blocking'}`);
       const result = await spawnSession({
         directory, sessionId, agent, environmentVariables, resumeSessionTag, sandboxConfig,
         ...(expect === 'accepted' ? { expectAccepted: true } : {}),
         ...(generation !== undefined ? { generation } : {}),
+        ...(proxyViaRelay !== undefined ? { proxyViaRelay } : {}),
       });
 
       switch (result.type) {
@@ -356,6 +369,36 @@ export function startDaemonControlServer({
       logger.debug(`[CONTROL SERVER] Archive session request: ${sessionId}`);
       const result = archiveSession(sessionId);
       return { success: result.applied };
+    });
+
+    // A session registers (or clears) the proxy route its profile selected. The rule that the
+    // profile's traffic takes that route lives in the session; the daemon only holds the token ->
+    // route table and never dials anything on its own initiative. A route with no SOCKS5 hop is
+    // the relay-dials-the-target case; `socks5: null` with the relay off is how a session forgets
+    // its route, so the two fields are read together.
+    typed.post('/proxy-config', {
+      schema: {
+        body: z.object({
+          token: z.string().min(1),
+          socks5: z.string().nullable(),
+          viaRelay: z.boolean(),
+          /** A session name for logs. Never the address, which is a credential. */
+          label: z.string().optional(),
+        }),
+        response: {
+          200: z.object({ status: z.literal('ok') })
+        }
+      }
+    }, async (request) => {
+      const { token, socks5, viaRelay, label } = request.body;
+      const clearing = socks5 === null && !viaRelay;
+      onProxyConfig(token, clearing
+        ? null
+        : { ...(socks5 !== null ? { socks5 } : {}), viaRelay, ...(label ? { label } : {}) });
+      // The address is a credential: log which way it goes, never what it is or the token.
+      const route = clearing ? 'cleared' : socks5 === null ? 'set relay egress' : viaRelay ? 'set via relay' : 'set direct';
+      logger.debug(`[CONTROL SERVER] Proxy route ${route}`);
+      return { status: 'ok' as const };
     });
 
     // Session pre-announces its exit reason before dying

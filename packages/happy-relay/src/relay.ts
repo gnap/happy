@@ -25,6 +25,7 @@
 import nacl from 'tweetnacl';
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { connect as connectTcp, type Socket as TcpSocket } from 'node:net';
 
 export const REGISTER_CONTEXT = 'happy-relay-v1.register.';
 
@@ -161,6 +162,37 @@ function directorySession(entry: unknown): DirectorySession | null {
     return row;
 }
 
+/**
+ * One raw TCP pipe a daemon opened through this relay.
+ *
+ * The relay accepts these only because the daemon is authenticated: it does not parse the bytes
+ * and does not decide what may be reached. What it does own is the resource: the socket is closed
+ * when the daemon goes away, when it is idle, and when the daemon asks.
+ *
+ * Flow control is credit-based in both directions. A window is granted when the stream opens and
+ * replenished as bytes are consumed, so a fast producer cannot grow an unbounded queue on the
+ * other side of a slow consumer — the relay's WebSocket is shared with every session and directory
+ * frame, and one stream filling it would delay all of them.
+ */
+type Egress = {
+    /** The daemon's id for this pipe, echoed on every frame about it. */
+    id: number;
+    /** What the daemon asked for, for logs. */
+    target: string;
+    socket: TcpSocket;
+    /** How many more bytes this relay may send toward the daemon. */
+    credit: number;
+    /** Bytes read from the target but held back by the credit window. */
+    pending: Buffer[];
+    /** target → daemon */
+    received: number;
+    /** daemon → target */
+    sent: number;
+    openedAt: number;
+    opened: boolean;
+    closed: boolean;
+};
+
 type Daemon = {
     tag: string;
     ws: any;
@@ -189,6 +221,13 @@ type Daemon = {
      * `directorySession`.
      */
     sessions: DirectorySession[];
+
+    /**
+     * Egress pipes, keyed by the id the daemon chose. Separate from the ids this relay hands out
+     * for HTTP and websocket routes: those name things on this side, these name things on the
+     * daemon's, and mixing the two would let either side talk about the wrong object.
+     */
+    egress: Map<number, Egress>;
 
     nextId: number;
 };
@@ -225,6 +264,22 @@ const TAG_RE = /^[0-9a-f]{32}$/;
  */
 const DIRECTORY_BROADCAST_DELAY_MS = 50;
 const HOP_HEADERS = new Set(['host', 'connection', 'content-length', 'transfer-encoding', 'upgrade', 'keep-alive']);
+
+/**
+ * Limits for the raw pipes a daemon can open through this relay.
+ *
+ * A daemon is trusted to choose the destination — it is the machine's own daemon, and its operator
+ * chose to point it there. What is not trusted is volume: a leaked key must not turn the relay into
+ * a high-concurrency dialer, and a pipe that never carries anything is a socket someone forgot.
+ * The window matches the daemon's own constant; see `egressStream.ts` there.
+ */
+const EGRESS_MAX_STREAMS_PER_DAEMON = 32;
+const EGRESS_CONNECT_TIMEOUT_MS = 10_000;
+const EGRESS_IDLE_TIMEOUT_MS = 120_000;
+const EGRESS_CHUNK_BYTES = 32 * 1024;
+const EGRESS_WINDOW_BYTES = 512 * 1024;
+/** A credit frame is a promise to send; anything larger is a mistake or a probe. */
+const EGRESS_MAX_CREDIT = 4 * 1024 * 1024;
 
 export function startRelay(options: RelayOptions): RelayHandle {
     const maxBody = options.maxBodyBytes ?? 4 * 1024 * 1024;
@@ -451,7 +506,7 @@ export function startRelay(options: RelayOptions): RelayHandle {
                     // The signature proves key ownership, so a newer connection from the same key
                     // legitimately replaces a stale one (daemon restart / NAT rebinding).
                     const previous = daemons.get(tag);
-                    const daemon: Daemon = { tag, ws, pending: new Map(), clients: new Map(), hub: new Map(), sessions: [], reachable: null, nextId: 1 };
+                    const daemon: Daemon = { tag, ws, pending: new Map(), clients: new Map(), hub: new Map(), sessions: [], reachable: null, egress: new Map(), nextId: 1 };
                     daemons.set(tag, daemon);
                     data.tag = tag;
                     if (previous && previous.ws !== ws) {
@@ -523,6 +578,37 @@ export function startRelay(options: RelayOptions): RelayHandle {
                     // machine's log records a new address.
                     daemon.reachable = msg.endpoints ? { endpoints: msg.endpoints, at: msg.at, rev: msg.rev } : null;
                     broadcastDirectory();
+                } else if (msg.t === 'eg-open') {
+                    openEgress(daemon, msg);
+                } else if (msg.t === 'eg-data') {
+                    const egress = daemon.egress.get(Number(msg.id));
+                    if (!egress || !egress.opened || egress.closed || typeof msg.d !== 'string') return;
+                    const bytes = Buffer.from(msg.d, 'base64');
+                    if (bytes.length === 0) return;
+                    egress.sent += bytes.length;
+                    // Credit is returned only once the bytes have actually left for the target; a
+                    // write that is still buffered is still this relay's memory, not the daemon's.
+                    egress.socket.write(bytes, (error) => {
+                        if (!error && !egress.closed) {
+                            egressSend(daemon, { t: 'eg-credit', id: egress.id, n: bytes.length });
+                        }
+                    });
+                } else if (msg.t === 'eg-credit') {
+                    const egress = daemon.egress.get(Number(msg.id));
+                    const amount = Number(msg.n);
+                    if (!egress || !egress.opened || egress.closed) return;
+                    if (!Number.isFinite(amount) || amount <= 0 || amount > EGRESS_MAX_CREDIT) return;
+                    // The window is replenished, never inflated: credits beyond what the stream
+                    // could possibly have consumed are not memory this relay is willing to hold.
+                    egress.credit = Math.min(egress.credit + amount, EGRESS_MAX_CREDIT);
+                    flushEgress(daemon, egress);
+                } else if (msg.t === 'eg-half') {
+                    const egress = daemon.egress.get(Number(msg.id));
+                    if (egress && !egress.closed) egress.socket.end();
+                } else if (msg.t === 'eg-close') {
+                    const id = Number(msg.id);
+                    const egress = daemon.egress.get(id);
+                    if (egress) destroyEgress(daemon, id, egress, false, 'closed by daemon');
                 }
             },
             close(ws) {
@@ -711,7 +797,128 @@ export function startRelay(options: RelayOptions): RelayHandle {
         }
     }
 
+    function egressSend(daemon: Daemon, frame: Record<string, unknown>): void {
+        try { daemon.ws.send(JSON.stringify(frame)); } catch { /* the close handler tears streams down */ }
+    }
+
+    /**
+     * Opens one raw TCP pipe for an authenticated daemon.
+     *
+     * The relay does not interpret what will flow through it — in practice a SOCKS5 handshake and
+     * then the proxied bytes — so there is nothing here to get wrong about the target's protocol.
+     * The only judgement made is about resources: per-daemon concurrency, a connect deadline, and
+     * an idle deadline.
+     */
+    function openEgress(daemon: Daemon, msg: any): void {
+        const id = Number(msg.id);
+        const host = typeof msg.host === 'string' ? msg.host.trim() : '';
+        const port = Number(msg.port);
+        if (!Number.isInteger(id) || id < 0 || !host || host.length > 255 || !Number.isInteger(port) || port < 1 || port > 65535) {
+            if (Number.isInteger(id)) egressSend(daemon, { t: 'eg-err', id, message: 'bad request' });
+            return;
+        }
+        if (daemon.egress.has(id)) {
+            egressSend(daemon, { t: 'eg-err', id, message: 'duplicate id' });
+            return;
+        }
+        if (daemon.egress.size >= EGRESS_MAX_STREAMS_PER_DAEMON) {
+            egressSend(daemon, { t: 'eg-err', id, message: 'too many streams' });
+            return;
+        }
+
+        const socket = connectTcp({ host, port });
+        socket.setNoDelay(true);
+        const egress: Egress = {
+            id, socket, target: `${host}:${port}`, credit: EGRESS_WINDOW_BYTES,
+            pending: [], received: 0, sent: 0, openedAt: Date.now(), opened: false, closed: false,
+        };
+        daemon.egress.set(id, egress);
+
+        const connectTimer = setTimeout(() => {
+            if (egress.opened || egress.closed) return;
+            egressSend(daemon, { t: 'eg-err', id, message: 'connect timeout' });
+            destroyEgress(daemon, id, egress, false, 'connect timeout');
+        }, EGRESS_CONNECT_TIMEOUT_MS);
+
+        socket.on('connect', () => {
+            clearTimeout(connectTimer);
+            if (egress.closed) { socket.destroy(); return; }
+            egress.opened = true;
+            egressSend(daemon, { t: 'eg-ok', id });
+            // Reset by any read or write, so this measures silence on the connection rather than
+            // time since it opened — a long download is not idle, an abandoned tunnel is.
+            socket.setTimeout(EGRESS_IDLE_TIMEOUT_MS, () => destroyEgress(daemon, id, egress, true, 'idle'));
+            socket.resume();
+        });
+        socket.on('data', (buf: Buffer) => {
+            if (egress.closed) return;
+            egress.received += buf.length;
+            for (let offset = 0; offset < buf.length; offset += EGRESS_CHUNK_BYTES) {
+                egress.pending.push(Buffer.from(buf.subarray(offset, offset + EGRESS_CHUNK_BYTES)));
+            }
+            flushEgress(daemon, egress);
+        });
+        // The target closed its write side. The daemon is told so it can half-close in turn while
+        // still reading what the target already sent.
+        socket.on('end', () => {
+            if (!egress.closed) egressSend(daemon, { t: 'eg-half', id });
+        });
+        socket.on('close', () => {
+            clearTimeout(connectTimer);
+            if (egress.closed) return;
+            egress.closed = true;
+            if (egress.opened) egressSend(daemon, { t: 'eg-close', id });
+            daemon.egress.delete(id);
+            logEgress(daemon, egress, 'closed');
+        });
+        socket.on('error', (error) => {
+            clearTimeout(connectTimer);
+            const code = (error as NodeJS.ErrnoException).code ?? 'error';
+            if (!egress.opened && !egress.closed) {
+                egressSend(daemon, { t: 'eg-err', id, message: `connect failed: ${code}` });
+                destroyEgress(daemon, id, egress, false, `error ${code}`);
+                return;
+            }
+            destroyEgress(daemon, id, egress, true, `error ${code}`);
+        });
+    }
+
+    /** Sends whatever the credit window allows, and pauses the target while it does not. */
+    function flushEgress(daemon: Daemon, egress: Egress): void {
+        if (egress.closed) return;
+        while (egress.pending.length > 0 && egress.credit >= egress.pending[0].length) {
+            const chunk = egress.pending.shift()!;
+            egress.credit -= chunk.length;
+            egressSend(daemon, { t: 'eg-data', id: egress.id, d: chunk.toString('base64') });
+        }
+        const backlogged = egress.pending.length > 0;
+        if (backlogged && !egress.socket.isPaused()) {
+            egress.socket.pause();
+        } else if (!backlogged && egress.socket.isPaused()) {
+            egress.socket.resume();
+        }
+    }
+
+    function destroyEgress(daemon: Daemon, id: number, egress: Egress, notifyDaemon: boolean, why: string): void {
+        if (!egress.closed) {
+            egress.closed = true;
+            daemon.egress.delete(id);
+            if (notifyDaemon) egressSend(daemon, { t: 'eg-close', id });
+            logEgress(daemon, egress, why);
+        }
+        egress.pending.length = 0;
+        try { egress.socket.destroy(); } catch { /* gone */ }
+    }
+
+    /** Host, byte counts and lifetime only: the pipe carries no credential this side can name. */
+    function logEgress(daemon: Daemon, egress: Egress, what: string): void {
+        console.log(`[egress] ${daemon.tag.slice(0, 8)} -> ${egress.target} ${what} rx=${egress.received} tx=${egress.sent} ms=${Date.now() - egress.openedAt}`);
+    }
+
     function teardown(daemon: Daemon) {
+        for (const [id, egress] of [...daemon.egress]) {
+            destroyEgress(daemon, id, egress, false, 'daemon gone');
+        }
         for (const p of daemon.pending.values()) {
             clearTimeout(p.timer);
             if (p.hub) {
@@ -740,6 +947,11 @@ export function startRelay(options: RelayOptions): RelayHandle {
             if (directoryBroadcastTimer) {
                 clearTimeout(directoryBroadcastTimer);
                 directoryBroadcastTimer = null;
+            }
+            for (const daemon of daemons.values()) {
+                for (const [id, egress] of [...daemon.egress]) {
+                    destroyEgress(daemon, id, egress, false, 'relay stopped');
+                }
             }
             server.stop(true);
         },

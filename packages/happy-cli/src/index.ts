@@ -36,9 +36,15 @@ import { claudeCliPath } from './claude/claudeLocal'
 import { execFileSync } from 'node:child_process'
 import { extractNoSandboxFlag, extractSandboxConfigFlag } from './utils/sandboxFlags'
 import { sendA2aMessage } from './daemon/sendA2aMessage'
+import { captureSpawnProxyEnv } from './utils/networkProxy'
 
 
 (async () => {
+  // Before anything can reach the server: a SOCKS5 hop in this process's environment belongs to
+  // the agent, and axios would otherwise rewrite its own control-plane requests to use it and
+  // fail with "protocol mismatch" before a session exists. See captureSpawnProxyEnv.
+  captureSpawnProxyEnv()
+
   const args = process.argv.slice(2)
   const cliStartTime = Date.now()
 
