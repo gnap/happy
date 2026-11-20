@@ -1078,8 +1078,8 @@ export const pl: TranslationStructure = {
         editProfile: 'Edytuj Profil',
         copyProfile: 'Kopiuj Profil',
         deleteProfile: 'Usuń Profil',
-        proxyViaRelay: 'SOCKS5 przez przekaźnik',
-        proxyViaRelayDescription: 'Gdy profil ustawia proxy SOCKS5, żądania docierają do niego przez przekaźnik, a nie z tej maszyny. Włącz tylko wtedy, gdy ta maszyna nie może połączyć się z węzłem bezpośrednio.',
+        proxyViaRelay: 'Kieruj ruch przez przekaźnik',
+        proxyViaRelayDescription: 'Wysyła ruch tego profilu przez przekaźnik: przez proxy SOCKS5, jeśli środowisko je definiuje, w przeciwnym razie bezpośrednio z przekaźnika. Wyłączone — obowiązują ustawienia proxy tej maszyny.',
 
         addProfileTitle: 'Dodaj Nowy Profil',
         delete: {

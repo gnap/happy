@@ -1030,8 +1030,8 @@ function NewSessionWizard() {
 
             // Get environment variables from selected profile
             let environmentVariables: Record<string, string> | undefined = undefined;
-            // Only a profile that opts in sends its SOCKS5 hop through the relay; every other
-            // profile keeps dialling the hop from this machine.
+            // Only a profile that opts in sends its traffic through the relay; every other
+            // profile keeps the route its own SOCKS5 setting asks for.
             let proxyViaRelay: boolean | undefined = undefined;
             if (selectedProfileId) {
                 const selectedProfile = profileMap.get(selectedProfileId);

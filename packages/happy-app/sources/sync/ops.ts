@@ -179,8 +179,8 @@ export interface SpawnSessionOptions {
     // - Custom variables (DEEPSEEK_*, Z_AI_*, etc.)
     environmentVariables?: Record<string, string>;
     /**
-     * Reach the profile's SOCKS5 hop through the relay rather than dialling it from the machine.
-     * Omitted means the daemon's default (direct).
+     * Send this profile's traffic through the relay, reaching its SOCKS5 hop first when the
+     * environment names one. Omitted means the daemon's default (off).
      */
     proxyViaRelay?: boolean;
     /** Per-session sandbox config override (falls back to machine-global settings.json). */
