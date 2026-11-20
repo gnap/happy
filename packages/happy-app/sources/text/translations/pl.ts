@@ -1083,7 +1083,7 @@ export const pl: TranslationStructure = {
         proxyRoute: 'Trasa przekaźnika',
         proxyRouteDescription: 'Wysyła ten profil przez nazwaną trasę udostępnianą przez maszynę, np. "personal". Trasa jest zdefiniowana na przekaźniku; maszyna udostępnia ją na stałym porcie. Pozostaw puste, aby użyć przełącznika powyżej.',
         proxyRoutePlaceholder: 'personal',
-        proxyRouteNone: 'Bez trasy',
+        proxyRouteNone: 'Bezpośrednio',
 
         addProfileTitle: 'Dodaj Nowy Profil',
         delete: {

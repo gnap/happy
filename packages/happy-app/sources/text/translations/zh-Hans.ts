@@ -1039,7 +1039,7 @@ export const zhHans: TranslationStructure = {
         proxyRoute: '中继路由',
         proxyRouteDescription: '让此配置文件经本机提供的具名路由发出，例如 "personal"。路由定义在中继上，本机只在固定端口上暴露它。留空则使用上面的开关。',
         proxyRoutePlaceholder: 'personal',
-        proxyRouteNone: '不使用路由',
+        proxyRouteNone: '直连',
 
         profileName: '配置文件名称',
         enterName: '输入配置文件名称',
