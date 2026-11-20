@@ -115,4 +115,22 @@ describe('resolveMessageProfileEnv', () => {
     it('states no relay choice when the session has no profile', () => {
         expect(resolveMessageProxyViaRelay({ profileId: null }, [llmCenterProfile])).toBeUndefined();
     });
+
+    it('carries a named route as the one environment variable the agent honours', () => {
+        const env = resolveMessageProfileEnv(
+            { profileId: 'routed' },
+            [{ ...llmCenterProfile, id: 'routed', proxyRoute: '  personal  ' }],
+        );
+        expect(env).toEqual({
+            ANTHROPIC_BASE_URL: 'https://llm-center.example/llm',
+            ANTHROPIC_AUTH_TOKEN: 'sk-test',
+            ANTHROPIC_DEFAULT_OPUS_MODEL: 'CLAUDE_test',
+            HAPPY_PROXY_ROUTE: 'personal',
+        });
+    });
+
+    it('omits the route when the profile names none', () => {
+        const env = resolveMessageProfileEnv({ profileId: 'llm-center-test' }, [llmCenterProfile]);
+        expect(env).not.toHaveProperty('HAPPY_PROXY_ROUTE');
+    });
 });

@@ -39,13 +39,19 @@ export function ProfileEditForm({
     // relay; with a SOCKS5 hop in the environment, the relay connects to that hop first.
     const [proxyViaRelay, setProxyViaRelay] = React.useState(profile.proxyViaRelay ?? false);
 
+    // A route the relay defines and the machine serves on a fixed port. The name is the whole
+    // profile-side contract; when set it takes precedence over the relay switch above.
+    const [proxyRoute, setProxyRoute] = React.useState(profile.proxyRoute ?? '');
+
     const handleSave = () => {
         if (!name.trim()) return;
+        const route = proxyRoute.trim();
         onSave({
             ...profile,
             name: name.trim(),
             environmentVariables,
             proxyViaRelay,
+            proxyRoute: route ? route : undefined,
             updatedAt: Date.now(),
         });
     };
@@ -103,6 +109,23 @@ export function ProfileEditForm({
                     environmentVariables={environmentVariables}
                     profileDocs={profileDocs}
                     onChange={setEnvironmentVariables}
+                />
+
+                {/* Named relay route */}
+                <Text style={formStyles.sectionTitle}>
+                    {t('profiles.proxyRoute')}
+                </Text>
+                <Text style={formStyles.switchDescription}>
+                    {t('profiles.proxyRouteDescription')}
+                </Text>
+                <TextInput
+                    style={formStyles.textInput}
+                    placeholder={t('profiles.proxyRoutePlaceholder')}
+                    placeholderTextColor={theme.colors.input.placeholder}
+                    value={proxyRoute}
+                    onChangeText={setProxyRoute}
+                    autoCapitalize="none"
+                    autoCorrect={false}
                 />
 
                 {/* SOCKS5 egress route */}

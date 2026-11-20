@@ -1080,6 +1080,9 @@ export const pl: TranslationStructure = {
         deleteProfile: 'Usuń Profil',
         proxyViaRelay: 'Kieruj ruch przez przekaźnik',
         proxyViaRelayDescription: 'Wysyła ruch tego profilu przez przekaźnik: przez proxy SOCKS5, jeśli środowisko je definiuje, w przeciwnym razie bezpośrednio z przekaźnika. Wyłączone — obowiązują ustawienia proxy tej maszyny.',
+        proxyRoute: 'Trasa przekaźnika',
+        proxyRouteDescription: 'Wysyła ten profil przez nazwaną trasę udostępnianą przez maszynę, np. "personal". Trasa jest zdefiniowana na przekaźniku; maszyna udostępnia ją na stałym porcie. Pozostaw puste, aby użyć przełącznika powyżej.',
+        proxyRoutePlaceholder: 'personal',
 
         addProfileTitle: 'Dodaj Nowy Profil',
         delete: {

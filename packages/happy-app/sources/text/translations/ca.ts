@@ -1034,6 +1034,9 @@ export const ca: TranslationStructure = {
         deleteProfile: 'Eliminar perfil',
         proxyViaRelay: 'Encamina el trànsit a través del relé',
         proxyViaRelayDescription: 'Envia el trànsit d\'aquest perfil a través del relé: pel proxy SOCKS5 si l\'entorn en defineix un, o directament des del relé en cas contrari. Desactivat, s\'apliquen els paràmetres de proxy d\'aquesta màquina.',
+        proxyRoute: 'Ruta del relé',
+        proxyRouteDescription: 'Envia aquest perfil per una ruta amb nom que serveix la màquina, com ara "personal". La ruta es defineix al relé; la màquina l\'exposa en un port fix. Deixa-ho buit per fer servir l\'interruptor de dalt.',
+        proxyRoutePlaceholder: 'personal',
 
         profileName: 'Nom del perfil',
         enterName: 'Introdueix el nom del perfil',

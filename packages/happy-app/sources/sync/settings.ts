@@ -121,6 +121,12 @@ export const AIBackendProfileSchema = z.object({
     // means off: the machine's own proxy settings decide the route.
     proxyViaRelay: z.boolean().optional(),
 
+    // Leave through a named relay route instead. The route — its hop and that hop's credentials —
+    // is defined on the relay; the machine exposes the name on a fixed local port. This profile
+    // only carries the name. When set it takes precedence over proxyViaRelay and any SOCKS5 hop
+    // in the environment: naming a route is saying "use that path".
+    proxyRoute: z.string().optional(),
+
     // Default permission mode for this profile
     defaultPermissionMode: z.enum(['default', 'acceptEdits', 'bypassPermissions', 'plan', 'read-only', 'safe-yolo', 'yolo']).optional(),
 
@@ -191,6 +197,13 @@ export function getProfileEnvironmentVariables(profile: AIBackendProfile): Recor
     profile.environmentVariables.forEach(envVar => {
         envVars[envVar.name] = envVar.value;
     });
+
+    // A named route travels as an environment variable because that is the channel every agent
+    // process already honours. The port it stands for is the machine's, so nothing else about it
+    // belongs in a profile.
+    const route = profile.proxyRoute?.trim();
+    if (route) envVars.HAPPY_PROXY_ROUTE = route;
+
 
     // Add Anthropic config
     if (profile.anthropicConfig) {

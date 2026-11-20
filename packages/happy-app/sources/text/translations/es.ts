@@ -1057,6 +1057,9 @@ export const es: TranslationStructure = {
         deleteProfile: 'Eliminar Perfil',
         proxyViaRelay: 'Encamina el tráfico por el relay',
         proxyViaRelayDescription: 'Envía el tráfico de este perfil a través del relay: por el proxy SOCKS5 si el entorno define uno, o directamente desde el relay en caso contrario. Desactivado, se usan los ajustes de proxy de esta máquina.',
+        proxyRoute: 'Ruta del relay',
+        proxyRouteDescription: 'Envía este perfil por una ruta con nombre que sirve la máquina, como "personal". La ruta se define en el relay; la máquina la expone en un puerto fijo. Déjalo vacío para usar el interruptor de arriba.',
+        proxyRoutePlaceholder: 'personal',
 
         addProfileTitle: 'Agregar Nuevo Perfil',
         delete: {
