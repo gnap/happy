@@ -13,6 +13,7 @@ import os from 'node:os';
 import { dirname, resolve } from 'node:path';
 
 import type { AgentState, Metadata } from '@/api/types';
+import { resolveSessionUid } from '@/api/sessionUid';
 import { configuration } from '@/configuration';
 import { projectPath } from '@/projectPath';
 import type { SandboxConfig } from '@/persistence';
@@ -33,6 +34,13 @@ export interface CreateSessionMetadataOptions {
     machineId: string;
     /** How the session was started */
     startedBy?: 'daemon' | 'terminal';
+    /**
+     * The CLI's private tag for this session lineage.
+     *
+     * When given, the metadata carries the lineage's public `sessionUid`, resolved from the tag so
+     * that a resume keeps the same one. The tag itself is never published: the send path strips it.
+     */
+    sessionTag?: string;
     /** Workspace path (agent cwd); defaults to process.cwd() when not set */
     path?: string;
     /** Active sandbox config for the session, or undefined when not used */
@@ -131,6 +139,7 @@ export function createSessionMetadata(opts: CreateSessionMetadataOptions): Sessi
         startedFromDaemon: opts.startedBy === 'daemon',
         hostPid: process.pid,
         startedBy: opts.startedBy || 'terminal',
+        ...(opts.sessionTag ? { sessionUid: resolveSessionUid(opts.sessionTag) } : {}),
         lifecycleState: 'running',
         lifecycleStateSince: Date.now(),
         flavor: opts.flavor,

@@ -125,6 +125,17 @@ type DirectorySession = {
      * instead of saying it is coming back.
      */
     restartingSince?: number;
+    /**
+     * The machine's projection of the session: what phase it is in, at which spec revision.
+     *
+     * Relayed as-is, like the rest of the row. The relay does not interpret a phase — a newer
+     * daemon may name one this build has not heard of, and the App is the party that draws it.
+     */
+    phase?: string;
+    generation?: number;
+    observedGeneration?: number;
+    observedAt?: number;
+    reason?: string;
 };
 
 /**
@@ -134,13 +145,19 @@ type DirectorySession = {
  */
 function directorySession(entry: unknown): DirectorySession | null {
     if (!entry || typeof entry !== 'object') return null;
-    const session = entry as { happySessionId?: unknown; tag?: unknown; isAlive?: unknown; origin?: unknown; restartingSince?: unknown };
+    const session = entry as { happySessionId?: unknown; tag?: unknown; isAlive?: unknown; origin?: unknown; restartingSince?: unknown; phase?: unknown; generation?: unknown; observedGeneration?: unknown; observedAt?: unknown; reason?: unknown };
     const row: DirectorySession = { isAlive: session.isAlive === true };
     if (typeof session.happySessionId === 'string') row.happySessionId = session.happySessionId;
     if (typeof session.tag === 'string') row.tag = session.tag;
     if (row.happySessionId === undefined && row.tag === undefined) return null;
     if (session.origin === 'daemon' || session.origin === 'server') row.origin = session.origin;
     if (typeof session.restartingSince === 'number') row.restartingSince = session.restartingSince;
+    if (typeof session.phase === 'string') row.phase = session.phase;
+    for (const key of ['generation', 'observedGeneration', 'observedAt'] as const) {
+        const value = session[key];
+        if (typeof value === 'number' && Number.isFinite(value)) row[key] = value;
+    }
+    if (typeof session.reason === 'string') row.reason = session.reason;
     return row;
 }
 

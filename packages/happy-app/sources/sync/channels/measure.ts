@@ -39,7 +39,7 @@ export type ChannelState = {
      */
     candidateHealth: Record<string, CandidateHealth>;
     relayEndpoints: Record<string, { baseUrl?: string; source?: string } | undefined>;
-    relayDirectory: Record<string, { at: number; sessions: { happySessionId: string; isAlive: boolean; origin?: 'daemon' | 'server' }[] }>;
+    relayDirectory: Record<string, { at: number; sessions: { happySessionId?: string; tag?: string; isAlive: boolean; origin?: 'daemon' | 'server' }[] }>;
     relayHubConnected: boolean;
 };
 

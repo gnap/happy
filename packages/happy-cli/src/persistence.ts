@@ -306,8 +306,42 @@ export interface PersistedSession {
   serverAgentState?: { version: number; value: string | null } | null;
   /** The server's wrapped session key, already addressed to the account's box key. */
   dataEncryptionKey?: string | null;
+  /**
+   * The spec revision this record describes.
+   *
+   * Absent on rows written by earlier builds; absent means 0, which reads as "settled". It is
+   * bumped when this machine accepts a new desired state (a restart), and the status projection
+   * reports it as `observedGeneration` only once the new process has converged.
+   */
+  generation?: number;
   createdAt?: number;
   updatedAt?: number;
+}
+
+/**
+ * A spawn this machine has accepted but has not seen register.
+ *
+ * Written before the process is launched, which is what makes a session visible during the two
+ * windows where it used to vanish: after the request was accepted but before spawn, and after the
+ * process exists but before the server has named it. Keyed by tag because that is the only name
+ * the session has for the whole of that time — the id arrives with the webhook.
+ *
+ * The spec is a statement of intent, not a claim about the process. The roster projects it as
+ * `Scheduling`, which is deliberately not "running": nothing here proves a process exists, and a
+ * spec that outlived its spawn must be able to go away without pretending a session did.
+ */
+export interface PendingSpawnSpec {
+  /** The lineage tag, minted by the daemon so the session is nameable before it reports. */
+  tag: string;
+  directory: string;
+  agent: string;
+  /** The spec revision this spawn realizes. */
+  generation: number;
+  requestedAt: number;
+  /** `restart` means it replaces the process of `replacesSessionId`. */
+  reason: 'create' | 'restart';
+  replacesSessionId?: string;
+  requiresDesktop?: boolean;
 }
 
 /**
@@ -335,6 +369,14 @@ export interface DaemonLocallyPersistedState {
   sessions?: Record<string, PersistedSession>;
   /** Session IDs that have been explicitly archived and must never respawn. */
   archivedSessionIds?: Record<string, number>;
+  /**
+   * Spawns accepted by this machine that have not registered yet, keyed by tag.
+   *
+   * Persisted so a daemon restart does not erase a session that was mid-spawn; restored with a
+   * short grace and pruned once that passes, because a spec with no process behind it is a row
+   * nobody can act on.
+   */
+  pendingSpawns?: Record<string, PendingSpawnSpec>;
   // ── legacy fields — read for backward compat during migration, no longer written ──
   /** @deprecated Migrated into `sessions` on load. */
   lastSessionTagByDirectory?: Record<string, string>;

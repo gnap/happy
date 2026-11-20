@@ -757,6 +757,7 @@ export class ApiSessionClient extends EventEmitter {
         this.socket.on('disconnect', (reason) => {
             logger.debug('[API] Socket disconnected:', reason);
             this.markWsDisconnected();
+            this.destroyFailedTransport();
             this.forceHttpOutbound('socket_disconnect');
             this.rpcHandlerManager.onSocketDisconnect();
             if (!this.closing) this.startFallbackPoll();
@@ -766,6 +767,12 @@ export class ApiSessionClient extends EventEmitter {
             const msg = error?.message ?? String(error);
             logger.debug('[API] Socket connection error:', msg);
             this.markWsDisconnected();
+            // engine.io closes a failed transport, and `ws.close()` only sends a FIN. Against a
+            // server that has stopped answering, that leaves the socket in FIN-WAIT-1 holding its
+            // local port until the kernel gives up retransmitting — and an infinite reconnect loop
+            // then eats the ephemeral range (measured on one host: ~11k sockets from a single
+            // session). `terminate()` destroys it now.
+            this.destroyFailedTransport();
             this.forceHttpOutbound('socket_connect_error');
             if (msg && msg.length < 200) {
                 logger.debug('[API] If running remotely (SSH/devcontainer), ensure outbound HTTPS/WSS to server is allowed. Using HTTP fallback for messages.');
@@ -1388,6 +1395,32 @@ export class ApiSessionClient extends EventEmitter {
     private markWsDisconnected() {
         this.accumulateWsUptimeSample();
         this.wsUptimeStartedAt = null;
+    }
+
+    /**
+     * Destroy the TCP socket behind a connection attempt that has already failed.
+     *
+     * engine.io closes its transport on error and timeout, but that is `ws.close()` — a FIN, not a
+     * teardown. A server that stopped answering never ACKs it, so the socket waits in FIN-WAIT-1
+     * holding its local port until the kernel gives up on the retransmits; with an infinite
+     * reconnect loop on a long-lived session those accumulate into the ephemeral range (one host
+     * had ~22k established plus ~5.5k FIN-WAIT-1 per server address, which then made every new
+     * connection — the daemon's own startup request included — fail with EADDRNOTAVAIL).
+     * `terminate()` sends an RST and frees the port immediately. It is a no-op when the socket is
+     * already gone or the implementation has no terminate (a browser WebSocket).
+     */
+    private destroyFailedTransport() {
+        const transport = (this.socket as unknown as {
+            io?: { engine?: { transport?: { ws?: { terminate?: () => void } } } };
+        })?.io?.engine?.transport;
+        const ws = transport?.ws;
+        if (ws && typeof ws.terminate === 'function') {
+            try {
+                ws.terminate();
+            } catch {
+                // Already destroyed, or a socket that never opened. Nothing to do.
+            }
+        }
     }
 
     private tryPreferWsOutbound(reason: string) {

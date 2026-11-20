@@ -74,6 +74,19 @@ describe('replayToServer', () => {
         expect(remove).not.toHaveBeenCalled();
     });
 
+    it('carries a deletion addressed only by session id', async () => {
+        // The row may have been pruned locally, or only ever lived on the server. The id is what
+        // the server's DELETE addresses, so the tag is not required for the fact to land.
+        const remove = vi.fn(async (_sessionId: string) => true);
+        const at = await replayToServer(
+            [{ rev: 1, at: 0, op: 'deleted', sessionId: 'cmt123' }],
+            0,
+            { remove, advance: () => undefined, ...noReachable },
+        );
+        expect(remove).toHaveBeenCalledWith('cmt123');
+        expect(at).toBe(1);
+    });
+
     it('writes where the machine can be reached, because the server is one of the readers', async () => {
         // The server is a channel like any other: the address arrives here replayed rather than
         // pushed inline, so a machine whose server connection is down is not a machine whose address

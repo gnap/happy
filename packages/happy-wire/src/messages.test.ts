@@ -70,6 +70,51 @@ describe('shared wire message schemas', () => {
     });
   });
 
+  it('carries the machine projection beside the restart timestamp', () => {
+    // Additive over `restartingAt`: a build that predates these fields still parses the frame,
+    // and one that knows them draws the phase instead of reconstructing it from a timestamp.
+    const parsed = ApiUpdateSessionStateSchema.safeParse({
+      t: 'update-session',
+      id: 'session-1',
+      restartingAt: 1700000000000,
+      phase: 'Restarting',
+      generation: 4,
+      observedGeneration: 3,
+      observedAt: 1700000000001,
+      reason: 'already-restarting',
+    });
+
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data).toMatchObject({
+      phase: 'Restarting',
+      generation: 4,
+      observedGeneration: 3,
+      observedAt: 1700000000001,
+      reason: 'already-restarting',
+    });
+  });
+
+  it('keeps a phase this build does not know, rather than rejecting the frame', () => {
+    // The enum is the machine's to extend. Dropping the whole update because a newer daemon named
+    // a phase this build has not heard of would lose the fields it does understand.
+    const parsed = ApiUpdateSessionStateSchema.safeParse({
+      t: 'update-session',
+      id: 'session-1',
+      phase: 'Draining',
+      generation: 5,
+    });
+
+    expect(parsed.success && parsed.data.phase).toBe('Draining');
+  });
+
+  it('refuses a negative generation', () => {
+    expect(ApiUpdateSessionStateSchema.safeParse({
+      t: 'update-session',
+      id: 'session-1',
+      generation: -1,
+    }).success).toBe(false);
+  });
+
   it('accepts a null restartingAt, which is how a restart is called off', () => {
     // Not the same as omitting it: absent means "this update says nothing about restarting", while
     // null means "it is not restarting any more" — the clear a reader waits for.

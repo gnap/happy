@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import * as tmp from 'tmp';
 
 import { ApiClient } from '@/api/api';
-import { TrackedSession } from './types';
+import { TrackedSession, type ArchiveSessionResult, type RestartSessionResult } from './types';
 import { MachineMetadata, DaemonState, Metadata } from '@/api/types';
 import { SpawnSessionOptions, SpawnSessionResult } from '@/modules/common/registerCommonHandlers';
 import { appendResumeAfterSeqCliArgs } from '@/utils/resumeAfterSeq';
@@ -15,13 +15,13 @@ import { configuration } from '@/configuration';
 import { startCaffeinate, stopCaffeinate } from '@/utils/caffeinate';
 import { getEnvironmentInfo } from '@/ui/doctor';
 import { getHappyCliLaunchSpec, spawnHappyCLI } from '@/utils/spawnHappyCLI';
-import { writeDaemonState, DaemonLocallyPersistedState, readDaemonState, acquireDaemonLock, releaseDaemonLock, readSettings, validateProfileForAgent, getProfileEnvironmentVariables, SandboxConfigSchema, PersistedSession, migrateLegacySessionState } from '@/persistence';
+import { writeDaemonState, DaemonLocallyPersistedState, readDaemonState, acquireDaemonLock, releaseDaemonLock, readSettings, validateProfileForAgent, getProfileEnvironmentVariables, SandboxConfigSchema, PersistedSession, PendingSpawnSpec, migrateLegacySessionState } from '@/persistence';
 
 import { cleanupDaemonState, checkIfDaemonRunningAndCleanupStaleState } from './controlClient';
 import { startDaemonControlServer } from './controlServer';
 import { startUnixSocketServer } from './unixSocketServer';
 import { readFileSync, writeFileSync } from 'fs';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { basename, dirname, extname, join, resolve } from 'path';
 import { projectPath } from '@/projectPath';
 import { getTmuxUtilities, isTmuxAvailable, parseTmuxSessionIdentifier, formatTmuxSessionIdentifier } from '@/utils/tmux';
@@ -31,7 +31,8 @@ import { fetchSessionProfileMeta, PROFILE_META_DEADLINE_MS } from './fetchSessio
 import { delay } from '@/utils/time';
 import { startLanServer, accountFingerprintOf, type LanServerHandle, type LanSessionSummary } from './lanServer';
 import { SidecarHub } from './sidecarHub';
-import { RESTARTING_TTL_MS, RESTART_REPEAT_WINDOW_MS, expiredRestarting } from './restartTracker';
+import { RESTARTING_TTL_MS, expiredRestarting } from './restartTracker';
+import { restartDecision } from './restartDecision';
 import { LifecycleLog } from './lifecycleLog';
 import { replayToServer } from './lifecycleServerReplay';
 import { ACCOUNT_PROOF_WINDOW_MS } from './accountProof';
@@ -40,6 +41,7 @@ import type { UpdateSessionBody } from '@slopus/happy-wire';
 import { versionStateOf } from './versionState';
 import { sessionTagOf } from './sessionTag';
 import { mergeSessionRoster } from './sessionRoster';
+import { sessionStatusOf, type SessionPhase, type SessionStatusFacts } from './sessionStatus';
 import { BUILD_VERSION } from '../version';
 import type { ApiMachineClient } from '@/api/apiMachine';
 import { readSessionKey } from '@/api/sessionKeyPersistence';
@@ -349,6 +351,86 @@ export async function startDaemon(): Promise<void> {
     /** Session IDs that have been explicitly archived and must never respawn. */
     const archivedSessionIds: Record<string, number> = {};
 
+    /**
+     * Spawns this machine has accepted and not yet seen register, keyed by tag.
+     *
+     * This is the spec side of the session list: desired state, written before the process is
+     * launched and removed when it registers or fails to. It is what lets a session be visible
+     * during the windows where it used to vanish — between "the request was accepted" and "a
+     * process exists", and between that and "the server has named it".
+     */
+    const pendingSpawns = new Map<string, PendingSpawnSpec>();
+    const pendingSpawnTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+    /**
+     * How long a spec may exist without registering. A process that has not reported by the
+     * webhook deadline will not report at all, and the extra margin only covers a slow report
+     * arriving just as the deadline passes.
+     */
+    const PENDING_SPAWN_GRACE_MS = SESSION_WEBHOOK_TIMEOUT_MS + 30_000;
+
+    const forgetPendingSpawn = (tag: string): boolean => {
+      if (!pendingSpawns.delete(tag)) {
+        return false;
+      }
+      const timer = pendingSpawnTimers.get(tag);
+      if (timer) {
+        clearTimeout(timer);
+      }
+      pendingSpawnTimers.delete(tag);
+      persistNow();
+      return true;
+    };
+
+    const armPendingSpawnExpiry = (tag: string, delayMs: number): void => {
+      const timer = setTimeout(() => {
+        if (forgetPendingSpawn(tag)) {
+          logger.debug(`[DAEMON RUN] Pending spawn ${tag.slice(0, 8)}… expired without registering`);
+        }
+      }, Math.max(0, delayMs));
+      timer.unref?.();
+      pendingSpawnTimers.set(tag, timer);
+    };
+
+    /** Record the desired state before the process is launched. */
+    const expectSpawn = (spec: PendingSpawnSpec): void => {
+      pendingSpawns.set(spec.tag, spec);
+      armPendingSpawnExpiry(spec.tag, PENDING_SPAWN_GRACE_MS);
+      persistNow();
+    };
+
+    /**
+     * Consume the spec once its process has registered.
+     *
+     * The spec is returned rather than merely deleted because the registration is the moment its
+     * generation becomes a fact about a real process.
+     */
+    const takePendingSpawn = (tag: string | undefined): PendingSpawnSpec | undefined => {
+      if (!tag) {
+        return undefined;
+      }
+      const spec = pendingSpawns.get(tag);
+      if (!spec) {
+        return undefined;
+      }
+      forgetPendingSpawn(tag);
+      return spec;
+    };
+
+    /**
+     * Remove any spec describing this session, by either of its names.
+     *
+     * Called when the desired state becomes "absent": a spec that outlived its tombstone would
+     * put a Scheduling row back in the list for a session the user just deleted.
+     */
+    const forgetPendingSpawnsFor = (sessionId: string, tag?: string): void => {
+      for (const [specTag, spec] of pendingSpawns) {
+        if (specTag === tag || spec.replacesSessionId === sessionId) {
+          forgetPendingSpawn(specTag);
+        }
+      }
+    };
+
     // Helper functions
     const getCurrentChildren = (): TrackedSession[] => [
       ...Array.from(pidToTrackedSession.values()),
@@ -559,6 +641,23 @@ export async function startDaemon(): Promise<void> {
       stoppedSessions.delete(sessionId);
     };
 
+    /**
+     * Commit a deletion, then project it into the snapshot.
+     *
+     * The append is the transaction: once it returns, every reader can replay the fact, and a
+     * crash before the snapshot is written costs nothing — the next start rebuilds the tombstone
+     * from the log. Repeating it is suppressed, because every tombstone in this map came from this
+     * function (or was backfilled from the log at startup), so a second entry would only grow the
+     * file.
+     */
+    const commitArchive = (sessionId: string, tag?: string): void => {
+      if (archivedSessionIds[sessionId] !== undefined) {
+        return;
+      }
+      lifecycleLog.record({ op: 'deleted', sessionId, ...(tag ? { tag } : {}) });
+      markSessionArchived(sessionId);
+    };
+
     /** Derive human-readable exit reason from code/signal when no webhook reason was given. */
     const resolveExitReason = (code: number | null, signal: string | null | undefined): string => {
       if (signal) {
@@ -575,6 +674,11 @@ export async function startDaemon(): Promise<void> {
     const onChildExited = (pid: number, code?: number | null, signal?: string | null) => {
       const session = pidToTrackedSession.get(pid);
       if (session) {
+        // A spawn that dies before registering leaves no session behind, so its spec goes with
+        // the process. A registered session's spec was consumed when the webhook arrived.
+        if (session.sessionTag) {
+          forgetPendingSpawn(session.sessionTag);
+        }
         if (session.exitCode === undefined && session.exitSignal === undefined) {
           session.exitCode = code ?? null;
           session.exitSignal = signal ?? null;
@@ -595,8 +699,9 @@ export async function startDaemon(): Promise<void> {
           // App-initiated archive (killSession RPC): do not keep in list
           logger.debug(`[DAEMON RUN] Session ${session.happySessionId} (PID ${pid}) archived by app, removing from list`);
           if (session.happySessionId) {
-            markSessionArchived(session.happySessionId);
+            commitArchive(session.happySessionId, session.sessionTag);
             persistNow();
+            announceLifecycle();
           }
         } else {
           // Process exited on its own (pause / signal / crash): keep visible until user archives
@@ -695,8 +800,9 @@ export async function startDaemon(): Promise<void> {
         if (archive) session.pendingArchive = true;
         logger.debug(`[DAEMON RUN] Session ending (self-reported): ${sessionId} PID ${pid} reason="${reason}" archive=${archive ?? false}`);
         if (archive) {
-          markSessionArchived(sessionId);
+          commitArchive(sessionId, session.sessionTag ?? sessions[sessionId]?.sessionTag);
           persistNow();
+          announceLifecycle();
         }
       } else {
         // Process already evicted — still record for history if it matches a recently-exited entry
@@ -707,8 +813,9 @@ export async function startDaemon(): Promise<void> {
           logger.debug(`[DAEMON RUN] Session ending (self-reported, already evicted): ${sessionId} PID ${pid} reason="${reason}"`);;
         }
         if (archive) {
-          markSessionArchived(sessionId);
+          commitArchive(sessionId, recent?.sessionTag ?? sessions[sessionId]?.sessionTag);
           persistNow();
+          announceLifecycle();
         }
       }
     };
@@ -784,6 +891,12 @@ export async function startDaemon(): Promise<void> {
         if (!existingSession.agent && sessionMetadata.flavor) existingSession.agent = sessionMetadata.flavor as TrackedSession['agent'];
       }
       const s = pidToTrackedSession.get(pid);
+      // The spec becomes a fact here: the process that realizes it has registered, so its
+      // generation is now the record's, and anything still listing the spawn as pending stops.
+      const spawnSpec = takePendingSpawn(s?.sessionTag);
+      if (s && spawnSpec && s.generation === undefined) {
+        s.generation = spawnSpec.generation;
+      }
       if (s?.happySessionId) {
         // The first moment this machine knows *which* session it started: the tag comes from the
         // child, and until it does there is nothing to write down that anyone could match. Written
@@ -823,6 +936,7 @@ export async function startDaemon(): Promise<void> {
           status: 'running',
           lastSeq: existing?.lastSeq ?? -1,
           lastHeartbeat: Date.now(),
+          generation: s.generation ?? existing?.generation,
           // A row this machine runs is this machine's own answer, whatever it was before: its
           // liveness is no longer the server's word.
           origin: 'daemon',
@@ -845,6 +959,8 @@ export async function startDaemon(): Promise<void> {
 
       const { directory, sessionId, machineId, approvedNewDirectoryCreation = true, resumeSessionTag: explicitResumeSessionTag } = options;
       let directoryCreated = false;
+      /** The tag of a spec this call recorded, so a failure after that point can take it back. */
+      let pendingTag: string | undefined;
 
       try {
         await fs.access(directory);
@@ -957,10 +1073,15 @@ export async function startDaemon(): Promise<void> {
         extraEnv = expandEnvironmentVariables(extraEnv, process.env);
         logger.debug(`[DAEMON RUN] After variable expansion: ${Object.keys(extraEnv).join(', ')}`);
 
-        const resumeSessionTag =
+        // Minted here rather than in the child, so the session has a name before its process
+        // exists. The row can then be listed while it starts instead of appearing only once the
+        // webhook arrives — and the child treats a supplied tag exactly like one it minted.
+        const sessionTag =
           explicitResumeSessionTag?.trim() ||
-          (sessionId ? sessions[sessionId]?.sessionTag : undefined);
+          (sessionId ? sessions[sessionId]?.sessionTag : undefined) ||
+          randomUUID();
         const shouldPassResumeSessionTag =
+          options.agent === undefined ||
           options.agent === 'cursor' ||
           options.agent === 'cursor-acp' ||
           options.agent === 'acp-cursor' ||
@@ -1012,6 +1133,22 @@ export async function startDaemon(): Promise<void> {
           }
         }
 
+        // The desired state goes on disk before the process is launched. Everything after this
+        // point is an attempt to realize it; if the attempt fails, the spec is taken back, and
+        // while it exists the roster reports the session as `Scheduling` rather than as absent.
+        const spawnGeneration = options.generation ?? 0;
+        expectSpawn({
+          tag: sessionTag,
+          directory,
+          agent: options.agent ?? 'claude',
+          generation: spawnGeneration,
+          requestedAt: Date.now(),
+          reason: options.spawnReason ?? (sessionId ? 'restart' : 'create'),
+          ...(options.replacesSessionId ? { replacesSessionId: options.replacesSessionId } : {}),
+          ...(options.requiresDesktop ? { requiresDesktop: true } : {}),
+        });
+        pendingTag = sessionTag;
+
         if (useTmux && tmuxSessionName !== undefined) {
           if (sessionScopeMode.enabled) {
             logger.info(`[DAEMON RUN] tmux session requested; it will not be placed in a systemd scope (slice=${sessionScopeMode.slice})`);
@@ -1037,8 +1174,8 @@ export async function startDaemon(): Promise<void> {
             '--happy-starting-mode', 'remote',
             '--started-by', 'daemon',
           ];
-          if (shouldPassResumeSessionTag && resumeSessionTag) {
-            tmuxCommandArgs.push('--resume-session-tag', resumeSessionTag);
+          if (shouldPassResumeSessionTag) {
+            tmuxCommandArgs.push('--resume-session-tag', sessionTag);
           }
           appendResumeAfterSeqCliArgs(tmuxCommandArgs, options.resumeAfterSeq);
           if (typeof options.resumeAfterSeq === 'number' && options.resumeAfterSeq >= 0) {
@@ -1087,8 +1224,9 @@ export async function startDaemon(): Promise<void> {
               tmuxSessionId: tmuxResult.sessionId,
               directoryCreated,
               directory,
-              sessionTag: resumeSessionTag,
+              sessionTag,
               agent: options.agent ?? 'cursor',
+              generation: spawnGeneration,
               message: directoryCreated
                 ? `The path '${directory}' did not exist. We created a new folder and spawned a new session in tmux session '${tmuxSessionName}'. Use 'tmux attach -t ${tmuxSessionName}' to view the session.`
                 : `Spawned new session in tmux session '${tmuxSessionName}'. Use 'tmux attach -t ${tmuxSessionName}' to view the session.`
@@ -1105,6 +1243,8 @@ export async function startDaemon(): Promise<void> {
               const timeout = setTimeout(() => {
                 pidToAwaiter.delete(tmuxResult.pid!);
                 logger.debug(`[DAEMON RUN] Session webhook timeout for PID ${tmuxResult.pid} (tmux)`);
+                // Nothing registered, so the desired state was not realized.
+                forgetPendingSpawn(sessionTag);
                 resolve({
                   type: 'error',
                   errorMessage: `Session webhook timeout for PID ${tmuxResult.pid} (tmux)`
@@ -1117,9 +1257,18 @@ export async function startDaemon(): Promise<void> {
                 logger.debug(`[DAEMON RUN] Session ${completedSession.happySessionId} fully spawned with webhook (tmux)`);
                 resolve({
                   type: 'success',
-                  sessionId: completedSession.happySessionId!
+                  sessionId: completedSession.happySessionId!,
+                  tag: sessionTag,
+                  generation: completedSession.generation ?? spawnGeneration,
                 });
               });
+
+              if (options.expectAccepted) {
+                // The process exists; registration is now a fact this machine will record, not
+                // something the caller has to wait through. The timeout above still runs, so a
+                // session that never registers loses its spec either way.
+                resolve({ type: 'accepted', ref: sessionTag, tag: sessionTag, generation: spawnGeneration, phase: 'Starting' });
+              }
             });
           } else {
             logger.debug(`[DAEMON RUN] Failed to spawn in tmux: ${tmuxResult.error}, falling back to regular spawning`);
@@ -1152,6 +1301,7 @@ export async function startDaemon(): Promise<void> {
               agentArgs = ['acp', 'cursor'];
               break;
             default:
+              forgetPendingSpawn(sessionTag);
               return {
                 type: 'error',
                 errorMessage: `Unsupported agent type: '${options.agent}'. Please update your CLI to the latest version.`
@@ -1162,8 +1312,8 @@ export async function startDaemon(): Promise<void> {
             '--happy-starting-mode', 'remote',
             '--started-by', 'daemon'
           ];
-          if (shouldPassResumeSessionTag && resumeSessionTag) {
-            args.push('--resume-session-tag', resumeSessionTag);
+          if (shouldPassResumeSessionTag) {
+            args.push('--resume-session-tag', sessionTag);
           }
           appendResumeAfterSeqCliArgs(args, options.resumeAfterSeq);
           if (typeof options.resumeAfterSeq === 'number' && options.resumeAfterSeq >= 0) {
@@ -1205,6 +1355,7 @@ export async function startDaemon(): Promise<void> {
           let sidecarPid: number | undefined;
           if (options.requiresDesktop) {
             if (!sidecarHub?.usable) {
+              forgetPendingSpawn(sessionTag);
               return {
                 type: 'error',
                 errorMessage: 'This session needs a desktop session (the login keychain), but no user is logged in on this machine or the sidecar is not running.',
@@ -1219,6 +1370,7 @@ export async function startDaemon(): Promise<void> {
               argv: [spec.executable, ...spec.argsPrefix, ...args],
             });
             if ('error' in spawned) {
+              forgetPendingSpawn(sessionTag);
               return { type: 'error', errorMessage: spawned.error };
             }
             sidecarPid = spawned.pid;
@@ -1263,6 +1415,7 @@ export async function startDaemon(): Promise<void> {
           const spawnedPid = sidecarPid ?? happyProcess?.pid;
           if (!spawnedPid) {
             logger.debug('[DAEMON RUN] Failed to spawn process - no PID returned');
+            forgetPendingSpawn(sessionTag);
             return {
               type: 'error',
               errorMessage: 'Failed to spawn Happy process - no PID returned'
@@ -1278,10 +1431,11 @@ export async function startDaemon(): Promise<void> {
             ...(happyProcess ? { childProcess: happyProcess } : {}),
             directoryCreated,
             directory,
-            sessionTag: resumeSessionTag,
+            sessionTag,
             agent: options.agent ?? 'cursor',
             scopeUnit,
             spawnTime: Date.now(),
+            generation: spawnGeneration,
             message: directoryCreated ? `The path '${directory}' did not exist. We created a new folder and spawned a new session there.` : undefined
           };
 
@@ -1349,6 +1503,9 @@ export async function startDaemon(): Promise<void> {
             // Set timeout for webhook
             timeout = setTimeout(() => {
               logger.debug(`[DAEMON RUN] Session webhook timeout for PID ${spawnedPid}`);
+              // Nothing registered, so the desired state was not realized. The exit path below
+              // does the same; whichever observes the failure first takes the spec back.
+              forgetPendingSpawn(sessionTag);
               settle({
                 type: 'error',
                 errorMessage: `Session webhook timeout for PID ${spawnedPid}`
@@ -1363,13 +1520,23 @@ export async function startDaemon(): Promise<void> {
               logger.debug(`[DAEMON RUN] Session ${completedSession.happySessionId} fully spawned with webhook`);
               settle({
                 type: 'success',
-                sessionId: completedSession.happySessionId!
+                sessionId: completedSession.happySessionId!,
+                tag: sessionTag,
+                generation: completedSession.generation ?? spawnGeneration,
               });
             });
+
+            if (options.expectAccepted) {
+              // A process exists, which is all "accepted" promises. Registration still runs its
+              // course above; the timeout and exit handler remain armed to take the spec back if
+              // it never does.
+              resolve({ type: 'accepted', ref: sessionTag, tag: sessionTag, generation: spawnGeneration, phase: 'Starting' });
+            }
           });
         }
 
         // This should never be reached, but TypeScript requires a return statement
+        if (pendingTag) forgetPendingSpawn(pendingTag);
         return {
           type: 'error',
           errorMessage: 'Unexpected error in session spawning'
@@ -1377,6 +1544,7 @@ export async function startDaemon(): Promise<void> {
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
         logger.debug('[DAEMON RUN] Failed to spawn session:', error);
+        if (pendingTag) forgetPendingSpawn(pendingTag);
         return {
           type: 'error',
           errorMessage: `Failed to spawn session: ${errorMessage}`
@@ -1440,27 +1608,28 @@ export async function startDaemon(): Promise<void> {
 
     // Handle child process exit
 
-    /** Remove a stopped session from the visible list (explicit user action). */
-    const archiveSession = (sessionId: string): boolean => {
+    /**
+     * Remove a session from this machine's list (explicit user action).
+     *
+     * The tombstone is written for *every* id, including one this machine has no row for. An
+     * unknown id is not a failure: the App is asking for a deletion, the server addresses sessions
+     * by id, and the replay can carry the delete without this machine ever having held the row.
+     * Refusing here is what made the App's delete look applied while the server kept serving the
+     * session.
+     */
+    const archiveSession = (sessionId: string): ArchiveSessionResult => {
+      const stored = sessions[sessionId];
+      const tracked = stoppedSessions.get(sessionId)
+        ?? [...pidToTrackedSession.values()].find((session) => session.happySessionId === sessionId);
+      const known = tracked !== undefined || stored !== undefined;
+      const tag = tracked?.sessionTag || stored?.sessionTag || undefined;
+      // Desired state is now absent, so any spawn spec for the session goes before the tombstone
+      // is written — a spec that outlived it would put a Scheduling row back for a session the
+      // user just deleted.
+      forgetPendingSpawnsFor(sessionId, tag);
       // Written first: an archived session is a fact every reader has to be able to replay, and the
       // tracking below is what stops being able to tell them.
-      //
-      // A session the server named but this machine never ran is in the durable catalog with
-      // `origin: 'server'`; it has no stopped process and no tracked PID, and deleting it still
-      // has to produce the log entry that the server replay consumes.
-      const stored = sessions[sessionId];
-      const archived = stoppedSessions.get(sessionId)
-        ?? [...pidToTrackedSession.values()].find((session) => session.happySessionId === sessionId)
-        ?? stored;
-      if (!archived) {
-        return false;
-      }
-      const tag = archived.sessionTag || stored?.sessionTag || '';
-      // An empty tag is allowed here: `replayToServer` addresses the deletion by session id, and
-      // the tag is only how older readers name a row. Recorded even when it is empty, because the
-      // delete is the transaction.
-      lifecycleLog.record({ op: 'deleted', tag, sessionId });
-      announceLifecycle();
+      commitArchive(sessionId, tag);
       let removed = stoppedSessions.delete(sessionId);
       if (removed) {
         logger.debug(`[DAEMON RUN] Archived session ${sessionId}`);
@@ -1474,11 +1643,9 @@ export async function startDaemon(): Promise<void> {
           break;
         }
       }
-      // The tombstone is also what keeps an imported server-only row out of the roster until the
-      // server's copy is gone; it is a state fact, not just a side effect of a live process.
-      markSessionArchived(sessionId);
+      announceLifecycle();
       persistNow();
-      return true;
+      return { applied: true, known, ...(tag ? { tag } : {}) };
     };
 
     /**
@@ -1488,7 +1655,7 @@ export async function startDaemon(): Promise<void> {
      * different road. Archiving alone would remove the row while leaving the process running, and
      * a session whose row is gone but whose process is not is the orphan this exists to prevent.
      */
-    const deleteSessionFromApp = (sessionId: string): boolean => {
+    const deleteSessionFromApp = (sessionId: string): ArchiveSessionResult => {
       stopSession(sessionId);
       return archiveSession(sessionId);
     };
@@ -1530,20 +1697,69 @@ export async function startDaemon(): Promise<void> {
     /** One replay at a time: two walks over the same entries would send the same DELETE twice. */
     let replayingLifecycle = false;
     /**
+     * A fact arrived while a walk was in flight.
+     *
+     * The walk reads the log once at its start; an append after that read is not in the entries it
+     * is carrying, so the walk can finish "at the end" while the log has already moved. This is how
+     * that fact gets its own walk instead of waiting for the heartbeat.
+     */
+    let lifecycleReplayRequested = false;
+    /** One pending retry, so a burst of lifecycle events does not become a burst of walks. */
+    let lifecycleReplayTimer: ReturnType<typeof setTimeout> | null = null;
+    /** Walks that made no progress in a row. Any progress resets it. */
+    let lifecycleReplayFailures = 0;
+    /**
+     * The wait before each retry, before the cap.
+     *
+     * The first is short because a failed deletion is a user's action and the usual cause is a
+     * blip; the tail keeps a machine that cannot reach the server from asking more often than
+     * every half hour. The heartbeat still calls the walk, so a timer lost to suspension is not a
+     * channel that never tries again.
+     */
+    const LIFECYCLE_REPLAY_DELAYS_MS = [2_000, 5_000, 15_000, 60_000, 5 * 60_000, 15 * 60_000, 30 * 60_000];
+
+    const scheduleLifecycleReplay = (delayMs: number): void => {
+      if (lifecycleReplayTimer) {
+        clearTimeout(lifecycleReplayTimer);
+      }
+      // Spread the machines that are retrying the same server rather than letting them pulse in
+      // step. The delay itself is the useful part; the jitter only keeps them out of lockstep.
+      const wait = Math.round(delayMs * (0.8 + Math.random() * 0.4));
+      lifecycleReplayTimer = setTimeout(() => {
+        lifecycleReplayTimer = null;
+        void replayLifecycleToServer();
+      }, wait);
+      lifecycleReplayTimer.unref?.();
+    };
+
+    /**
      * Tells the server about the endings in this machine's log.
      *
      * The server is the slow channel — on a machine whose connection takes a minute to come up,
      * doing this inline would mean a deletion that lands only when the network cooperates — so it
      * has a cursor of its own and this walks whatever is past it, whenever what is past it changes.
+     *
+     * A walk that lands nothing is retried on its own ladder, not left to the next lifecycle event.
+     * The cursor is the only thing that moves a deletion forward, and nothing in the machine's log
+     * changes when the network does.
      */
     const replayLifecycleToServer = async (): Promise<void> => {
       if (replayingLifecycle) {
+        lifecycleReplayRequested = true;
         return;
       }
       replayingLifecycle = true;
+      lifecycleReplayRequested = false;
+      let from = 0;
+      let to = 0;
+      let revision = 0;
+      let readOk = false;
       try {
-        const from = readServerCursor();
-        const to = await replayToServer(lifecycleLog.read(), from, {
+        from = readServerCursor();
+        const entries = lifecycleLog.read();
+        revision = entries.length === 0 ? 0 : entries[entries.length - 1].rev;
+        readOk = true;
+        to = await replayToServer(entries, from, {
           // Where this machine says it can be reached. The server stores the blob without decoding
           // it, and a client reads it while it is here — a projection of the log entry, not the
           // record, which is why a write that does not land simply leaves the cursor where it is.
@@ -1588,9 +1804,50 @@ export async function startDaemon(): Promise<void> {
         if (to !== from) {
           logger.debug(`[DAEMON RUN] Lifecycle replay to server: rev ${from} → ${to}`);
         }
+      } catch (error) {
+        // A walk that throws landed nothing past `from`; treated like any other refusal instead of
+        // escaping as an unhandled rejection from `announceLifecycle`'s fire-and-forget call.
+        logger.debug('[DAEMON RUN] Lifecycle replay: walk failed', { error: String(error) });
       } finally {
         replayingLifecycle = false;
       }
+
+      const requestedAgain = lifecycleReplayRequested;
+      lifecycleReplayRequested = false;
+
+      if (!readOk) {
+        const delay = LIFECYCLE_REPLAY_DELAYS_MS[Math.min(lifecycleReplayFailures, LIFECYCLE_REPLAY_DELAYS_MS.length - 1)];
+        lifecycleReplayFailures += 1;
+        logger.debug(`[DAEMON RUN] Lifecycle replay: log or cursor unreadable; retry ${lifecycleReplayFailures} in ~${delay}ms`);
+        scheduleLifecycleReplay(delay);
+        return;
+      }
+      if (to >= revision) {
+        lifecycleReplayFailures = 0;
+        if (requestedAgain) {
+          // The log moved after this walk read it. One more pass picks that fact up now rather
+          // than waiting for the heartbeat.
+          scheduleLifecycleReplay(0);
+          return;
+        }
+        // Nothing is waiting. Any timer was armed for a state that no longer exists.
+        if (lifecycleReplayTimer) {
+          clearTimeout(lifecycleReplayTimer);
+          lifecycleReplayTimer = null;
+        }
+        return;
+      }
+      if (to > from) {
+        // The walk landed something and stopped at the next refusal. The ladder is for a channel
+        // that is not moving at all; this one is, so try again soon.
+        lifecycleReplayFailures = 0;
+        scheduleLifecycleReplay(LIFECYCLE_REPLAY_DELAYS_MS[0]);
+        return;
+      }
+      const delay = LIFECYCLE_REPLAY_DELAYS_MS[Math.min(lifecycleReplayFailures, LIFECYCLE_REPLAY_DELAYS_MS.length - 1)];
+      lifecycleReplayFailures += 1;
+      logger.debug(`[DAEMON RUN] Lifecycle replay: rev ${to}/${revision} still pending; retry ${lifecycleReplayFailures} in ~${delay}ms`);
+      scheduleLifecycleReplay(delay);
     };
 
 /** Nonces already spent, so a lifted signature cannot be used a second time. */
@@ -1663,12 +1920,29 @@ export async function startDaemon(): Promise<void> {
      * misses the frame has two other ways to learn the same fact — the session summary it lists,
      * and the snapshot a reader is handed when it connects.
      */
-    const announceRestarting = (sessionId: string, startedAt: number | null): void => {
+    const announceRestarting = (
+      sessionId: string,
+      startedAt: number | null,
+      /**
+       * The projection beside the timestamp, when the caller has one. `restartingAt` alone still
+       * answers the old question ("is it restarting?"); these say where the row stands and at
+       * which generation, so a reader does not have to turn a timestamp back into a phase.
+       */
+      status?: { phase: SessionPhase; generation: number },
+    ): void => {
       logger.debug(`[DAEMON RUN] ${startedAt === null ? 'Restart finished' : 'Restarting'}: ${sessionId}`);
       const body: UpdateSessionBody = {
         t: 'update-session',
         id: sessionId,
         restartingAt: startedAt,
+        ...(status === undefined
+          ? {}
+          : {
+              phase: status.phase,
+              generation: status.generation,
+              observedGeneration: status.generation,
+              observedAt: Date.now(),
+            }),
       };
       lanServer?.broadcast('update', {
         id: `lan-${++lanEventCounter}`,
@@ -1686,44 +1960,189 @@ export async function startDaemon(): Promise<void> {
      * grace they have to guess at. The grace still exists behind it, for a daemon that dies
      * mid-restart and so never gets to say it finished.
      */
-    const restartSession = async (sessionId: string, sandboxConfig?: any, requiresDesktop?: boolean): Promise<{ success: boolean; newSessionId?: string; error?: string }> => {
-      // The idempotent read of a restart this machine already performed or is performing: one
-      // that is in flight, or finished inside the window, answers the repeat as done. Restarting
-      // again here would kill the process the first restart just started — a kill the asker never
-      // meant, because from its side the first one never answered.
-      if (restartingStartedAt.has(sessionId)) {
-        logger.debug(`[DAEMON RUN] Restart already in flight: ${sessionId}`);
-        return { success: true };
-      }
+    const restartSession = async (
+      sessionId: string,
+      sandboxConfig?: any,
+      requiresDesktop?: boolean,
+      /**
+       * The generation the caller observed when it decided to ask. A repeat carrying the same
+       * number is the same restart, not a second one — the answer is the state the first one
+       * reached, and no process is killed twice.
+       */
+      expectGeneration?: number,
+      /**
+       * `accept` answers once the machine has taken responsibility; `wait` blocks for the
+       * outcome. The RPC route uses `accept` because waiting out a webhook exceeds its timeout.
+       */
+      mode: 'wait' | 'accept' = 'wait',
+    ): Promise<RestartSessionResult> => {
+      // The id's generation as any of this machine's records know it. The store is written when a
+      // spawn registers; the tracked process carries it earlier, and the disposed map later.
+      const trackedGeneration = Array.from(pidToTrackedSession.values())
+        .find(session => session.happySessionId === sessionId)?.generation;
+      const currentGeneration = Math.max(
+        sessions[sessionId]?.generation ?? 0,
+        stoppedSessions.get(sessionId)?.generation ?? 0,
+        trackedGeneration ?? 0,
+      );
+
       const finished = lastRestartFinishedAt.get(sessionId);
-      if (finished !== undefined) {
-        if (Date.now() - finished < RESTART_REPEAT_WINDOW_MS) {
-          logger.debug(`[DAEMON RUN] Restart finished ${Date.now() - finished}ms ago, answering as done: ${sessionId}`);
-          return { success: true };
+      const decision = restartDecision({
+        expectGeneration,
+        currentGeneration,
+        inFlight: restartingStartedAt.has(sessionId),
+        ...(finished !== undefined ? { finishedAt: finished } : {}),
+        now: Date.now(),
+      });
+
+      switch (decision.kind) {
+        case 'refuse-ahead': {
+          // The caller knows about a spec this machine does not. Acting would be guessing at what
+          // it wants; saying so is what lets it wait for the machine to catch up or fall back.
+          logger.debug(`[DAEMON RUN] Restart refused: generation ${expectGeneration} ahead of ${currentGeneration} for ${sessionId}`);
+          return {
+            success: false,
+            accepted: false,
+            stage: 'refused',
+            ref: sessionId,
+            generation: currentGeneration,
+            phase: restartingStartedAt.has(sessionId) ? 'Restarting' : 'Stopped',
+            reason: 'generation-ahead',
+            error: `This machine is at generation ${currentGeneration}; the request was made against ${expectGeneration}.`,
+            message: 'Restart refused: the request is ahead of this machine\'s state',
+          };
         }
+        case 'in-flight': {
+          // The idempotent read of a restart this machine is performing: the repeat is the same
+          // ask, and answering it as scheduled is what stops the process being killed twice.
+          logger.debug(`[DAEMON RUN] Restart already in flight: ${sessionId}`);
+          return {
+            success: true,
+            accepted: true,
+            stage: 'scheduled',
+            ref: sessionId,
+            generation: currentGeneration,
+            phase: 'Restarting',
+            reason: 'already-restarting',
+          };
+        }
+        case 'already-applied': {
+          // The generation it was made against has been superseded by the restart it asked for.
+          // Answer the outcome, do not repeat the act.
+          logger.debug(`[DAEMON RUN] Restart already applied at generation ${expectGeneration} (now ${currentGeneration}): ${sessionId}`);
+          return {
+            success: true,
+            accepted: true,
+            stage: 'running',
+            ref: sessionId,
+            generation: currentGeneration,
+            phase: 'Running',
+            reason: 'already-applied',
+          };
+        }
+        case 'already-restarted': {
+          logger.debug(`[DAEMON RUN] Restart finished inside the repeat window, answering as done: ${sessionId}`);
+          return {
+            success: true,
+            accepted: true,
+            stage: 'running',
+            ref: sessionId,
+            generation: currentGeneration,
+            phase: 'Running',
+            reason: 'already-restarted',
+          };
+        }
+        case 'proceed':
+          break;
+      }
+      if (finished !== undefined) {
         lastRestartFinishedAt.delete(sessionId);
       }
+      const nextGeneration = decision.generation;
       const startedAt = Date.now();
       restartingStartedAt.set(sessionId, startedAt);
-      announceRestarting(sessionId, startedAt);
-      try {
-        const result = await performRestart(sessionId, sandboxConfig, requiresDesktop);
-        // Only a restart that happened arms the repeat window: one that failed has nothing for a
-        // repeat ask to be a repeat of, and answering it as done would hide the failure.
-        if (result.success) {
-          lastRestartFinishedAt.set(sessionId, Date.now());
+      announceRestarting(sessionId, startedAt, { phase: 'Restarting', generation: nextGeneration });
+      // What the closing announcement says. A restart that failed never moved the record, so the
+      // phase it reports is the one the id was in before the attempt — not a new generation.
+      let succeeded = false;
+      // The work runs either way; `mode` only decides whether the caller waits for the outcome
+      // or for the acceptance. Starting it before the branch matters: a caller that asked to be
+      // told "accepted" must not be answered before the machine has taken responsibility.
+      const work = (async (): Promise<RestartSessionResult> => {
+        try {
+          const result = await performRestart(sessionId, sandboxConfig, requiresDesktop, nextGeneration);
+          // Only a restart that happened arms the repeat window and moves the record: one that
+          // failed has nothing for a repeat ask to be a repeat of, and a bumped generation would
+          // make the retry look like it had already happened.
+          if (result.success) {
+            succeeded = true;
+            lastRestartFinishedAt.set(sessionId, Date.now());
+            const record = sessions[sessionId];
+            if (record) {
+              sessions[sessionId] = { ...record, generation: nextGeneration };
+              persistNow();
+            }
+          }
+          return result.success
+            ? {
+                success: true,
+                accepted: true,
+                stage: 'running',
+                ref: result.newSessionId ?? sessionId,
+                generation: nextGeneration,
+                phase: 'Running',
+                newSessionId: result.newSessionId,
+              }
+            : {
+                success: false,
+                accepted: true,
+                stage: 'failed',
+                ref: sessionId,
+                generation: currentGeneration,
+                phase: 'Stopped',
+                error: result.error,
+                ...(result.error ? { message: result.error } : {}),
+              };
+        } catch (error) {
+          logger.debug(`[DAEMON RUN] Restart failed for ${sessionId}:`, error);
+          return {
+            success: false,
+            accepted: true,
+            stage: 'failed',
+            ref: sessionId,
+            generation: currentGeneration,
+            error: error instanceof Error ? error.message : String(error),
+            message: 'Restart failed',
+          };
+        } finally {
+          // Called off once there is an answer, whatever the answer was: the new process is up and
+          // has registered, or the restart did not happen. Either way nothing is in flight.
+          restartingStartedAt.delete(sessionId);
+          announceRestarting(sessionId, null, {
+            phase: succeeded ? 'Running' : 'Stopped',
+            generation: succeeded ? nextGeneration : currentGeneration,
+          });
         }
-        return result;
-      } finally {
-        // Called off once there is an answer, whatever the answer was: the new process is up and
-        // has registered, or the restart did not happen. Either way nothing is in flight.
-        restartingStartedAt.delete(sessionId);
-        announceRestarting(sessionId, null);
+      })();
+
+      if (mode === 'accept') {
+        // The caller asked "did you take it", not "how did it end". The work above owns the
+        // outcome and its own logging; nothing here may throw on a caller that already left.
+        void work;
+        return {
+          success: true,
+          accepted: true,
+          stage: 'scheduled',
+          ref: sessionId,
+          generation: nextGeneration,
+          phase: 'Restarting',
+        };
       }
+      return work;
     };
 
     // Kill existing process and spawn a new one reconnecting to the same server session
-    const performRestart = async (sessionId: string, sandboxConfig?: any, requiresDesktop?: boolean): Promise<{ success: boolean; newSessionId?: string; error?: string }> => {
+    const performRestart = async (sessionId: string, sandboxConfig?: any, requiresDesktop?: boolean, generation?: number): Promise<{ success: boolean; newSessionId?: string; generation?: number; error?: string }> => {
       logger.debug(`[DAEMON RUN] Restart session: ${sessionId}`);
       const persistedState = await readDaemonState();
 
@@ -1836,6 +2255,11 @@ export async function startDaemon(): Promise<void> {
         resumeSessionTag: sessionTag,
         environmentVariables: recoveredProfile?.environmentVariables ?? undefined,
         sandboxConfig: perSessionSandbox,
+        // The spec this spawn realizes, and what it replaces. Both are for this machine's own
+        // records — the child is told only its tag.
+        ...(generation !== undefined ? { generation } : {}),
+        spawnReason: 'restart',
+        replacesSessionId: sessionId,
         // Explicit wins; otherwise the session keeps the mode it was started with. A restart is
         // the only way to move an existing conversation between the daemon domain and the desktop.
         ...(requiresDesktop !== undefined
@@ -1849,10 +2273,13 @@ export async function startDaemon(): Promise<void> {
         // Remove old stopped entry — new session is live under a new ID
         stoppedSessions.delete(sessionId);
         logger.debug(`[DAEMON RUN] Restarted session ${sessionId} -> new session ${result.sessionId}`);
-        return { success: true, newSessionId: result.sessionId };
+        return { success: true, newSessionId: result.sessionId, generation: result.generation ?? generation };
       } else {
         logger.debug(`[DAEMON RUN] Restart spawn failed:`, result);
-        return { success: false, error: result.type === 'error' ? result.errorMessage : 'Spawn failed' };
+        return {
+          success: false,
+          error: result.type === 'error' ? result.errorMessage : 'Spawn failed',
+        };
       }
     };
 
@@ -2125,6 +2552,39 @@ export async function startDaemon(): Promise<void> {
           }
         };
         const sessionSummaries = (): LanSessionSummary[] => {
+          const now = Date.now();
+          // One projection for every row, whichever source it came from. `statusFor` is only the
+          // lookup: the rules live in `sessionStatusOf`, so the live list, the persisted roster
+          // and a control result cannot drift apart.
+          const statusFor = (
+            sessionId: string | undefined,
+            facts: Omit<SessionStatusFacts, 'stored' | 'now'>,
+          ) => {
+            const stored = sessionId ? sessions[sessionId] : undefined;
+            return sessionStatusOf({
+              ...facts,
+              ...(stored ? {
+                stored: {
+                  origin: stored.origin,
+                  status: stored.status,
+                  exitReason: stored.exitReason,
+                  exitTime: stored.exitTime,
+                  lastHeartbeat: stored.lastHeartbeat,
+                  updatedAt: stored.updatedAt,
+                  generation: stored.generation,
+                },
+              } : {}),
+              now,
+            });
+          };
+          // The restart timestamp, with the grace readers apply. Expiry is normally removed
+          // elsewhere; checking here as well is what keeps the list and a control result from
+          // disagreeing during the sweep.
+          const restartingSinceOf = (sessionId: string | undefined): number | undefined => {
+            if (!sessionId) return undefined;
+            const at = restartingStartedAt.get(sessionId);
+            return at !== undefined && now - at < RESTARTING_TTL_MS ? at : undefined;
+          };
           const summaries: LanSessionSummary[] = [...pidToTrackedSession.values()]
             // A session is listed as soon as the daemon knows it, not once the server acknowledges
             // it. It has a tag from spawn but no server id until the server answers -- and while
@@ -2132,7 +2592,20 @@ export async function startDaemon(): Promise<void> {
             // on the id is what made a waiting session vanish from the LAN list, the relay hub and
             // the App at once. Only a session with neither name is dropped: nothing could ask for it.
             .filter(session => session.happySessionId !== undefined || session.sessionTag !== undefined)
-            .map((session): LanSessionSummary => ({
+            .map((session): LanSessionSummary => {
+              const isAlive = session.exitTime
+                ? false
+                : (() => { try { process.kill(session.pid, 0); return true; } catch { return false; } })();
+              const restartingSince = restartingSinceOf(session.happySessionId);
+              const status = statusFor(session.happySessionId, {
+                // A tracked session that has exited is still in the index for a moment; the record
+                // and the exit, not the index, are what describe it then.
+                ...(isAlive ? { live: { pid: session.pid, spawnTime: session.spawnTime, lastHeartbeat: session.lastHeartbeat } } : {}),
+                registered: session.happySessionId !== undefined,
+                ...(restartingSince !== undefined ? { restartingSince } : {}),
+                ...(session.generation !== undefined ? { generation: session.generation } : {}),
+              });
+              return {
               ...(session.happySessionId ? { happySessionId: session.happySessionId } : {}),
               ...(session.sessionTag ? { tag: session.sessionTag } : {}),
               directory: session.directory ?? '',
@@ -2160,28 +2633,42 @@ export async function startDaemon(): Promise<void> {
                 const wrapped = wrappedSessionKey(session.sessionTag);
                 return wrapped ? { dataEncryptionKey: wrapped } : {};
               })()),
-              isAlive: session.exitTime
-                ? false
-                : (() => { try { process.kill(session.pid, 0); return true; } catch { return false; } })(),
+              isAlive,
               lastHeartbeat: session.lastHeartbeat,
-              ...(session.happySessionId && restartingStartedAt.has(session.happySessionId)
-                ? { restartingSince: restartingStartedAt.get(session.happySessionId)! }
-                : {}),
-            }));
+              ...(restartingSince !== undefined ? { restartingSince } : {}),
+              ...status,
+              };
+            });
           // And every session this machine has on disk that is not among them. A process exiting
           // changes whether a session is alive, not whether it exists — only archiving means that
           // — so the durable store is what this list is of, and the live index above is what says
           // which of them are running. See `mergeSessionRoster` for what a reboot did without it.
           const roster = mergeSessionRoster(summaries, sessions, archivedSessionIds);
           summaries.length = 0;
-          summaries.push(...roster);
+          summaries.push(...roster.map((summary): LanSessionSummary => {
+            // The live rows above already carry a phase; a row that came only from disk has no
+            // process behind it, so it is projected from the record and whatever restart is in
+            // flight. Liveness is never inferred from the store here: `isAlive` stays the overlay's
+            // answer, and the status is derived from the same facts.
+            if (summary.phase !== undefined) {
+              return summary;
+            }
+            const restartingSince = restartingSinceOf(summary.happySessionId);
+            return {
+              ...summary,
+              ...(restartingSince !== undefined ? { restartingSince } : {}),
+              ...statusFor(summary.happySessionId, {
+                registered: false,
+                ...(restartingSince !== undefined ? { restartingSince } : {}),
+              }),
+            };
+          }));
           // A session being restarted is not tracked for part of that: the old process has been
           // signalled and the new one has not registered yet. Left out, it would vanish from the
           // list — and vanishing is how a restart reads from outside, which is the reading this
           // exists to replace. So the ones this daemon is restarting are added back, not alive and
           // saying why.
           const tracked = new Set(summaries.map(summary => summary.happySessionId));
-          const now = Date.now();
           for (const [id, at] of restartingStartedAt) {
             if (now - at < RESTARTING_TTL_MS && !tracked.has(id)) {
               summaries.push({
@@ -2191,8 +2678,32 @@ export async function startDaemon(): Promise<void> {
                 startedBy: 'daemon',
                 isAlive: false,
                 restartingSince: at,
+                ...statusFor(id, { restartingSince: at }),
               });
             }
+          }
+          // And the spawns that have not become sessions yet. A create has no id and may have no
+          // process — the tag is all it has — which is exactly the row a reader needs to see the
+          // session at the moment it is asked for. A restart's row already exists under its id,
+          // so only the names not already listed are added: the same session must not appear
+          // twice with two phases.
+          const listedTags = new Set(summaries.map(summary => summary.tag));
+          const listedIds = new Set(summaries.map(summary => summary.happySessionId));
+          for (const spec of pendingSpawns.values()) {
+            if (listedTags.has(spec.tag)) continue;
+            if (spec.replacesSessionId !== undefined && listedIds.has(spec.replacesSessionId)) continue;
+            summaries.push({
+              tag: spec.tag,
+              directory: spec.directory,
+              agent: spec.agent,
+              startedBy: 'daemon',
+              isAlive: false,
+              ...(spec.requiresDesktop ? { desktop: { required: true, available: sidecarHub?.usable ?? false } } : {}),
+              ...statusFor(spec.replacesSessionId, {
+                schedulingSince: spec.requestedAt,
+                generation: spec.generation,
+              }),
+            });
           }
           return summaries;
         };
@@ -2757,6 +3268,46 @@ export async function startDaemon(): Promise<void> {
       logger.debug(`[DAEMON RUN] Migrated ${Object.keys(sessions).length} session(s) from legacy parallel-map format`);
     }
 
+    // Spawns accepted by the previous process survive it for the rest of their grace: the child
+    // may still be coming up, and dropping its row at exactly that moment is the disappearance
+    // the roster exists to prevent. A spec whose session was archived meanwhile is not restored.
+    if (prevState?.pendingSpawns) {
+      const now = Date.now();
+      for (const spec of Object.values(prevState.pendingSpawns)) {
+        if (!spec?.tag || !spec.directory) continue;
+        if (spec.replacesSessionId && archivedSessionIds[spec.replacesSessionId]) continue;
+        const remaining = PENDING_SPAWN_GRACE_MS - (now - spec.requestedAt);
+        if (remaining <= 0) continue;
+        pendingSpawns.set(spec.tag, spec);
+        armPendingSpawnExpiry(spec.tag, remaining);
+      }
+    }
+
+    // The log is the record; the snapshot's map is a projection, and the two can disagree after a
+    // crash or a cleaned state file. Fold both ways:
+    //  - a tombstone in the log whose snapshot entry was lost still has to suppress the row;
+    //  - a tombstone only in an older snapshot predates this log, so backfill it — otherwise the
+    //    server replay would never hear about a deletion this machine has been enforcing locally.
+    {
+      const loggedDeletions = new Set<string>();
+      for (const entry of lifecycleLog.read()) {
+        if (entry.op === 'deleted' && entry.sessionId) {
+          loggedDeletions.add(entry.sessionId);
+          if (archivedSessionIds[entry.sessionId] === undefined) {
+            archivedSessionIds[entry.sessionId] = entry.at;
+          }
+        }
+      }
+      for (const [sessionId, at] of Object.entries({ ...archivedSessionIds })) {
+        if (loggedDeletions.has(sessionId)) {
+          continue;
+        }
+        const tag = sessions[sessionId]?.sessionTag;
+        lifecycleLog.record({ op: 'deleted', sessionId, at, ...(tag ? { tag } : {}) });
+        logger.debug(`[DAEMON RUN] Backfilled lifecycle tombstone for ${sessionId}`);
+      }
+    }
+
     // Verify PIDs from persisted sessions are actually dead. If a PID survived the
     // daemon restart (detached child), mark it running — the session will reconnect
     // via Unix socket and re-register properly.
@@ -2922,6 +3473,7 @@ export async function startDaemon(): Promise<void> {
         daemonLogPath: fileState.daemonLogPath,
         sessions: { ...sessions },
         archivedSessionIds: { ...archivedSessionIds },
+        ...(pendingSpawns.size > 0 ? { pendingSpawns: Object.fromEntries(pendingSpawns) } : {}),
         ...buildLegacyFields(),
       });
     };
@@ -2933,6 +3485,7 @@ export async function startDaemon(): Promise<void> {
       daemonLogPath: logger.logFilePath,
       sessions: { ...sessions },
       archivedSessionIds: { ...archivedSessionIds },
+      ...(pendingSpawns.size > 0 ? { pendingSpawns: Object.fromEntries(pendingSpawns) } : {}),
       ...buildLegacyFields(),
     };
     writeDaemonState(fileState);

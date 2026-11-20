@@ -8,6 +8,9 @@ import { Message } from "./typesMessage";
 import { collapseDuplicateMessages, mergePageIntoWindow } from "./messageIdentity";
 import { NormalizedMessage } from "./typesRaw";
 import type { DaemonRoute, LanSighting, RelayEndpoint, SessionChannel } from './lan/types';
+import { daemonSessionListSignature, daemonSessionRows, dropDeletedDaemonSessionRows, keepPendingDaemonSessionRows, mergeSessionRuntime, type DaemonSessionEntry, type DaemonSessionReport, type SessionRuntimeEntry } from './daemonSessionList';
+
+export type { DaemonSessionEntry } from './daemonSessionList';
 import type { RelayDirectoryEntry } from './lan/relayDirectory';
 import { advanceLanEndpoint, advanceRelayEndpoint, parseLanEndpoints, parseRelayEndpoint } from './lan/relay';
 import type { DaemonConnectionState } from './lan/daemonConnections';
@@ -221,7 +224,17 @@ interface StorageState {
      * no `metadata` — that is encrypted and only ever travels inside a message payload — so this
      * can confirm which sessions exist and which are alive, but it cannot build a session row.
      */
-    daemonSessionList: Record<string, { isAlive: boolean; directory: string; agent: string; via: DaemonRoute; at: number; origin?: 'daemon' | 'server'; restartingSince?: number; desktop?: { required: boolean; available: boolean } }>;
+    daemonSessionList: Record<string, DaemonSessionEntry>;
+    /**
+     * What each machine says its registered sessions are doing, by server id.
+     *
+     * Deliberately separate from the persisted `Session` and never written to the list cache: a
+     * phase is what a machine says *now*, and a cached one would outlive the answer. It is
+     * rebuilt from the next listing or push after a cold start.
+     */
+    sessionRuntime: Record<string, SessionRuntimeEntry>;
+    /** Merge what machines said; null forgets everything (sign-out, or a machine being removed). */
+    applySessionRuntime: (entries: (Partial<Omit<SessionRuntimeEntry, 'at'>> & { sessionId: string })[] | null) => void;
     /**
      * Sessions this device has deleted, by id.
      *
@@ -236,7 +249,7 @@ interface StorageState {
     /** Replace the daemons' view. Pass null to clear it (the server answered). */
     /** Records what a machine said it is running. Null forgets it, for a machine that moved. */
     applyDaemonVersion: (machineId: string, versions: { running: string; onDisk: string | null; restartRequired: boolean } | null) => void;
-    applyDaemonSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string; via: DaemonRoute; origin?: 'daemon' | 'server'; restartingSince?: number; desktop?: { required: boolean; available: boolean } }[] | null) => void;
+    applyDaemonSessionList: (sessions: (Omit<DaemonSessionEntry, 'at'> & { happySessionId?: string })[] | null) => void;
     channelOverride: Record<string, SessionChannel>;
     /** Pass null to return the session to automatic. */
     setSessionChannelOverride: (sessionId: string, channel: SessionChannel | null) => void;
@@ -954,6 +967,7 @@ export const storage = create<StorageState>()((set, get) => {
         relayHubConnected: false,
         daemonSockets: {},
         daemonSessionList: {},
+        sessionRuntime: {},
         deletedSessions: loadDeletedSessions(),
         daemonVersions: {},
         channelOverride: {},
@@ -1195,10 +1209,15 @@ export const storage = create<StorageState>()((set, get) => {
                 const resolvedRestartingAt = session.restartingAt !== undefined
                     ? session.restartingAt
                     : existing?.restartingAt ?? null;
-
                 mergedSessions[session.id] = {
                     ...session,
                     presence,
+                    // The uid lives in metadata, which is the only channel that can carry it: the
+                    // server stores it encrypted and never sees it. Lift it onto the row so it is
+                    // persisted with the list cache and available without decrypting again. A
+                    // refresh that could not decrypt metadata must not erase an id already held —
+                    // absence is "not said this time", not "there is none".
+                    sessionUid: session.sessionUid ?? session.metadata?.sessionUid ?? heldSessions[session.id]?.sessionUid,
                     draft: existingDraft || savedDraft || session.draft || null,
                     permissionMode: resolvedPermissionMode,
                     modelMode: resolvedModelMode,
@@ -2052,48 +2071,60 @@ export const storage = create<StorageState>()((set, get) => {
                 daemonVersions: { ...state.daemonVersions, [machineId]: { ...versions, at } },
             };
         }),
-        applyDaemonSessionList: (sessions: { happySessionId: string; isAlive: boolean; directory: string; agent: string; via: DaemonRoute; origin?: 'daemon' | 'server'; restartingSince?: number; desktop?: { required: boolean; available: boolean } }[] | null) => set((state) => {
+        applyDaemonSessionList: (sessions: DaemonSessionReport[] | null) => set((state) => {
             if (sessions === null) {
-                if (Object.keys(state.daemonSessionList).length === 0) {
+                // A server answer replaces the roster's *server-named* rows, but says nothing
+                // about a session a machine has scheduled and not registered yet — clearing that
+                // row would make a new session vanish on the next refresh and come back after it.
+                const kept = keepPendingDaemonSessionRows(state.daemonSessionList, Date.now());
+                if (daemonSessionListSignature(state.daemonSessionList) === daemonSessionListSignature(kept)) {
                     return state;
                 }
-                return { ...state, daemonSessionList: {} };
+                return { ...state, daemonSessionList: kept };
             }
-            const at = Date.now();
-            const next: Record<string, { isAlive: boolean; directory: string; agent: string; via: DaemonRoute; at: number; origin?: 'daemon' | 'server'; restartingSince?: number; desktop?: { required: boolean; available: boolean } }> = {};
+            // A deleted session is in no channel's state. The deletion is a log entry, and once
+            // this account holds it a listing that has not replayed it yet is stale; drawing that
+            // row is what makes a delete look like it did nothing. Same rule as the session list
+            // applies above, enforced where channel-derived rows enter the store.
+            const listed = dropDeletedDaemonSessionRows(sessions, state.deletedSessions);
             // The same fact the daemon pushes, arriving the other way: a device that reads a
             // listing instead of holding a socket has to be told, and a restarting session is
             // listed with no live process — which is why the field travels with the listing at all.
-            for (const session of sessions) {
-                next[session.happySessionId] = {
-                    ...(session.desktop ? { desktop: session.desktop } : {}),
-                    isAlive: session.isAlive,
-                    directory: session.directory,
-                    agent: session.agent,
-                    via: session.via,
-                    ...(session.origin ? { origin: session.origin } : {}),
-                    at,
-                    ...(session.restartingSince !== undefined ? { restartingSince: session.restartingSince } : {}),
-                };
-                const known = sessionLive.get(session.happySessionId);
-                if (known && session.restartingSince !== undefined && known.restartingAt !== session.restartingSince) {
-                    sessionLive.set(session.happySessionId, { ...known, restartingAt: session.restartingSince });
+            const next = daemonSessionRows(listed, Date.now());
+            for (const [key, row] of Object.entries(next)) {
+                const known = sessionLive.get(key);
+                if (known && row.restartingSince !== undefined && known.restartingAt !== row.restartingSince) {
+                    sessionLive.set(key, { ...known, restartingAt: row.restartingSince });
                 }
             }
-            // A heartbeat moving is not a change the list draws: the summaries differ every few
-            // seconds (`at`, `lastHeartbeat`), and rewriting the map for that re-ran the channel
-            // signature over every session and rebuilt the list each time. What the UI reads is
-            // the stable set below; when it is the same, the store does not change at all.
-            const stable = (list: Record<string, { isAlive: boolean; directory: string; agent: string; via: DaemonRoute; origin?: 'daemon' | 'server'; restartingSince?: number; desktop?: { required: boolean; available: boolean } }>): string =>
-                Object.keys(list).sort().map((id) => {
-                    const s = list[id];
-                    return [id, s.isAlive ? 1 : 0, s.directory, s.agent, s.via, s.origin ?? '',
-                        s.restartingSince ?? '', s.desktop?.required ? 1 : 0, s.desktop?.available ? 1 : 0].join('\u0000');
-                }).join('\u0001');
-            if (stable(state.daemonSessionList) === stable(next)) {
+            // A heartbeat moving is not a change the list draws; when the list the UI reads is the
+            // same, the store does not change at all.
+            if (daemonSessionListSignature(state.daemonSessionList) === daemonSessionListSignature(next)) {
                 return state;
             }
             return { ...state, daemonSessionList: next };
+        }),
+        applySessionRuntime: (entries) => set((state) => {
+            if (entries === null) {
+                if (Object.keys(state.sessionRuntime).length === 0) return state;
+                return { ...state, sessionRuntime: {} };
+            }
+            // A deleted session has no status in any channel; a late projection for one is stale.
+            const offered = entries.filter((entry) => state.deletedSessions[entry.sessionId] === undefined);
+            const next = mergeSessionRuntime(state.sessionRuntime, offered, Date.now());
+            // A push that repeats what the row already says must not redraw it.
+            const same = offered.every((entry) => {
+                const before = state.sessionRuntime[entry.sessionId];
+                const after = next[entry.sessionId];
+                return before !== undefined
+                    && before.phase === after.phase
+                    && before.generation === after.generation
+                    && before.observedGeneration === after.observedGeneration
+                    && before.observedAt === after.observedAt
+                    && before.reason === after.reason;
+            });
+            if (same) return state;
+            return { ...state, sessionRuntime: next };
         }),
         setSessionChannelOverride: (sessionId: string, channel: SessionChannel | null) => set((state) => {
             if (channel === null) {

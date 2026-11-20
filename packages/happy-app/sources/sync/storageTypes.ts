@@ -37,6 +37,12 @@ export const MetadataSchema = z.object({
         updatedAt: z.number()
     }).optional(),
     machineId: z.string().optional(),
+    /**
+     * The session lineage's public name, minted by the CLI and stable across restarts and server
+     * ids. Published in the session's encrypted metadata; `Session.sessionUid` lifts it out so it
+     * is available without re-reading metadata, and so it is persisted with the list cache.
+     */
+    sessionUid: z.string().optional(),
     claudeSessionId: z.string().optional(), // Claude Code session ID
     sessionModel: z.string().optional(), // Model name from SDK init (e.g. "deepseek-v4-pro[1m]")
     sessionProvider: z.string().optional(), // Provider version from SDK init (e.g. "Claude Code 2.1.169")
@@ -168,6 +174,16 @@ export type AgentState = z.infer<typeof AgentStateSchema>;
 
 export interface Session {
     id: string,
+    /**
+     * The lineage's public name, lifted from `metadata.sessionUid` and persisted with this row.
+     *
+     * `id` is the server's name for the session and is the key everything still uses. This is the
+     * id that survives the server: it is minted by the CLI, changes neither on restart nor when the
+     * server issues a new session, and is what a later key migration rekeys onto. Absent means the
+     * session was created by a CLI that predates it — absence is not a statement that there is none,
+     * so a refresh keeps whatever was already held.
+     */
+    sessionUid?: string,
     /** Session-internal message seq (matches server Session.seq and body.message.seq; do not use envelope seq) */
     seq: number,
     createdAt: number,

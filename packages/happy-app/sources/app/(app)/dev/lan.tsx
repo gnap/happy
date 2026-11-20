@@ -253,17 +253,24 @@ const LanDevScreen = React.memo(function LanDevScreen() {
             let decryptedAny = false;
             const seenHistory = new Set<string>();
             for (const session of sessions) {
-                const history = await fetchHistory(target.baseUrl, token, session.happySessionId);
+                // A session the daemon has scheduled but not registered has only a tag; there is
+                // no id to read history by yet, which is itself the thing worth seeing here.
+                const sessionId = session.happySessionId;
+                if (!sessionId) {
+                    push(line('history', `tag ${session.tag ?? '?'}: no server id yet, nothing to read`));
+                    continue;
+                }
+                const history = await fetchHistory(target.baseUrl, token, sessionId);
                 if (!history) {
-                    push(line('history', `${session.happySessionId}: no local history (404)`));
+                    push(line('history', `${sessionId}: no local history (404)`));
                     continue;
                 }
                 const decrypted = await decryptLanHistory(sync.encryption!, history);
                 decryptedAny = true;
-                seenHistory.add(session.happySessionId);
+                seenHistory.add(sessionId);
                 push(line(
                     'history',
-                    `${session.happySessionId}: ${decrypted.decryptedCount}/${decrypted.entries.length} decrypted, tag ${decrypted.tag}`
+                    `${sessionId}: ${decrypted.decryptedCount}/${decrypted.entries.length} decrypted, tag ${decrypted.tag}`
                 ));
                 const preview = decrypted.entries.find((entry) => entry.content !== null);
                 if (preview) {
@@ -281,13 +288,13 @@ const LanDevScreen = React.memo(function LanDevScreen() {
             // `Sync.fetchSessionFromDaemon` a channel switch would use, so what it exercises is the
             // production path — normalization, dedup against the store, and the reducer — rather
             // than a parallel implementation that could pass while the real one is broken.
-            const mergeTarget = sessions.find((s) => seenHistory.has(s.happySessionId));
-            if (mergeTarget) {
-                const read = await sync.fetchSessionFromDaemon(mergeTarget.happySessionId, route);
+            const mergeId = sessions.find((s) => s.happySessionId !== undefined && seenHistory.has(s.happySessionId))?.happySessionId;
+            if (mergeId) {
+                const read = await sync.fetchSessionFromDaemon(mergeId, route);
                 if (!read) {
                     push(line('merge', 'fetchSessionFromDaemon found nothing to read', false));
                 } else {
-                    const stored = getSessionMessages(mergeTarget.happySessionId)?.messages.length ?? 0;
+                    const stored = getSessionMessages(mergeId)?.messages.length ?? 0;
                     push(line(
                         'merge',
                         `${read.messages.length} normalized, ${read.decryptedCount}/${read.total} decrypted → store now holds ${stored} message(s)`

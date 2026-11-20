@@ -28,6 +28,7 @@ import { generateHookSettingsFile, cleanupHookSettingsFile } from '@/claude/util
 import { registerKillSessionHandler } from './registerKillSessionHandler';
 import { projectPath } from '../projectPath';
 import { detectWorktree } from '../utils/createSessionMetadata';
+import { resolveSessionUid } from '@/api/sessionUid';
 import { startOfflineReconnection, connectionState } from '@/utils/serverConnectionErrors';
 import { claudeLocal } from '@/claude/claudeLocal';
 import { createSessionScanner } from '@/claude/utils/sessionScanner';
@@ -163,6 +164,7 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         startedFromDaemon: options.startedBy === 'daemon',
         hostPid: process.pid,
         sessionTag,
+        sessionUid: resolveSessionUid(sessionTag),
         startedBy: options.startedBy || 'terminal',
         // Initialize lifecycle state
         lifecycleState: 'running',
