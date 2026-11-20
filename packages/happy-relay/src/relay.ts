@@ -51,7 +51,7 @@ export type RelayOptions = {
      * instead of naming the hop itself, so the hop's address and credentials stay on this relay and
      * never reach a machine. Absent or empty means the relay only dials targets the daemon names.
      */
-    routes?: Record<string, string>;
+    routes?: Record<string, string | null>;
 };
 
 export type RelayHandle = { port: number; stop: () => void; daemonCount: () => number };
@@ -300,11 +300,17 @@ export function startRelay(options: RelayOptions): RelayHandle {
      * Route name -> hop. Parsed once at startup: a route that cannot be parsed is refused here,
      * loudly, rather than turning every request through it into a runtime failure.
      */
-    const routes = new Map<string, Socks5Endpoint>();
+    const routes = new Map<string, Socks5Endpoint | null>();
     for (const [name, raw] of Object.entries(options.routes ?? {})) {
+        // A route with no hop: the relay dials the target itself, which is the relay's own way out.
+        // Named, because a profile chooses it exactly like the others.
+        if (raw === null || raw.trim() === '') {
+            routes.set(name, null);
+            continue;
+        }
         const endpoint = parseSocks5Url(raw);
         if (!endpoint) {
-            console.error(`[relay] ignoring route "${name}": not a socks5:// URL`);
+            console.error(`[relay] ignoring route "${name}": neither empty nor a socks5:// URL`);
             continue;
         }
         routes.set(name, endpoint);
@@ -847,11 +853,12 @@ export function startRelay(options: RelayOptions): RelayHandle {
         // A named route means this relay dials the hop and speaks SOCKS5 on it; the daemon never
         // learns where the hop is or what it needs. An unknown name is refused, never read as
         // "dial the target directly" — that would put the traffic somewhere nobody chose.
-        const route = routeName ? routes.get(routeName) : undefined;
-        if (routeName && !route) {
+        if (routeName && !routes.has(routeName)) {
             egressSend(daemon, { t: 'eg-err', id, message: 'unknown route' });
             return;
         }
+        // `null` is a defined route with no hop: the relay dials the target directly.
+        const route = routeName ? routes.get(routeName) : undefined;
         if (daemon.egress.has(id)) {
             egressSend(daemon, { t: 'eg-err', id, message: 'duplicate id' });
             return;
