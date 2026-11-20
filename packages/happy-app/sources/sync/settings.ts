@@ -116,10 +116,9 @@ export const AIBackendProfileSchema = z.object({
     // Default session type for this profile
     defaultSessionType: z.enum(['simple', 'worktree']).optional(),
 
-    // Reach the profile's SOCKS5 hop through the relay instead of connecting to it from the
-    // machine. Undefined means off: only a profile that opts in uses the relay, and every other
-    // profile dials the hop from this machine. Only meaningful when the profile sets a socks5://
-    // proxy in its environment variables.
+    // Send this profile's traffic through the relay. When the environment names a SOCKS5 hop the
+    // relay connects to it; otherwise the relay dials the API and anything else itself. Undefined
+    // means off: the machine's own proxy settings decide the route.
     proxyViaRelay: z.boolean().optional(),
 
     // Default permission mode for this profile
