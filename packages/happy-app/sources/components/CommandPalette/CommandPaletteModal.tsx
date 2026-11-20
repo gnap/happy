@@ -129,7 +129,11 @@ const styles = StyleSheet.create({
         })
     },
     backdrop: {
-        ...StyleSheet.absoluteFillObject,
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
         backgroundColor: 'rgba(15, 15, 15, 0.75)',
         // Remove blur for better performance - use darker overlay instead
         // Blur can be re-enabled if needed but with optimizations

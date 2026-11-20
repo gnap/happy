@@ -246,6 +246,18 @@ export interface Session {
         contextWindowTokens?: number;
         /** Real provider-reported model from the assistant message (e.g. "claude-sonnet-5"). */
         model?: string;
+        /** /contextUsage snapshot — accurate display value (from turn-end, not estimated). */
+        contextPct?: number;
+        contextModel?: string;
+        contextBreakdown?: {
+            systemPrompt: number;
+            systemTools: number;
+            customAgents: number;
+            skills: number;
+            messages: number;
+            freeSpace: number;
+        };
+        contextFetchedAt?: number;
         timestamp: number;
     } | null;
 }

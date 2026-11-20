@@ -1,5 +1,5 @@
 import Constants from 'expo-constants';
-import { requireOptionalNativeModule } from 'expo-modules-core';
+import { requireOptionalNativeModule } from 'expo';
 
 export interface AppConfig {
     postHogKey?: string;

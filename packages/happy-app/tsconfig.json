@@ -38,6 +38,7 @@
   ],
   "exclude": [
     "sources/trash/**/*",
-    "node_modules"
+    "node_modules",
+    "ios/build/**/*"
   ]
 }

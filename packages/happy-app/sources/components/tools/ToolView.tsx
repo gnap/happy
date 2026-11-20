@@ -23,6 +23,7 @@ interface ToolViewProps {
     onPress?: () => void;
     sessionId?: string;
     messageId?: string;
+    compact?: boolean;
 }
 
 export const ToolView = ((props: ToolViewProps) => {
