@@ -1,10 +1,10 @@
 import * as React from 'react';
 import { Session } from '@/sync/storageTypes';
-import { useResolvedPermissionIds, useSessionOnline } from '@/sync/storage';
+import { useResolvedPermissionIds, useSessionDeletePending, useSessionOnline } from '@/sync/storage';
 import { sessionIsRestarting } from '@/utils/sessionRestart';
 import { t } from '@/text';
 
-export type SessionState = 'disconnected' | 'restarting' | 'thinking' | 'waiting' | 'permission_required';
+export type SessionState = 'disconnected' | 'deleting' | 'restarting' | 'thinking' | 'waiting' | 'permission_required';
 
 export interface SessionStatus {
     state: SessionState;
@@ -40,6 +40,10 @@ export function useSessionStatus(session: Session): SessionStatus {
     // window in which this row would otherwise keep saying "permission required" after the user
     // has answered. Where the log has not been loaded the set is empty and this reads as before.
     const resolvedPermissions = useResolvedPermissionIds(session.id);
+    // A deletion the person asked for that the owning machine has not recorded yet. Asked before
+    // every other state: the row is on its way out, and "thinking" or "last seen" about a session
+    // whose deletion is still owed describes something the person has already left behind.
+    const deletePending = useSessionDeletePending(session.id);
     const requests = session.agentState?.requests;
     const hasPermissions = requests
         ? Object.keys(requests).some(id => !resolvedPermissions.has(id))
@@ -48,6 +52,21 @@ export function useSessionStatus(session: Session): SessionStatus {
     const vibingMessage = React.useMemo(() => {
         return vibingMessages[Math.floor(Math.random() * vibingMessages.length)].toLowerCase() + '…';
     }, [isOnline, hasPermissions, session.thinking]);
+
+    if (deletePending) {
+        return {
+            state: 'deleting',
+            isConnected: isOnline,
+            // Alive in the sense that matters here: the person has decided, and the row must not
+            // dim into the grey of a stopped session while that decision is being delivered.
+            isLive: true,
+            statusText: t('status.deleting'),
+            shouldShowStatus: true,
+            statusColor: '#FF3B30',
+            statusDotColor: '#FF3B30',
+            isPulsing: true
+        };
+    }
 
     /**
      * A restart in flight, which the machine announces as a change to this session's state and

@@ -84,6 +84,7 @@ export const ca: TranslationStructure = {
         lastSeen: ({ time }: { time: string }) => `vist per última vegada ${time}`,
         permissionRequired: 'permís requerit',
         restarting: 'Reiniciant…',
+        deleting: 'Eliminant…',
         activeNow: 'Actiu ara',
         unknown: 'desconegut',
         creating: 'Creant…',

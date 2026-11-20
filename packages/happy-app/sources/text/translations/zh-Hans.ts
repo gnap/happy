@@ -86,6 +86,7 @@ export const zhHans: TranslationStructure = {
         lastSeen: ({ time }: { time: string }) => `最后活跃时间 ${time}`,
         permissionRequired: '需要权限',
         restarting: '重启中…',
+        deleting: '正在删除…',
         activeNow: '当前活跃',
         unknown: '未知',
         creating: '创建中…',

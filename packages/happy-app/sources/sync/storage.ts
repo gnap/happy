@@ -31,7 +31,7 @@ import { LocalSettings, applyLocalSettings } from "./localSettings";
 import { Purchases, customerInfoToPurchases } from "./purchases";
 import { Profile } from "./profile";
 import { UserProfile, RelationshipUpdatedEvent } from "./friendTypes";
-import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionMaxModes, saveSessionMaxModes, loadSessionProfileIds, saveSessionProfileIds, loadSessionSandboxIsolations, saveSessionSandboxIsolations, loadRelayEndpoints, saveRelayEndpoints, loadDeletedSessions, saveDeletedSessions } from "./persistence";
+import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionMaxModes, saveSessionMaxModes, loadSessionProfileIds, saveSessionProfileIds, loadSessionSandboxIsolations, saveSessionSandboxIsolations, loadRelayEndpoints, saveRelayEndpoints, loadDeletedSessions, saveDeletedSessions, loadPendingSessionDeletes, savePendingSessionDeletes, type PendingSessionDelete } from "./persistence";
 import type { PermissionModeKey } from '@/components/PermissionModeSelector';
 import type { CustomerInfo } from './revenueCat/types';
 import React from "react";
@@ -244,6 +244,22 @@ interface StorageState {
      * putting back a row that has only been *offered* to deletion so far.
      */
     deletedSessions: Record<string, number>;
+    /**
+     * Deletions this device has asked for, waiting for the machine that owns each session.
+     *
+     * The intent is written before the first attempt and survives a restart: an owner that is
+     * offline is late, not gone, so the row keeps its place and says it is deleting. It leaves this
+     * map only when the machine records the deletion (then `deletedSessions` takes over), when the
+     * machine declines, or when its build predates the archive route and the server's old delete is
+     * the only road left.
+     */
+    pendingSessionDeletes: Record<string, PendingSessionDelete>;
+    /** Records the person's delete before any channel is asked, so a crash cannot lose it. */
+    queueSessionDelete: (sessionId: string, machineId: string) => void;
+    /** Records the outcome of an attempt that did not land, and when to try again. */
+    noteSessionDeleteAttempt: (sessionId: string, nextAttemptAt: number, lastError: string) => void;
+    /** Forgets an intent: it was recorded, declined, or handed to the legacy road. */
+    clearSessionDelete: (sessionId: string) => void;
     /** What each machine last said it was running, asked over a channel it answered on. */
     daemonVersions: Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }>;
     /** Replace the daemons' view. Pass null to clear it (the server answered). */
@@ -969,6 +985,7 @@ export const storage = create<StorageState>()((set, get) => {
         daemonSessionList: {},
         sessionRuntime: {},
         deletedSessions: loadDeletedSessions(),
+        pendingSessionDeletes: loadPendingSessionDeletes(),
         daemonVersions: {},
         channelOverride: {},
         artifacts: {},  // Initialize artifacts
@@ -2183,6 +2200,39 @@ export const storage = create<StorageState>()((set, get) => {
         deleteSessionMessages: (sessionId: string) => {
             sessionMessagesLive.delete(sessionId);
         },
+        queueSessionDelete: (sessionId: string, machineId: string) => set((state) => {
+            const existing = state.pendingSessionDeletes[sessionId];
+            const now = Date.now();
+            // A second ask keeps the attempt count — the ladder is about the machine, not about how
+            // many times the person tapped — but makes the next attempt now, because a tap is a
+            // better moment to try than whichever timer was pending.
+            const intent: PendingSessionDelete = existing
+                ? { ...existing, machineId, nextAttemptAt: Math.min(existing.nextAttemptAt, now) }
+                : { sessionId, machineId, at: now, attempts: 0, nextAttemptAt: now };
+            const pendingSessionDeletes = { ...state.pendingSessionDeletes, [sessionId]: intent };
+            savePendingSessionDeletes(pendingSessionDeletes);
+            return { ...state, pendingSessionDeletes };
+        }),
+        noteSessionDeleteAttempt: (sessionId: string, nextAttemptAt: number, lastError: string) => set((state) => {
+            const existing = state.pendingSessionDeletes[sessionId];
+            if (!existing) {
+                return state;
+            }
+            const pendingSessionDeletes = {
+                ...state.pendingSessionDeletes,
+                [sessionId]: { ...existing, attempts: existing.attempts + 1, nextAttemptAt, lastError },
+            };
+            savePendingSessionDeletes(pendingSessionDeletes);
+            return { ...state, pendingSessionDeletes };
+        }),
+        clearSessionDelete: (sessionId: string) => set((state) => {
+            if (state.pendingSessionDeletes[sessionId] === undefined) {
+                return state;
+            }
+            const { [sessionId]: _forgotten, ...pendingSessionDeletes } = state.pendingSessionDeletes;
+            savePendingSessionDeletes(pendingSessionDeletes);
+            return { ...state, pendingSessionDeletes };
+        }),
         deleteSession: (sessionId: string) => set((state) => {
             // Remove session from the keyed store; the derived subscription rebuilds the list.
             sessionLive.delete(sessionId);
@@ -2599,6 +2649,16 @@ export function useSession(id: string): Session | null {
 /** One field of a session, re-rendering only when that field changes. */
 export function useSessionMachineId(sessionId: string): string | undefined {
     return useKeyedSelector(sessionLive, sessionId, (session) => session?.metadata?.machineId);
+}
+
+/**
+ * Whether this session is waiting for its machine to record a deletion.
+ *
+ * A boolean, not the intent: a row draws only that the deletion is still owed, and re-rendering it
+ * for each attempt's bookkeeping would make the backoff visible as churn.
+ */
+export function useSessionDeletePending(sessionId: string): boolean {
+    return storage((state) => state.pendingSessionDeletes[sessionId] !== undefined);
 }
 
 /**

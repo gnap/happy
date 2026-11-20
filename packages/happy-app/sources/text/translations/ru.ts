@@ -416,6 +416,7 @@ export const ru: TranslationStructure = {
         lastSeen: ({ time }: { time: string }) => `в сети ${time}`,
         permissionRequired: 'требуется разрешение',
         restarting: 'Перезапуск…',
+        deleting: 'Удаление…',
         activeNow: 'Активен сейчас',
         unknown: 'неизвестно',
         creating: 'Создание…',
