@@ -178,6 +178,11 @@ export interface SpawnSessionOptions {
     // - API_TIMEOUT_MS, CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
     // - Custom variables (DEEPSEEK_*, Z_AI_*, etc.)
     environmentVariables?: Record<string, string>;
+    /**
+     * Reach the profile's SOCKS5 hop through the relay rather than dialling it from the machine.
+     * Omitted means the daemon's default (on).
+     */
+    proxyViaRelay?: boolean;
     /** Per-session sandbox config override (falls back to machine-global settings.json). */
     sandboxConfig?: { enabled?: boolean; sessionIsolation?: 'strict' | 'workspace' | 'custom'; workspaceRoot?: string; networkMode?: 'blocked' | 'allowed' | 'custom' };
     /**
@@ -197,7 +202,7 @@ export interface SpawnSessionOptions {
 export async function machineSpawnNewSession(options: SpawnSessionOptions): Promise<SpawnSessionResult> {
     requireChannelFor('spawn');
 
-    const { machineId, directory, approvedNewDirectoryCreation = false, token, agent, environmentVariables, sandboxConfig, requiresDesktop } = options;
+    const { machineId, directory, approvedNewDirectoryCreation = false, token, agent, environmentVariables, proxyViaRelay, sandboxConfig, requiresDesktop } = options;
 
     try {
         const result = await apiSocket.machineRPC<SpawnSessionResult, {
@@ -207,12 +212,13 @@ export async function machineSpawnNewSession(options: SpawnSessionOptions): Prom
             token?: string,
             agent?: 'codex' | 'claude' | 'cursor' | 'cursor-acp' | 'gemini',
             environmentVariables?: Record<string, string>;
+            proxyViaRelay?: boolean;
             sandboxConfig?: typeof sandboxConfig;
             requiresDesktop?: boolean;
         }>(
             machineId,
             'spawn-happy-session',
-            { type: 'spawn-in-directory', directory, approvedNewDirectoryCreation, token, agent, environmentVariables, sandboxConfig, ...(requiresDesktop ? { requiresDesktop } : {}) }
+            { type: 'spawn-in-directory', directory, approvedNewDirectoryCreation, token, agent, environmentVariables, ...(proxyViaRelay !== undefined ? { proxyViaRelay } : {}), sandboxConfig, ...(requiresDesktop ? { requiresDesktop } : {}) }
         );
         return result;
     } catch (error) {

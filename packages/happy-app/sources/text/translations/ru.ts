@@ -1077,6 +1077,8 @@ export const ru: TranslationStructure = {
         editProfile: 'Редактировать Профиль',
         copyProfile: 'Копировать Профиль',
         deleteProfile: 'Удалить Профиль',
+        proxyViaRelay: 'SOCKS5 через ретранслятор',
+        proxyViaRelayDescription: 'Если в профиле указан прокси SOCKS5, запросы идут к нему через ретранслятор, а не с этой машины. Отключите, если машина может подключиться к узлу напрямую.',
 
         addProfileTitle: 'Добавить Новый Профиль',
         delete: {
