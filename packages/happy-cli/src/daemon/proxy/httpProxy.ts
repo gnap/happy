@@ -47,7 +47,15 @@ export type LocalProxyHandle = {
 
 export function startLocalProxy(options: {
     /** The route minted for a token, or null when this session has no proxy configured. */
-    getRoute: (token: string) => ProxyRoute | null;
+    getRoute?: (token: string) => ProxyRoute | null;
+    /**
+     * One route for every request on this listener, with no token. Used for a named relay route's
+     * fixed port: the route is the same for every process, so there is nothing to select and
+     * nothing to authenticate beyond the loopback binding itself.
+     */
+    fixedRoute?: ProxyRoute;
+    /** Fixed port for a named route; 0 (the default) lets the OS choose a session's port. */
+    port?: number;
     relay: () => RelayClientHandle | null;
 }): Promise<LocalProxyHandle> {
     const sockets = new Set<Socket>();
@@ -92,7 +100,7 @@ export function startLocalProxy(options: {
 
     return new Promise<LocalProxyHandle>((resolve, reject) => {
         server.once('error', reject);
-        server.listen(0, '127.0.0.1', () => {
+        server.listen(options.port ?? 0, '127.0.0.1', () => {
             server.removeListener('error', reject);
             server.on('error', (error) => logger.debug(`[proxy] server error: ${error.message}`));
             resolve({
@@ -133,7 +141,7 @@ export function startLocalProxy(options: {
         }
 
         const token = proxyToken(headers['proxy-authorization']);
-        const route = token ? options.getRoute(token) : null;
+        const route = options.fixedRoute ?? (token ? options.getRoute?.(token) ?? null : null);
         if (!route) {
             deny(client, 502, 'proxy not configured for this session');
             return;

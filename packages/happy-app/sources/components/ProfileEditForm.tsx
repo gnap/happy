@@ -8,6 +8,8 @@ import { AIBackendProfile } from '@/sync/settings';
 import { getBuiltInProfileDocumentation } from '@/sync/profileUtils';
 import { EnvironmentVariablesList } from '@/components/EnvironmentVariablesList';
 import { Switch } from '@/components/Switch';
+import { useAllMachines } from '@/sync/storage';
+import { collectProxyRoutes, DIRECT_ROUTE } from '@/sync/proxyRoutes';
 
 export interface ProfileEditFormProps {
     profile: AIBackendProfile;
@@ -39,13 +41,29 @@ export function ProfileEditForm({
     // relay; with a SOCKS5 hop in the environment, the relay connects to that hop first.
     const [proxyViaRelay, setProxyViaRelay] = React.useState(profile.proxyViaRelay ?? false);
 
+    // A route the relay defines and the machine serves on a fixed port. The name is the whole
+    // profile-side contract; when set it takes precedence over the relay switch above.
+    const [proxyRoute, setProxyRoute] = React.useState(profile.proxyRoute ?? '');
+    // The names the known machines publish. The profile is account-level, so this is a union:
+    // which of them a given session can actually use is decided on that machine, and refused
+    // there rather than approximated here.
+    const machines = useAllMachines();
+    const knownRoutes = React.useMemo(
+        () => collectProxyRoutes(machines, profile.proxyRoute),
+        [machines, profile.proxyRoute],
+    );
+    // The list stays collapsed until asked for: it is a choice, not a menu to read every time.
+    const [routePickerOpen, setRoutePickerOpen] = React.useState(false);
+
     const handleSave = () => {
         if (!name.trim()) return;
+        const route = proxyRoute.trim();
         onSave({
             ...profile,
             name: name.trim(),
             environmentVariables,
             proxyViaRelay,
+            proxyRoute: route ? route : undefined,
             updatedAt: Date.now(),
         });
     };
@@ -104,6 +122,68 @@ export function ProfileEditForm({
                     profileDocs={profileDocs}
                     onChange={setEnvironmentVariables}
                 />
+
+                {/* Named relay route */}
+                <Text style={formStyles.sectionTitle}>
+                    {t('profiles.proxyRoute')}
+                </Text>
+                <Text style={formStyles.switchDescription}>
+                    {t('profiles.proxyRouteDescription')}
+                </Text>
+                {knownRoutes.length > 0 ? (
+                    <View style={formStyles.routeFieldBlock}>
+                        <Pressable
+                            style={formStyles.routeField}
+                            onPress={() => setRoutePickerOpen((open) => !open)}
+                        >
+                            <Text style={formStyles.routeFieldText}>
+                                {proxyRoute.trim() || t('profiles.proxyRouteNone')}
+                            </Text>
+                            <Ionicons
+                                name={routePickerOpen ? 'chevron-up' : 'chevron-down'}
+                                size={18}
+                                color={theme.colors.textSecondary}
+                            />
+                        </Pressable>
+                        {routePickerOpen && (
+                            <View style={formStyles.routeList}>
+                                {[DIRECT_ROUTE, ...knownRoutes.filter((name) => name !== DIRECT_ROUTE)].map((route) => {
+                                    const current = proxyRoute.trim() || DIRECT_ROUTE;
+                                    const selected = current === route;
+                                    return (
+                                        <Pressable
+                                            key={route}
+                                            style={[formStyles.routeOption, selected && formStyles.routeOptionActive]}
+                                            onPress={() => {
+                                                setProxyRoute(route);
+                                                setRoutePickerOpen(false);
+                                            }}
+                                        >
+                                            <Text style={formStyles.routeOptionText}>
+                                                {route === DIRECT_ROUTE ? t('profiles.proxyRouteNone') : route}
+                                            </Text>
+                                            {selected && (
+                                                <Ionicons name="checkmark" size={18} color={theme.colors.button.primary.tint} />
+                                            )}
+                                        </Pressable>
+                                    );
+                                })}
+                            </View>
+                        )}
+                    </View>
+                ) : (
+                    // Nothing published yet — a newer relay route or a machine that has not
+                    // reported in. Accept the name as typed; the session refuses it if unknown.
+                    <TextInput
+                        style={formStyles.textInput}
+                        placeholder={t('profiles.proxyRoutePlaceholder')}
+                        placeholderTextColor={theme.colors.input.placeholder}
+                        value={proxyRoute}
+                        onChangeText={setProxyRoute}
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                    />
+                )}
 
                 {/* SOCKS5 egress route */}
                 <View style={formStyles.switchRow}>
@@ -208,6 +288,47 @@ const formStyles = StyleSheet.create((theme) => ({
         fontWeight: '600',
         flex: 1,
         ...Typography.default('semiBold'),
+    },
+    routeFieldBlock: {
+        marginBottom: theme.margins.md,
+    },
+    routeField: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        backgroundColor: theme.colors.input.background,
+        borderRadius: theme.borderRadius.lg,
+        borderWidth: 1,
+        borderColor: theme.colors.textSecondary,
+        paddingHorizontal: theme.margins.sm,
+        paddingVertical: 10,
+    },
+    routeFieldText: {
+        fontSize: 15,
+        color: theme.colors.text,
+        ...Typography.default(),
+    },
+    routeList: {
+        borderRadius: theme.borderRadius.lg,
+        borderWidth: 1,
+        borderColor: theme.colors.textSecondary,
+        overflow: 'hidden',
+        marginTop: 6,
+    },
+    routeOption: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        paddingHorizontal: theme.margins.sm,
+        paddingVertical: 10,
+    },
+    routeOptionActive: {
+        backgroundColor: theme.colors.surfaceHigh,
+    },
+    routeOptionText: {
+        fontSize: 15,
+        color: theme.colors.text,
+        ...Typography.default(),
     },
     switchRow: {
         flexDirection: 'row',

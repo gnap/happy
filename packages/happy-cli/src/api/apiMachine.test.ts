@@ -30,6 +30,19 @@ describe('machine metadata synchronization helpers', () => {
         expect(shouldSyncMachineMetadata(null, localMetadata)).toBe(true);
     });
 
+    it('syncs when the served route names change, whatever their order', () => {
+        const current = { ...baseMetadata, proxyRoutes: ['personal', 'work'] };
+        const reordered = { ...baseMetadata, proxyRoutes: ['work', 'personal'] };
+        const added = { ...baseMetadata, proxyRoutes: ['personal', 'work', 'lab'] };
+        const removed = { ...baseMetadata, proxyRoutes: ['personal'] };
+
+        expect(shouldSyncMachineMetadata(current, reordered)).toBe(false);
+        expect(shouldSyncMachineMetadata(current, added)).toBe(true);
+        expect(shouldSyncMachineMetadata(current, removed)).toBe(true);
+        // A daemon that has not published routes yet is different from one that now does.
+        expect(shouldSyncMachineMetadata(baseMetadata, { ...baseMetadata, proxyRoutes: ['personal'] })).toBe(true);
+    });
+
     it('preserves extra fields while refreshing static metadata', () => {
         const current = {
             ...baseMetadata,

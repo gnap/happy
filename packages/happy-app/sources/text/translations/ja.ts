@@ -99,6 +99,10 @@ export const ja: TranslationStructure = {
         deleteProfile: 'プロファイルを削除',
         proxyViaRelay: 'リレー経由でトラフィックを転送',
         proxyViaRelayDescription: 'このプロファイルのトラフィックをリレー経由で送信します。環境にSOCKS5プロキシがあればそれを経由し、なければリレーから直接接続します。オフの場合はこのマシンのプロキシ設定に従います。',
+        proxyRoute: 'リレールート',
+        proxyRouteDescription: 'このプロファイルを、マシンが公開している名前付きルート（例: "personal"）経由で送信します。ルートはリレー側で定義され、マシンは固定ポートで公開します。空欄の場合は上のスイッチを使用します。',
+        proxyRoutePlaceholder: 'personal',
+        proxyRouteNone: '直接接続',
 
         addProfileTitle: '新しいプロファイルを追加',
         delete: {

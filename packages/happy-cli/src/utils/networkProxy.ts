@@ -21,6 +21,8 @@
  * removed and nothing is put in their place. An agent that fell back to dialling the hop directly
  * would be sending traffic from the wrong address, which is exactly what the profile chose against.
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { logger } from '@/ui/logger';
 import { notifyDaemonNetworkProxy } from '@/daemon/controlClient';
 import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
@@ -30,6 +32,23 @@ import { configuration } from '@/configuration';
 export const LOCAL_PROXY_ENV = 'HAPPY_LOCAL_PROXY_URL';
 /** `1` opts this session into the relay leg; the daemon sets it from the spawn options. */
 export const VIA_RELAY_ENV = 'HAPPY_PROXY_VIA_RELAY';
+/**
+ * The name of a route this machine serves, as the profile names it.
+ *
+ * A route's definition — the hop and its credentials — lives on the relay. The machine only knows
+ * which names it exposes and on which port, so a profile selecting one carries a name, never an
+ * address.
+ */
+export const ROUTE_ENV = 'HAPPY_PROXY_ROUTE';
+/**
+ * The reserved route name meaning "no proxy at all".
+ *
+ * Not a route the relay defines: naming it is the profile saying the agent should reach the
+ * network itself, with nothing in its environment pointing elsewhere. It exists because an empty
+ * route means "the profile has no opinion", which for a profile that also names a SOCKS5 hop is
+ * not the same thing.
+ */
+export const DIRECT_ROUTE = 'direct';
 
 const PROXY_KEYS = [
     'ALL_PROXY', 'all_proxy', 'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy',
@@ -70,6 +89,7 @@ let injected: Map<string, string | undefined> | null = null;
 let active: ProxyRegistration | null = null;
 let settling: Promise<void> = Promise.resolve();
 let warnedNoLocalProxy = false;
+let warnedUnknownRoute = false;
 /** SOCKS5 entries taken out of the environment; the policy reads them instead. Never logged. */
 let spawnHop: Record<string, string> = {};
 
@@ -123,6 +143,47 @@ export function applyNetworkProxyPolicy(
     // are expanded first: the hop's address is often `${VAR}` naming a credential held by the
     // daemon, and the daemon needs the resolved URL, not the placeholder.
     const expandedProfile = expandEnvironmentVariables(profileEnv, process.env);
+
+    // A named route is a machine-level answer: the daemon already listens on that route's fixed
+    // port and forwards every request through the relay, so there is no token to register and no
+    // hop for this process to see. It wins over the profile's own socks entries — naming a route
+    // is saying "use that path", and the route is where the machine's operator put it.
+    const routeName = (expandedProfile[ROUTE_ENV] ?? process.env[ROUTE_ENV] ?? '').trim();
+    if (routeName === DIRECT_ROUTE) {
+        // "Direct" is a decision, not an absence: the agent gets no proxy, no matter what the
+        // profile's environment or the relay switch would otherwise have done. Removing the
+        // entries from this process as well is the only way to keep them out of the agent it
+        // inherits — the SDK takes its environment from here.
+        delete env[ROUTE_ENV];
+        for (const key of PROXY_KEYS) {
+            delete env[key];
+            delete process.env[key];
+        }
+        logger.debug('[proxy] direct for this session: the agent is given no proxy');
+        return { env, registration: null, settled: clearRegistration() };
+    }
+    if (routeName) {
+        delete env[ROUTE_ENV];
+        for (const key of PROXY_KEYS) delete env[key];
+        const port = readRoutePort(routeName);
+        if (port === null) {
+            if (!warnedUnknownRoute) {
+                warnedUnknownRoute = true;
+                logger.warn(`[proxy] route "${routeName}" is not served by this machine; the agent will not be given a proxy`);
+            }
+            return { env, registration: null, settled: clearRegistration() };
+        }
+        const previous = new Map<string, string | undefined>();
+        for (const key of [...PROXY_KEYS, ...NO_PROXY_KEYS]) previous.set(key, process.env[key]);
+        injected = previous;
+        const routeUrl = `http://127.0.0.1:${port}`;
+        for (const key of PROXY_KEYS) process.env[key] = routeUrl;
+        const routeNoProxy = buildNoProxy(expandedProfile);
+        for (const key of NO_PROXY_KEYS) process.env[key] = routeNoProxy;
+        logger.debug(`[proxy] named route ${routeName} -> 127.0.0.1:${port} for this session`);
+        return { env, registration: null, settled: clearRegistration() };
+    }
+
     const source: Record<string, string | undefined> = { ...process.env, ...spawnHop, ...expandedProfile };
     const socks5 = findSocks5(source);
 
@@ -255,6 +316,24 @@ function findSocks5(env: Record<string, string | undefined>): string | null {
 
 function isSocks5(value: string | undefined): value is string {
     return typeof value === 'string' && /^socks5h?:\/\//i.test(value.trim());
+}
+
+/**
+ * The port this machine assigned to a route, from the same file the daemon reads.
+ *
+ * Read rather than asked for over the control channel: both processes read one file, and a change
+ * to it is already defined to need a daemon restart. A route that is not in the file is a route
+ * this machine does not serve, and the caller fails closed rather than guessing a port.
+ */
+function readRoutePort(name: string): number | null {
+    try {
+        const home = process.env.HAPPY_HOME_DIR ?? configuration.happyHomeDir;
+        const parsed = JSON.parse(readFileSync(join(home, 'proxy-routes.json'), 'utf8')) as Record<string, unknown>;
+        const port = Number(parsed[name]);
+        return Number.isInteger(port) && port > 0 && port < 65536 ? port : null;
+    } catch {
+        return null;
+    }
 }
 
 function localProxyUrl(): string | null {

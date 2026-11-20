@@ -1036,6 +1036,10 @@ export const zhHans: TranslationStructure = {
         deleteProfile: '删除配置文件',
         proxyViaRelay: '通过中继转发流量',
         proxyViaRelayDescription: '将此配置文件的流量经中继发出：环境变量里配置了 SOCKS5 代理时先经该代理，否则由中继直接连接目标。关闭时按本机的代理设置走。',
+        proxyRoute: '中继路由',
+        proxyRouteDescription: '让此配置文件经本机提供的具名路由发出，例如 "personal"。路由定义在中继上，本机只在固定端口上暴露它。留空则使用上面的开关。',
+        proxyRoutePlaceholder: 'personal',
+        proxyRouteNone: '直连',
 
         profileName: '配置文件名称',
         enterName: '输入配置文件名称',

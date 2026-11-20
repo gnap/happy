@@ -276,7 +276,10 @@ export const MachineMetadataSchema = z.object({
     daemonLastKnownStatus: z.enum(['running', 'shutting-down']).optional(),
     daemonLastKnownPid: z.number().optional(),
     shutdownRequestedAt: z.number().optional(),
-    shutdownSource: z.enum(['happy-app', 'happy-cli', 'os-signal', 'unknown']).optional()
+    shutdownSource: z.enum(['happy-app', 'happy-cli', 'os-signal', 'unknown']).optional(),
+    // Named relay routes this machine serves, names only. What a name stands for stays on the
+    // relay; the fixed port stays in the machine's own routes file.
+    proxyRoutes: z.array(z.string()).optional()
 });
 
 export type MachineMetadata = z.infer<typeof MachineMetadataSchema>;

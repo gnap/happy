@@ -55,8 +55,12 @@ export type RelayClientHandle = {
    * The relay is the only party that can reach some of the machines a session's proxy is pointed
    * at; this is how the daemon reaches them without a second connection or a second address. The
    * stream is the transport, not the protocol: the caller speaks SOCKS5 over it.
+   *
+   * With `route`, the relay dials that route's own hop and speaks SOCKS5 on the daemon's behalf —
+   * the hop, its address and its credentials stay on the relay, and the bytes here are already the
+   * target's.
    */
-  openEgress: (host: string, port: number) => Promise<Duplex>;
+  openEgress: (host: string, port: number, route?: string) => Promise<Duplex>;
   stop: () => void;
 };
 
@@ -126,7 +130,7 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
   }>();
   let nextEgressId = 1;
 
-  const openEgress = (host: string, port: number): Promise<Duplex> => {
+  const openEgress = (host: string, port: number, route?: string): Promise<Duplex> => {
     const send = publishFrame;
     if (!send || stopped) return Promise.reject(new Error('relay is not connected'));
     const id = nextEgressId++;
@@ -149,7 +153,7 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
         timer,
       });
       try {
-        send({ t: 'eg-open', id, host, port });
+        send(route ? { t: 'eg-open', id, host, port, route } : { t: 'eg-open', id, host, port });
       } catch (error) {
         clearTimeout(timer);
         egressOpening.delete(id);

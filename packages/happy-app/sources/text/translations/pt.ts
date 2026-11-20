@@ -1034,6 +1034,10 @@ export const pt: TranslationStructure = {
         deleteProfile: 'Eliminar perfil',
         proxyViaRelay: 'Encaminhar o tráfego pelo relay',
         proxyViaRelayDescription: 'Envia o tráfego deste perfil através do relay: pelo proxy SOCKS5 se o ambiente definir um, ou diretamente a partir do relay caso contrário. Desativado, usa as definições de proxy desta máquina.',
+        proxyRoute: 'Rota do relay',
+        proxyRouteDescription: 'Envia este perfil por uma rota com nome servida pela máquina, como "personal". A rota é definida no relay; a máquina expõe-a numa porta fixa. Deixe vazio para usar o interruptor acima.',
+        proxyRoutePlaceholder: 'personal',
+        proxyRouteNone: 'Direto',
 
         profileName: 'Nome do perfil',
         enterName: 'Digite o nome do perfil',
