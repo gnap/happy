@@ -656,6 +656,28 @@ describe('relay', () => {
         }
     });
 
+    it('serves a route with no hop by dialling the target from the relay', async () => {
+        const target = await startEchoTarget();
+        try {
+            // null is a route, not a missing one: the relay's own way out, chosen by name.
+            relay = startRelay({ port: 0, routes: { direct: null } });
+            const d = await connectDaemon(relay.port);
+            await until(() => d.frames.some((f) => f.t === 'ok'));
+            await until(() => d.frames.some((f) => f.t === 'routes'));
+            expect(d.frames.find((f) => f.t === 'routes').names).toEqual(['direct']);
+
+            d.ws.send(JSON.stringify({ t: 'eg-open', id: 5, route: 'direct', host: '127.0.0.1', port: target.port }));
+            await until(() => d.frames.some((f) => f.t === 'eg-ok'));
+            expect(d.frames.some((f) => f.t === 'eg-ok')).toBe(true);
+
+            d.ws.send(JSON.stringify({ t: 'eg-data', id: 5, d: Buffer.from('direct').toString('base64') }));
+            await until(() => d.frames.some((f) => f.t === 'eg-data'));
+            expect(Buffer.from(d.frames.find((f) => f.t === 'eg-data').d, 'base64').toString()).toBe('direct');
+        } finally {
+            await target.close();
+        }
+    });
+
     it('refuses an unknown route instead of dialling the target itself', async () => {
         relay = startRelay({ port: 0, routes: { personal: 'socks5h://127.0.0.1:1' } });
         const d = await connectDaemon(relay.port);

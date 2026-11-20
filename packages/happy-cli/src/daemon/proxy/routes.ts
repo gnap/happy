@@ -12,7 +12,9 @@
  * agent would turn a working route into a refused connection with no event between them.
  */
 import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { logger } from '@/ui/logger';
+import { configuration } from '@/configuration';
 
 export type LocalRoute = {
     /** The route name, as the relay defines it. */
@@ -62,4 +64,15 @@ export function loadLocalRoutes(filePath: string): LocalRoute[] {
         routes.push({ name, port });
     }
     return routes;
+}
+
+/**
+ * The route names this machine serves, for the machine metadata an App reads.
+ *
+ * Names only, and only when there is something to say: a machine that serves no routes publishes
+ * nothing rather than an empty list, which keeps older App builds from having to understand a new
+ * field just to learn there is nothing in it.
+ */
+export function localRouteNames(): string[] {
+    return loadLocalRoutes(join(configuration.happyHomeDir, 'proxy-routes.json')).map((route) => route.name);
 }
