@@ -143,7 +143,14 @@ export const MachineMetadataSchema = z.object({
   happyCliVersion: z.string(),
   homeDir: z.string(),
   happyHomeDir: z.string(),
-  happyLibDir: z.string()
+  happyLibDir: z.string(),
+  /**
+   * The named relay routes this machine serves, names only.
+   *
+   * Published so an App can offer them when editing a profile. What a name stands for — the hop
+   * and its credentials — stays on the relay; the port stays in this machine's own routes file.
+   */
+  proxyRoutes: z.array(z.string()).optional()
 })
 
 export type MachineMetadata = z.infer<typeof MachineMetadataSchema>
