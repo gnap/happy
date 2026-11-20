@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { notify } = vi.hoisted(() => ({
@@ -19,8 +22,8 @@ import { configuration } from '@/configuration';
 
 const TOUCHED = [
     'ALL_PROXY', 'all_proxy', 'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy',
-    'NO_PROXY', 'no_proxy', 'HAPPY_LOCAL_PROXY_URL', 'HAPPY_PROXY_VIA_RELAY', 'ANTHROPIC_BASE_URL',
-    'HOP_USER', 'HOP_PASS',
+    'NO_PROXY', 'no_proxy', 'HAPPY_LOCAL_PROXY_URL', 'HAPPY_PROXY_VIA_RELAY', 'HAPPY_PROXY_ROUTE',
+    'HAPPY_HOME_DIR', 'ANTHROPIC_BASE_URL', 'HOP_USER', 'HOP_PASS',
 ];
 const LOCAL_URL = 'http://abc123@127.0.0.1:41234';
 const HOP = 'socks5h://user:pass@hop.example:1080';
@@ -91,6 +94,40 @@ describe('applyNetworkProxyPolicy', () => {
         expect(policy.registration).toEqual({ token: 'abc123', socks5: HOP, viaRelay: false, label: 'spawned' });
         expect(process.env.ALL_PROXY).toBe(LOCAL_URL);
         expect(process.env.HTTPS_PROXY).toBe(LOCAL_URL);
+    });
+
+    it('points the agent at a named route\'s fixed port and registers nothing', () => {
+        const home = mkdtempSync(join(tmpdir(), 'happy-route-'));
+        writeFileSync(join(home, 'proxy-routes.json'), JSON.stringify({ personal: 57999 }));
+        process.env.HAPPY_HOME_DIR = home;
+
+        const policy = applyNetworkProxyPolicy(
+            { HAPPY_PROXY_ROUTE: 'personal', ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic' },
+            { label: 'routed' },
+        );
+
+        // The daemon is the one holding the route; this process has nothing to tell it.
+        expect(policy.registration).toBeNull();
+        expect(policy.env).toEqual({ ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic' });
+        expect(process.env.ALL_PROXY).toBe('http://127.0.0.1:57999');
+        expect(process.env.HTTPS_PROXY).toBe('http://127.0.0.1:57999');
+        // The model endpoint takes the route; the happy server does not.
+        expect(process.env.NO_PROXY).not.toContain('api.deepseek.com');
+        expect(process.env.NO_PROXY?.split(',')).toContain(new URL(configuration.serverUrl).hostname);
+        expect(notify).not.toHaveBeenCalled();
+    });
+
+    it('refuses a named route this machine does not serve', () => {
+        const home = mkdtempSync(join(tmpdir(), 'happy-route-'));
+        writeFileSync(join(home, 'proxy-routes.json'), JSON.stringify({ personal: 57999 }));
+        process.env.HAPPY_HOME_DIR = home;
+
+        const policy = applyNetworkProxyPolicy({ HAPPY_PROXY_ROUTE: 'not-here' });
+
+        expect(policy.registration).toBeNull();
+        expect(process.env.ALL_PROXY).toBeUndefined();
+        expect(process.env.HTTPS_PROXY).toBeUndefined();
+        expect(notify).not.toHaveBeenCalled();
     });
 
     it('expands a hop the profile names by reference before registering it', () => {

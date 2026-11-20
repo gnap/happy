@@ -54,6 +54,7 @@ import { startLanDiscovery, type LanDiscoveryHandle } from './lanDiscovery';
 import { ENDPOINT_PROTOCOL_VERSION, startEndpointPublisher, type EndpointPublisherHandle, type LanEndpoint } from './lanEndpoints';
 import { startRelayClient, type RelayClientHandle } from './relay/relayClient';
 import { startLocalProxy, type LocalProxyHandle } from './proxy/httpProxy';
+import { loadLocalRoutes } from './proxy/routes';
 import type { ProxyRoute } from './proxy/transport';
 import { directoryRows, type DirectorySession } from './relay/directory';
 import { buildSessionScopeUnitName, resolveSessionScopeMode, scopeUnitFromProcCgroup, signalSession, spawnHappyCLIInSessionScope } from './linux/sessionScope';
@@ -969,6 +970,8 @@ export async function startDaemon(): Promise<void> {
     const proxyRoutes = new Map<string, ProxyRoute>();
     /** The loopback HTTP proxy sessions are pointed at; started below, beside the control server. */
     let localProxy: LocalProxyHandle | null = null;
+    /** One fixed-port listener per named relay route, from the machine's own configuration. */
+    const routeProxies: LocalProxyHandle[] = [];
 
     // Spawn a new session (sessionId reserved for future --resume functionality)
     const spawnSession = async (options: SpawnSessionOptions): Promise<SpawnSessionResult> => {
@@ -2333,6 +2336,23 @@ export async function startDaemon(): Promise<void> {
       // Not fatal: a session whose profile names a hop refuses its requests instead of dialling
       // the hop directly, which is the safe half of the feature and no worse than no proxy.
       logger.warn('[DAEMON RUN] Session proxy not started; SOCKS5 profiles will be refused', { error: String(error) });
+    }
+
+    // Named routes, on the fixed ports this machine assigned them. These belong to no session:
+    // any process that points at the port uses the route, and a route that fails to start is
+    // reported and skipped rather than taking the others down.
+    const routeConfig = loadLocalRoutes(join(configuration.happyHomeDir, 'proxy-routes.json'));
+    for (const route of routeConfig) {
+      try {
+        routeProxies.push(await startLocalProxy({
+          fixedRoute: { relayRoute: route.name, viaRelay: true, label: `route:${route.name}` },
+          port: route.port,
+          relay: () => relayClient,
+        }));
+        logger.debug(`[DAEMON RUN] Route "${route.name}" listening on 127.0.0.1:${route.port}`);
+      } catch (error) {
+        logger.warn(`[DAEMON RUN] Route "${route.name}" not started on port ${route.port}`, { error: String(error) });
+      }
     }
 
     // Start control server
@@ -3857,6 +3877,8 @@ export async function startDaemon(): Promise<void> {
       endpointPublisher?.stop();
       await localProxy?.stop().catch(() => undefined);
       localProxy = null;
+      await Promise.all(routeProxies.map((proxy) => proxy.stop().catch(() => undefined)));
+      routeProxies.length = 0;
       relayClient?.stop();
       await lanDiscovery?.stop().catch(() => undefined);
       await lanServer?.stop().catch(() => undefined);

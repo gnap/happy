@@ -201,6 +201,42 @@ describe('local HTTP proxy', () => {
         }
     });
 
+    it('serves a named route on its own port, with no token', async () => {
+        const origin = createServer((socket) => socket.pipe(socket));
+        await new Promise<void>((resolve) => origin.listen(0, '127.0.0.1', resolve));
+        const originPort = (origin.address() as AddressInfo).port;
+        const requested: Array<{ host: string; port: number; route?: string }> = [];
+        const relay = {
+            openEgress: async (host: string, port: number, route?: string) => {
+                requested.push({ host, port, route });
+                const socket = connect({ host: '127.0.0.1', port: originPort });
+                await new Promise<void>((resolve, reject) => {
+                    socket.once('connect', resolve);
+                    socket.once('error', reject);
+                });
+                return socket;
+            },
+        } as unknown as RelayClientHandle;
+        const proxy = await startLocalProxy({
+            // No getRoute and no token: the route is the listener's whole identity.
+            fixedRoute: { relayRoute: 'personal', viaRelay: true, label: 'route:personal' },
+            port: 0,
+            relay: () => relay,
+        });
+        const client = await openClient(proxy.port);
+        try {
+            client.write('CONNECT origin.test:443 HTTP/1.1\r\n\r\nping');
+            const response = await readUntil(client, (text) => text.includes('ping'));
+            expect(response.startsWith('HTTP/1.1 200')).toBe(true);
+            // The relay is told which route, not which hop: the hop is the relay's own definition.
+            expect(requested).toEqual([{ host: 'origin.test', port: 443, route: 'personal' }]);
+        } finally {
+            client.destroy();
+            await proxy.stop();
+            await new Promise<void>((resolve) => origin.close(() => resolve()));
+        }
+    });
+
     it('fails closed when the relay the route needs is not connected', async () => {
         const proxy = await startLocalProxy({
             getRoute: (token) => token === TOKEN

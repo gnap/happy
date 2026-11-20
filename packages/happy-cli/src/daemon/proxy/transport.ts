@@ -20,6 +20,12 @@ export type ProxyRoute = {
     socks5?: string;
     /** Carry the session through the relay instead of dialling anything from this machine. */
     viaRelay: boolean;
+    /**
+     * The relay's own named route. The relay holds the hop this route stands for and performs the
+     * SOCKS5 handshake itself, so neither this process nor the agent learns where it goes. Set on
+     * the daemon's fixed-port listeners, which are not tied to any session.
+     */
+    relayRoute?: string;
     /** Session tag for logs, so a stream can be attributed without naming the address. */
     label?: string;
 };
@@ -32,6 +38,13 @@ export async function openTunnel(
     port: number,
     relay: () => RelayClientHandle | null,
 ): Promise<Duplex> {
+    if (route.relayRoute) {
+        // The relay owns the whole path to the hop, including the handshake. What arrives here is
+        // already the target's stream, which is why nothing below this point runs for it.
+        const client = relay();
+        if (!client) throw new Error('the relay is not available');
+        return client.openEgress(host, port, route.relayRoute);
+    }
     if (!route.socks5) {
         // No hop: the relay is the egress. It resolves the name and connects to the target, so
         // the bytes the agent writes are the bytes the origin sees.
