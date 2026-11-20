@@ -1051,7 +1051,7 @@ export const en = {
         copyProfile: 'Copy Profile',
         deleteProfile: 'Delete Profile',
         proxyViaRelay: 'Route SOCKS5 through the relay',
-        proxyViaRelayDescription: 'When this profile sets a SOCKS5 proxy, requests reach it through the relay instead of from this machine. Turn off if the machine can reach the hop directly.',
+        proxyViaRelayDescription: 'When this profile sets a SOCKS5 proxy, requests reach it through the relay instead of from this machine. Turn on only when this machine cannot reach the hop directly.',
         addProfileTitle: 'Add New Profile',
         delete: {
             title: 'Delete Profile',

@@ -95,7 +95,7 @@ export const it: TranslationStructure = {
         copyProfile: 'Copia profilo',
         deleteProfile: 'Elimina profilo',
         proxyViaRelay: 'SOCKS5 tramite il relay',
-        proxyViaRelayDescription: 'Quando questo profilo imposta un proxy SOCKS5, le richieste lo raggiungono tramite il relay invece che da questa macchina. Disattiva se la macchina può raggiungere l\'hop direttamente.',
+        proxyViaRelayDescription: 'Quando questo profilo imposta un proxy SOCKS5, le richieste lo raggiungono tramite il relay invece che da questa macchina. Attivalo solo se questa macchina non può raggiungere l\'hop direttamente.',
 
         addProfileTitle: 'Aggiungi nuovo profilo',
         delete: {

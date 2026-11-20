@@ -35,9 +35,9 @@ export function ProfileEditForm({
 
     const [name, setName] = React.useState(profile.name || '');
 
-    // On unless the profile opted out. Only consulted when the profile's environment names a
-    // SOCKS5 hop; without one there is nothing to route.
-    const [proxyViaRelay, setProxyViaRelay] = React.useState(profile.proxyViaRelay ?? true);
+    // Off unless the profile opted in. Only consulted when the profile's environment names a
+    // SOCKS5 hop, and only the profiles that need the relay turn it on.
+    const [proxyViaRelay, setProxyViaRelay] = React.useState(profile.proxyViaRelay ?? false);
 
     const handleSave = () => {
         if (!name.trim()) return;

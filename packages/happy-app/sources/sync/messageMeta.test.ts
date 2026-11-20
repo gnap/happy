@@ -104,12 +104,12 @@ describe('resolveMessageProfileEnv', () => {
         expect(resolveMessageProfileEnv({ profileId: undefined }, [llmCenterProfile])).toBeUndefined();
     });
 
-    it('sends relay on by default and follows an explicit opt-out', () => {
-        expect(resolveMessageProxyViaRelay({ profileId: 'llm-center-test' }, [llmCenterProfile])).toBe(true);
+    it('sends direct by default and follows an explicit relay opt-in', () => {
+        expect(resolveMessageProxyViaRelay({ profileId: 'llm-center-test' }, [llmCenterProfile])).toBe(false);
         expect(resolveMessageProxyViaRelay(
-            { profileId: 'direct-test' },
-            [{ ...llmCenterProfile, id: 'direct-test', proxyViaRelay: false }],
-        )).toBe(false);
+            { profileId: 'relay-test' },
+            [{ ...llmCenterProfile, id: 'relay-test', proxyViaRelay: true }],
+        )).toBe(true);
     });
 
     it('states no relay choice when the session has no profile', () => {

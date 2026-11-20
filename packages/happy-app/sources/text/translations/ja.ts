@@ -98,7 +98,7 @@ export const ja: TranslationStructure = {
         copyProfile: 'プロファイルをコピー',
         deleteProfile: 'プロファイルを削除',
         proxyViaRelay: 'SOCKS5をリレー経由で転送',
-        proxyViaRelayDescription: 'このプロファイルにSOCKS5プロキシが設定されている場合、リクエストはこのマシンからではなくリレー経由で届きます。マシンからホップに直接接続できる場合はオフにしてください。',
+        proxyViaRelayDescription: 'このプロファイルにSOCKS5プロキシが設定されている場合、リクエストはこのマシンからではなくリレー経由で届きます。このマシンからホップに直接接続できない場合にのみオンにしてください。',
 
         addProfileTitle: '新しいプロファイルを追加',
         delete: {
