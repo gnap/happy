@@ -12,6 +12,7 @@ import { MachineMetadata, DaemonState, Machine, Update, UpdateMachineBody } from
 import { registerCommonHandlers, SpawnSessionOptions, SpawnSessionResult } from '../modules/common/registerCommonHandlers';
 import { encodeBase64, decodeBase64, encrypt, decrypt } from './encryption';
 import { backoff } from '@/utils/time';
+import { localRouteNames } from '@/daemon/proxy/routes';
 import { isBun, isNode } from '@/utils/runtime';
 import { RpcHandlerManager } from './rpc/RpcHandlerManager';
 import type { ArchiveSessionResult, RestartSessionResult } from '../daemon/types';
@@ -20,6 +21,11 @@ import type { ArchiveSessionResult, RestartSessionResult } from '../daemon/types
 const DAEMON_STATE_WRITE_TIMEOUT_MS = 2000;
 
 function getLocalMachineMetadata(): MachineMetadata {
+    // The routes this machine serves are part of what it is, as far as an App is concerned: they
+    // are what a profile can choose. Names only — the hop stays on the relay, the port stays here.
+    // Read on each sync rather than cached: this runs rarely, and a routes file edited without a
+    // restart is exactly the case this comparison exists to notice.
+    const proxyRoutes = localRouteNames();
     return {
         host: os.hostname(),
         platform: os.platform(),
@@ -27,6 +33,7 @@ function getLocalMachineMetadata(): MachineMetadata {
         homeDir: os.homedir(),
         happyHomeDir: configuration.happyHomeDir,
         happyLibDir: projectPath(),
+        ...(proxyRoutes.length > 0 ? { proxyRoutes } : {}),
     };
 }
 
