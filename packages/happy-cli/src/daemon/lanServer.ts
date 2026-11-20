@@ -28,7 +28,7 @@ import websocket, { type WebSocket } from '@fastify/websocket';
 import { logger } from '@/ui/logger';
 import type { SessionLogEntry } from '@/api/sessionLog';
 import type { ArchiveSessionResult } from './types';
-import type { SessionCondition, SessionPhase } from './sessionStatus';
+import type { SessionCondition, SessionDesiredLifecycle, SessionDivergence, SessionPhase } from './sessionStatus';
 
 /** How long an issued bearer token stays valid. Short because it travels over cleartext. */
 const TOKEN_TTL_MS = 90_000;
@@ -145,6 +145,16 @@ export type LanSessionSummary = {
   observedAt?: number;
   /** A short explanation of the phase. */
   reason?: string;
+  /** The lifecycle the machine's log wants, when it has a spec for the row. */
+  desiredLifecycle?: SessionDesiredLifecycle;
+  /**
+   * A want the facts do not reflect yet, with the reason the reconciler last gave.
+   *
+   * `blocked` is the point at which the machine stopped retrying; a reader should draw the row as
+   * stuck rather than as still working. Absent means the want has been realized, or that this is
+   * a row the machine has no spec for.
+   */
+  divergence?: SessionDivergence;
   /** The facts behind the phase, for a reader that wants more than the phase. */
   conditions?: SessionCondition[];
 };

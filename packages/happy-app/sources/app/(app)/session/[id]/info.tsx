@@ -7,11 +7,12 @@ import { Item } from '@/components/Item';
 import { ItemGroup } from '@/components/ItemGroup';
 import { ItemList } from '@/components/ItemList';
 import { Avatar } from '@/components/Avatar';
-import { useDaemonVersions, useSession, useIsDataReady, useSessionMessages, useMachine, useSessionDesktop } from '@/sync/storage';
+import { useDaemonVersions, useSession, useIsDataReady, useSessionMessages, useMachine, useSessionDesktop, useSessionRuntimeEntry } from '@/sync/storage';
 import { sync, type ChannelReason } from '@/sync/sync';
 import { useSessionChannel } from '@/hooks/useSessionChannel';
 import { CHANNEL_ICONS } from '@/sync/machinePresence';
-import { getSessionName, useSessionStatus, formatOSPlatform, formatPathRelativeToHome, getSessionAvatarId } from '@/utils/sessionUtils';
+import { getSessionName, useSessionStatus, formatOSPlatform, formatPathRelativeToHome, getSessionAvatarId, sessionRuntimeStatusText } from '@/utils/sessionUtils';
+import { sessionRuntimeDisplay } from '@/utils/sessionRuntimeStatus';
 import { sessionIsRestarting } from '@/utils/sessionRestart';
 import * as Clipboard from 'expo-clipboard';
 import { Modal } from '@/modal';
@@ -182,6 +183,15 @@ function SessionInfoContent({ session }: { session: Session }) {
     const devModeEnabled = __DEV__;
     const sessionName = getSessionName(session);
     const sessionStatus = useSessionStatus(session);
+    /**
+     * What the owning machine last said about this session's lifecycle, and what that adds up to.
+     *
+     * The row already draws the short version of both; this page shows the projection itself —
+     * the phase and the two generation numbers — because "the machine says it is restarting" is
+     * only checkable when the values behind it are visible.
+     */
+    const runtime = useSessionRuntimeEntry(session.id);
+    const runtimeDisplay = sessionRuntimeDisplay(runtime);
     /**
      * Whether restarting this session would actually change its build.
      *
@@ -451,6 +461,52 @@ function SessionInfoContent({ session }: { session: Session }) {
                             icon={<Ionicons name="warning-outline" size={29} color="#FF9500" />}
                             showChevron={false}
                             onPress={handleCopyUpdateCommand}
+                        />
+                    </ItemGroup>
+                )}
+
+                {/* What the machine says it is doing, when it says anything. An older daemon
+                    contributes no entry at all, which is why the group is absent rather than
+                    showing zeros. */}
+                {runtime && (
+                    <ItemGroup title={t('sessionInfo.machineStatus')}>
+                        <Item
+                            title={runtimeDisplay
+                                ? sessionRuntimeStatusText(runtimeDisplay)
+                                : runtime.phase ?? t('status.unknown')}
+                            subtitle={[
+                                // The want, the observed phase, then the two revisions behind
+                                // them: the machine's own values rather than a sentence about
+                                // them, so a wrong verdict can be traced to the field that is wrong.
+                                runtime.desiredLifecycle,
+                                runtimeDisplay && runtime.phase ? runtime.phase : undefined,
+                                t('sessionInfo.machineStatusDetail', {
+                                    generation: runtime.generation ?? 0,
+                                    observed: runtime.observedGeneration ?? 0,
+                                }),
+                            ].filter(Boolean).join(' · ')}
+                            subtitleLines={0}
+                            icon={<Ionicons
+                                name={runtimeDisplay?.kind === 'blocked'
+                                    ? 'alert-circle-outline'
+                                    : runtimeDisplay?.kind === 'applying'
+                                        ? 'sync-circle-outline'
+                                        : runtime.divergence !== undefined
+                                            // A want the reader stopped drawing because it went
+                                            // stale is not the same as a settled one: the phase
+                                            // shown is the last thing the machine said.
+                                            ? 'ellipse-outline'
+                                            : 'checkmark-circle-outline'}
+                                size={29}
+                                color={runtimeDisplay?.kind === 'blocked'
+                                    ? '#FF3B30'
+                                    : runtimeDisplay?.kind === 'applying'
+                                        ? '#007AFF'
+                                        : runtime.divergence !== undefined
+                                            ? '#8E8E93'
+                                            : '#34C759'}
+                            />}
+                            showChevron={false}
                         />
                     </ItemGroup>
                 )}
@@ -758,6 +814,21 @@ function SessionInfoContent({ session }: { session: Session }) {
                                             statusDotColor: sessionStatus.statusDotColor,
                                             isPulsing: sessionStatus.isPulsing
                                         }, null, 2)}
+                                        language="json"
+                                    />
+                                </View>
+                            </>
+                        )}
+                        {runtime && (
+                            <>
+                                <Item
+                                    title="Session Runtime"
+                                    icon={<Ionicons name="pulse-outline" size={29} color="#FF3B30" />}
+                                    showChevron={false}
+                                />
+                                <View style={{ marginHorizontal: 16, marginBottom: 12 }}>
+                                    <CodeView
+                                        code={JSON.stringify(runtime, null, 2)}
                                         language="json"
                                     />
                                 </View>

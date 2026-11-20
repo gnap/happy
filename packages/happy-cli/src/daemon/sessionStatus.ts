@@ -46,6 +46,27 @@ export type SessionCondition = {
     updatedAt: number;
 };
 
+/** The lifecycle this machine's log can want a session to have. */
+export type SessionDesiredLifecycle = 'running' | 'archived';
+
+/**
+ * A want the facts do not reflect yet, with the reason the reconciler last gave.
+ *
+ * `observedGeneration < generation` is the general statement; the reason makes the particular
+ * one readable. `blocked` is the point at which retrying has stopped being useful — the reader
+ * should show the want as stuck rather than as still in progress.
+ */
+export type SessionDivergence = {
+    desired: SessionDesiredLifecycle;
+    generation: number;
+    reason: string;
+    /** When the want was stated, in epoch milliseconds. */
+    since: number;
+    /** Attempts the reconciler has made to realize this generation, when it has tried. */
+    attempts?: number;
+    blocked?: boolean;
+};
+
 export type SessionStatus = {
     phase: SessionPhase;
     /**
@@ -66,6 +87,10 @@ export type SessionStatus = {
     observedAt: number;
     /** A short, human-readable explanation of the phase. */
     reason?: string;
+    /** The lifecycle the log wants, when this machine has a spec for the session. */
+    desiredLifecycle?: SessionDesiredLifecycle;
+    /** Present while the desired lifecycle is not yet reflected by the facts. */
+    divergence?: SessionDivergence;
     conditions: SessionCondition[];
 };
 
@@ -99,6 +124,20 @@ export type SessionStatusFacts = {
     archivedAt?: number;
     /** The spec revision, when known independently of the stored record. */
     generation?: number;
+    /** The newest want in this machine's log, when the caller has folded one. */
+    desired?: {
+        lifecycle: SessionDesiredLifecycle;
+        generation: number;
+        /** When the want was written, in epoch milliseconds. */
+        at: number;
+    };
+    /** What the reconciler has done about a mismatch, when it has tried. */
+    reconciliation?: {
+        reason: string;
+        since: number;
+        attempts: number;
+        blocked?: boolean;
+    };
     now?: number;
 };
 
@@ -109,7 +148,7 @@ export type SessionStatusFacts = {
  * flight is next (it explains why liveness reads false), a live process next, and only then the
  * durable record and the import.
  */
-export function sessionStatusOf(facts: SessionStatusFacts): SessionStatus {
+function projectSessionStatus(facts: SessionStatusFacts): SessionStatus {
     const now = facts.now ?? Date.now();
     const generation = facts.generation ?? facts.stored?.generation ?? 0;
 
@@ -157,7 +196,16 @@ export function sessionStatusOf(facts: SessionStatusFacts): SessionStatus {
     if (facts.live) {
         const observedAt = facts.live.lastHeartbeat ?? facts.live.spawnTime ?? now;
         if (facts.registered) {
-            return { phase: 'Running', generation, observedGeneration: generation, observedAt, conditions };
+            // The process that is running is the one that registered, and its generation is the
+            // record's. A newer want can be accepted while that old process is still alive; saying
+            // it had already observed the new generation would hide exactly that gap.
+            return {
+                phase: 'Running',
+                generation,
+                observedGeneration: facts.stored?.generation ?? generation,
+                observedAt,
+                conditions,
+            };
         }
         return {
             phase: 'Starting',
@@ -195,7 +243,7 @@ export function sessionStatusOf(facts: SessionStatusFacts): SessionStatus {
         return {
             phase: 'Unknown',
             generation,
-            observedGeneration: 0,
+            observedGeneration: facts.stored.generation ?? 0,
             observedAt: facts.stored.updatedAt ?? facts.stored.lastHeartbeat ?? now,
             reason: 'imported from the server; this machine does not run it',
             conditions,
@@ -205,9 +253,68 @@ export function sessionStatusOf(facts: SessionStatusFacts): SessionStatus {
     return {
         phase: 'Stopped',
         generation,
-        observedGeneration: generation,
+        // The record says which generation its process realized. A restart that never brought a
+        // new process up leaves this below the spec, which is the gap the reconciler acts on.
+        observedGeneration: facts.stored.generation ?? 0,
         observedAt: facts.stored.exitTime ?? facts.stored.updatedAt ?? facts.stored.lastHeartbeat ?? now,
         reason: facts.stored.exitReason ?? 'no process is running',
         conditions,
+    };
+}
+
+/**
+ * The session's phase, plus what the machine wants it to be when a spec says so.
+ *
+ * Divergence is derived from the same comparison a reader would make — the desired generation
+ * against the one the facts reflect — so a reader never has to re-implement the rule. The
+ * reconciler's own progress (`reconciliation`) only makes the reason more precise; its absence
+ * still leaves a truthful `want-not-observed`.
+ */
+export function sessionStatusOf(facts: SessionStatusFacts): SessionStatus {
+    const status = projectSessionStatus(facts);
+    if (!facts.desired) {
+        return status;
+    }
+    const divergence = divergenceOf(facts, status, facts.desired);
+    return {
+        ...status,
+        desiredLifecycle: facts.desired.lifecycle,
+        ...(divergence ? { divergence } : {}),
+    };
+}
+
+function divergenceOf(
+    facts: SessionStatusFacts,
+    status: SessionStatus,
+    desired: NonNullable<SessionStatusFacts['desired']>,
+): SessionDivergence | undefined {
+    const runningButArchived = desired.lifecycle === 'running' && status.phase === 'Archived';
+    const archivedButPresent = desired.lifecycle === 'archived' && status.phase !== 'Archived';
+    const wantNotObserved = desired.lifecycle === 'running'
+        && status.phase !== 'Archived'
+        && status.observedGeneration < desired.generation;
+    if (!runningButArchived && !archivedButPresent && !wantNotObserved) {
+        return undefined;
+    }
+
+    const inFlight = status.phase === 'Scheduling'
+        || status.phase === 'Starting'
+        || status.phase === 'Restarting';
+    const reason = facts.reconciliation?.reason
+        ?? (runningButArchived
+            ? 'archived-but-want-running'
+            : archivedButPresent
+                ? 'spec-archived'
+                : inFlight
+                    ? 'in-flight'
+                    : 'want-not-observed');
+    return {
+        desired: desired.lifecycle,
+        generation: desired.generation,
+        reason,
+        since: facts.reconciliation?.since ?? desired.at,
+        ...(facts.reconciliation
+            ? { attempts: facts.reconciliation.attempts, blocked: facts.reconciliation.blocked === true }
+            : {}),
     };
 }

@@ -356,8 +356,13 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
                             );
                         }
                         
-                        // Show status dot only for permission_required/thinking states
-                        if (sessionStatus.state === 'permission_required' || sessionStatus.state === 'thinking') {
+                        // Show the dot for the states the compact row has no line of text for:
+                        // something is asked of the reader (permission), something is happening
+                        // (thinking, applying), or the machine gave up (blocked).
+                        if (sessionStatus.state === 'permission_required'
+                            || sessionStatus.state === 'thinking'
+                            || sessionStatus.state === 'applying'
+                            || sessionStatus.state === 'blocked') {
                             return (
                                 <View style={[styles.statusDotContainer, { marginRight: 8 }]}>
                                     <SessionStatusDot sessionId={session.id} color={sessionStatus.statusDotColor} isPulsing={sessionStatus.isPulsing} />

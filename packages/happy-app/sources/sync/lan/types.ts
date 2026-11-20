@@ -71,6 +71,22 @@ export type PublishedLanEndpoints = {
     at: number;
 };
 
+/**
+ * A want the machine has accepted and has not realized yet.
+ *
+ * `blocked` is the point at which the machine stopped retrying: the row is not still working, it
+ * is stuck, and the user is the only party that can resolve it. `desired` and `reason` are plain
+ * strings because a newer machine may name a state this build has not heard of.
+ */
+export type SessionDivergence = {
+    desired: string;
+    generation: number;
+    reason: string;
+    since: number;
+    attempts?: number;
+    blocked?: boolean;
+};
+
 export type LanSessionSummary = {
     /**
      * The server's id for the session, absent until the session has registered.
@@ -123,6 +139,10 @@ export type LanSessionSummary = {
     observedGeneration?: number;
     observedAt?: number;
     reason?: string;
+    /** The lifecycle the machine's log wants, when it has a spec for the row. */
+    desiredLifecycle?: string;
+    /** A want the machine has accepted and not realized yet, with its retry state. */
+    divergence?: SessionDivergence;
 };
 
 /**

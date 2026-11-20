@@ -87,6 +87,11 @@ export const en = {
         activeNow: 'Active now',
         unknown: 'unknown',
         creating: 'Creating…',
+        archiving: 'Archiving…',
+        applying: 'Applying…',
+        couldNotStart: 'Could not start',
+        couldNotArchive: 'Could not archive',
+        couldNotApply: 'Could not apply the change',
     },
 
     time: {
@@ -385,6 +390,9 @@ export const en = {
         channelWhyNotOnNetwork: 'Machine not seen on this network',
         channelWhyNoKey: 'No key for this machine on this device',
         channelWhyUnknown: 'Waiting for session details',
+        machineStatus: 'Machine Status',
+        machineStatusDetail: ({ generation, observed }: { generation: number; observed: number }) =>
+            `Revision ${generation} · observed ${observed}`,
         created: 'Created',
         lastUpdated: 'Last Updated',
         sequence: 'Sequence',

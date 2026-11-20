@@ -54,6 +54,25 @@ export const UpdateNewMessageBodySchema = z.object({
 });
 export type UpdateNewMessageBody = z.infer<typeof UpdateNewMessageBodySchema>;
 
+/**
+ * A want the machine's facts do not reflect yet, as the daemon's status projection states it.
+ *
+ * The reason is a plain string for the same reason `phase` is: a newer machine may name a
+ * condition this build has not heard of, and rejecting the frame would lose the rest of it.
+ */
+export const SessionDivergenceSchema = z.object({
+  desired: z.string(),
+  generation: z.number().int().nonnegative(),
+  reason: z.string(),
+  /** When the want was stated, in epoch milliseconds. */
+  since: z.number(),
+  /** Attempts the machine has made to realize this generation, when it has tried. */
+  attempts: z.number().int().nonnegative().optional(),
+  /** The machine has stopped retrying and is asking the user to intervene. */
+  blocked: z.boolean().optional(),
+});
+export type SessionDivergence = z.infer<typeof SessionDivergenceSchema>;
+
 export const UpdateSessionBodySchema = z.object({
   t: z.literal('update-session'),
   id: z.string(),
@@ -93,6 +112,10 @@ export const UpdateSessionBodySchema = z.object({
   observedAt: z.number().nullish(),
   /** Why the phase is what it is, when the machine can say (e.g. `generation-ahead`). */
   reason: z.string().nullish(),
+  /** The lifecycle the machine's log wants, when it has a spec for the session. */
+  desiredLifecycle: z.string().nullish(),
+  /** A want the machine has accepted and not realized yet, with its retry state. */
+  divergence: SessionDivergenceSchema.nullish(),
 });
 export type UpdateSessionBody = z.infer<typeof UpdateSessionBodySchema>;
 

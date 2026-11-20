@@ -129,6 +129,11 @@ export const ja: TranslationStructure = {
         activeNow: 'アクティブ',
         unknown: '不明',
         creating: '作成中…',
+        archiving: 'アーカイブ中…',
+        applying: '適用中…',
+        couldNotStart: '起動できませんでした',
+        couldNotArchive: 'アーカイブできませんでした',
+        couldNotApply: '変更を適用できませんでした',
     },
 
     time: {
@@ -427,6 +432,9 @@ export const ja: TranslationStructure = {
         channelWhyNotOnNetwork: 'このネットワークでマシンが見つかりません',
         channelWhyNoKey: 'このデバイスにこのマシンの鍵がありません',
         channelWhyUnknown: 'セッション情報を待っています',
+        machineStatus: 'マシンの状態',
+        machineStatusDetail: ({ generation, observed }: { generation: number; observed: number }) =>
+            `リビジョン ${generation} · 確認済み ${observed}`,
         created: '作成日時',
         lastUpdated: '最終更新',
         sequence: 'シーケンス',
