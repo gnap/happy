@@ -33,7 +33,7 @@ import { startLanServer, accountFingerprintOf, type LanServerHandle, type LanSes
 import { SidecarHub } from './sidecarHub';
 import { RESTARTING_TTL_MS, expiredRestarting } from './restartTracker';
 import { restartDecision } from './restartDecision';
-import { LifecycleLog } from './lifecycleLog';
+import { foldLifecycleSpecs, LifecycleLog } from './lifecycleLog';
 import { replayToServer } from './lifecycleServerReplay';
 import { ACCOUNT_PROOF_WINDOW_MS } from './accountProof';
 import nacl from 'tweetnacl';
@@ -670,12 +670,30 @@ export async function startDaemon(): Promise<void> {
      * function (or was backfilled from the log at startup), so a second entry would only grow the
      * file.
      */
-    const commitArchive = (sessionId: string, tag?: string): void => {
+    const commitArchive = (sessionId: string, tag?: string): number | undefined => {
       if (archivedSessionIds[sessionId] !== undefined) {
-        return;
+        // A retried archive is still applied; it simply states no new want. Telling the caller
+        // there is no new generation is more honest than inventing one for a fact already written.
+        return undefined;
       }
-      lifecycleLog.record({ op: 'deleted', sessionId, ...(tag ? { tag } : {}) });
+      // The same line is the desired state and its effect: this machine now wants the session
+      // archived, and the deletion is what makes that true. Numbering the want lets a reader see
+      // which of its observations is stale — an archive requested while a restart was in flight is
+      // a newer spec than the restart, and the log order says so.
+      const observedGeneration = Math.max(
+        sessions[sessionId]?.generation ?? 0,
+        stoppedSessions.get(sessionId)?.generation ?? 0,
+      );
+      const generation = observedGeneration + 1;
+      lifecycleLog.record({
+        op: 'deleted',
+        sessionId,
+        ...(tag ? { tag } : {}),
+        lifecycle: 'archived',
+        generation,
+      });
       markSessionArchived(sessionId);
+      return generation;
     };
 
     /** Derive human-readable exit reason from code/signal when no webhook reason was given. */
@@ -937,6 +955,11 @@ export async function startDaemon(): Promise<void> {
             sessionId: s.happySessionId,
             directory: s.directory,
             agent: s.agent,
+            // A registered session is the machine saying it wants this one running. The generation
+            // came to the process from the spawn spec, so a restart's creation is not mistaken for
+            // the original one.
+            lifecycle: 'running',
+            generation: s.generation ?? sessions[s.happySessionId]?.generation ?? 0,
           });
           announceLifecycle();
         }
@@ -1673,7 +1696,7 @@ export async function startDaemon(): Promise<void> {
       forgetPendingSpawnsFor(sessionId, tag);
       // Written first: an archived session is a fact every reader has to be able to replay, and the
       // tracking below is what stops being able to tell them.
-      commitArchive(sessionId, tag);
+      const generation = commitArchive(sessionId, tag);
       let removed = stoppedSessions.delete(sessionId);
       if (removed) {
         logger.debug(`[DAEMON RUN] Archived session ${sessionId}`);
@@ -1689,7 +1712,12 @@ export async function startDaemon(): Promise<void> {
       }
       announceLifecycle();
       persistNow();
-      return { applied: true, known, ...(tag ? { tag } : {}) };
+      return {
+        applied: true,
+        known,
+        ...(tag ? { tag } : {}),
+        ...(generation !== undefined ? { generation } : {}),
+      };
     };
 
     /**
@@ -2104,6 +2132,24 @@ export async function startDaemon(): Promise<void> {
       }
       const nextGeneration = decision.generation;
       const startedAt = Date.now();
+      // The want is written before the work begins, for the same reason a spawn is: when the
+      // restart is still running the world should already say what this machine is trying to make
+      // true. It repeats `created` rather than inventing an op — a session that is being replaced
+      // is still a session this machine wants running, and older readers already know to ignore a
+      // creation they have seen.
+      const restartRecord = sessions[sessionId];
+      if (restartRecord?.sessionTag) {
+        lifecycleLog.record({
+          op: 'created',
+          tag: restartRecord.sessionTag,
+          sessionId,
+          ...(restartRecord.directory ? { directory: restartRecord.directory } : {}),
+          ...(restartRecord.agent ? { agent: restartRecord.agent } : {}),
+          lifecycle: 'running',
+          generation: nextGeneration,
+        });
+        announceLifecycle();
+      }
       restartingStartedAt.set(sessionId, startedAt);
       announceRestarting(sessionId, startedAt, { phase: 'Restarting', generation: nextGeneration });
       // What the closing announcement says. A restart that failed never moved the record, so the
@@ -3386,8 +3432,10 @@ export async function startDaemon(): Promise<void> {
     //  - a tombstone only in an older snapshot predates this log, so backfill it — otherwise the
     //    server replay would never hear about a deletion this machine has been enforcing locally.
     {
+      const entries = lifecycleLog.read();
+      const specs = foldLifecycleSpecs(entries);
       const loggedDeletions = new Set<string>();
-      for (const entry of lifecycleLog.read()) {
+      for (const entry of entries) {
         if (entry.op === 'deleted' && entry.sessionId) {
           loggedDeletions.add(entry.sessionId);
           if (archivedSessionIds[entry.sessionId] === undefined) {
@@ -3400,7 +3448,23 @@ export async function startDaemon(): Promise<void> {
           continue;
         }
         const tag = sessions[sessionId]?.sessionTag;
-        lifecycleLog.record({ op: 'deleted', sessionId, at, ...(tag ? { tag } : {}) });
+        // The tombstone must be newer than every want this machine already recorded for the
+        // session. The state file is written after the log, so a crash in between leaves a
+        // `created` in the log that the snapshot never learned about; taking only the snapshot's
+        // generation would state an older want than the machine actually holds.
+        const observedGeneration = Math.max(
+          sessions[sessionId]?.generation ?? 0,
+          specs.get(tag ?? sessionId)?.generation ?? 0,
+          specs.get(sessionId)?.generation ?? 0,
+        );
+        lifecycleLog.record({
+          op: 'deleted',
+          sessionId,
+          at,
+          ...(tag ? { tag } : {}),
+          lifecycle: 'archived',
+          generation: observedGeneration + 1,
+        });
         logger.debug(`[DAEMON RUN] Backfilled lifecycle tombstone for ${sessionId}`);
       }
     }
