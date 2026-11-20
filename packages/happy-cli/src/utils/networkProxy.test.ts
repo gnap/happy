@@ -14,6 +14,7 @@ vi.mock('@/daemon/controlClient', () => ({
 import {
     applyNetworkProxyPolicy,
     captureSpawnProxyEnv,
+    profileEnvChanged,
     resetNetworkProxyPolicy,
     resetSpawnProxyEnvCapture,
     stripNetworkProxyKeys,
@@ -44,6 +45,23 @@ afterEach(() => {
         if (saved[key] === undefined) delete process.env[key];
         else process.env[key] = saved[key];
     }
+});
+
+describe('profileEnvChanged', () => {
+    it('ignores proxy entries, which never reach the agent', () => {
+        // The message carries the profile's SOCKS5 entry; the applied environment has it stripped
+        // and replaced by the loopback URL. That difference is the policy's doing, not a change
+        // the agent can see, and treating it as one respawned the agent on every message.
+        const applied = { CLAUDE_CODE_OAUTH_TOKEN: 't', TZ: 'America/Los_Angeles' };
+        const message = { ...applied, ALL_PROXY: 'socks5h://user:pass@hop.example:1080' };
+        expect(profileEnvChanged(applied, message)).toBe(false);
+    });
+
+    it('still notices a value or key the agent can see', () => {
+        expect(profileEnvChanged({ A: '1' }, { A: '2' })).toBe(true);
+        expect(profileEnvChanged({ A: '1' }, { A: '1', B: '2' })).toBe(true);
+        expect(profileEnvChanged({ A: '1', B: '2' }, { A: '1' })).toBe(true);
+    });
 });
 
 describe('applyNetworkProxyPolicy', () => {
