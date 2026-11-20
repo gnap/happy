@@ -43,6 +43,12 @@ import {
     pruneA2AInboxOnSessionStart,
 } from '@/a2a/inboxTurnController';
 import { applyProfileEnvToProcess, mergeProfileIntoEnv } from '@/utils/profileEnv';
+import {
+    applyNetworkProxyPolicy,
+    reassertNetworkProxy,
+    resetNetworkProxyPolicy,
+    stripNetworkProxyKeys,
+} from '@/utils/networkProxy';
 
 /** JavaScript runtime to use for spawning Claude Code */
 export type JsRuntime = 'node' | 'bun'
@@ -496,7 +502,9 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     let currentAllowedTools: string[] | undefined = undefined; // Track current allowed tools
     let currentDisallowedTools: string[] | undefined = undefined; // Track current disallowed tools
     let currentProfileId: string | null | undefined = undefined; // Track current env profile id for change detection
-    const daemonClaudeEnvVars: Record<string, string> = (() => {
+    /** The profile's relay/direct choice last applied; null until a message states one. */
+    let currentViaRelay: boolean | null = null;
+    const spawnClaudeEnvVars: Record<string, string> = (() => {
         const explicit = options.claudeEnvVars;
         if (explicit && Object.keys(explicit).length > 0) return { ...explicit };
         // Fallback: capture profile-managed keys from process.env at startup
@@ -508,6 +516,11 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         }
         return fromEnv;
     })();
+    // The baseline a cleared profile returns to, and the record every SDK process inherits. The
+    // profile's SOCKS5 entries are resolved here: a daemon-spawned session gets one loopback proxy
+    // URL in their place, and no session gets the hop address itself.
+    const daemonClaudeEnvVars: Record<string, string> =
+        applyNetworkProxyPolicy(spawnClaudeEnvVars, { label: session.sessionId }).env;
     let currentClaudeEnvVars: Record<string, string> = { ...daemonClaudeEnvVars };
     const claudeTurnActiveRef = { current: false };
     const currentEnhancedMode = (): EnhancedMode => ({
@@ -684,6 +697,10 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         if (profileIdProvided) {
             const messageProfileId = message.meta!.profileId ?? null;
             const messageEnv = message.meta?.environmentVariables;
+            // Absent means the App did not state a choice; null must not be read as "direct".
+            const messageViaRelay =
+                typeof message.meta?.proxyViaRelay === 'boolean' ? message.meta.proxyViaRelay : null;
+            const viaRelayChanged = messageViaRelay !== null && messageViaRelay !== currentViaRelay;
 
             // Detect env change even when profileId is the same (user edited env vars for the active profile).
             let envChanged = false;
@@ -713,40 +730,85 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 }
             }
 
-            if (messageProfileId !== currentProfileId || envChanged) {
+            const profileChanged = messageProfileId !== currentProfileId;
+            if (profileChanged || envChanged || viaRelayChanged) {
                 currentProfileId = messageProfileId;
+                currentViaRelay = messageViaRelay ?? currentViaRelay;
                 if (messageProfileId) {
                     const profileEnv = messageEnv;
                     if (profileEnv && Object.keys(profileEnv).length > 0) {
-                        applyProfileEnvToProcess(profileEnv);
-                        currentClaudeEnvVars = mergeProfileIntoEnv(currentClaudeEnvVars, profileEnv, process.env);
-                        logger.debug(`[loop] Profile env applied from meta: ${messageProfileId} (${Object.keys(profileEnv).join(', ')})`);
+                        // The profile's SOCKS5 entries become the daemon's loopback proxy here;
+                        // the returned env is what the agent may see, and it never carries them.
+                        const policy = applyNetworkProxyPolicy(profileEnv, {
+                            viaRelay: currentViaRelay ?? undefined,
+                            label: session.sessionId,
+                        });
+                        // The turn about to start must not reach the proxy before the daemon has
+                        // been told where its requests go.
+                        await policy.settled;
+                        const resolvedEnv = policy.env;
+                        applyProfileEnvToProcess(resolvedEnv);
+                        currentClaudeEnvVars = mergeProfileIntoEnv(
+                            stripNetworkProxyKeys(currentClaudeEnvVars),
+                            resolvedEnv,
+                            process.env,
+                        );
+                        logger.debug(`[loop] Profile env applied from meta: ${messageProfileId} (${Object.keys(resolvedEnv).join(', ')})`);
                     } else {
                         // Fallback: resolve from local settings (backward compat or App didn't send env vars)
+                        let resolved = false;
                         try {
                             const settings = await readSettings();
                             const profile = settings.profiles.find(p => p.id === messageProfileId);
                             if (profile) {
-                                const localEnv = getProfileEnvironmentVariables(profile);
-                                applyProfileEnvToProcess(localEnv);
-                                currentClaudeEnvVars = mergeProfileIntoEnv(currentClaudeEnvVars, localEnv, process.env);
-                                logger.debug(`[loop] Profile env resolved from local settings: ${messageProfileId} (${Object.keys(localEnv).join(', ')})`);
+                                const policy = applyNetworkProxyPolicy(getProfileEnvironmentVariables(profile), {
+                                    viaRelay: currentViaRelay ?? undefined,
+                                    label: session.sessionId,
+                                });
+                                await policy.settled;
+                                const resolvedEnv = policy.env;
+                                applyProfileEnvToProcess(resolvedEnv);
+                                currentClaudeEnvVars = mergeProfileIntoEnv(
+                                    stripNetworkProxyKeys(currentClaudeEnvVars),
+                                    resolvedEnv,
+                                    process.env,
+                                );
+                                logger.debug(`[loop] Profile env resolved from local settings: ${messageProfileId} (${Object.keys(resolvedEnv).join(', ')})`);
+                                resolved = true;
                             }
                         } catch (error) {
                             logger.debug('[loop] Failed to resolve profile env from local settings:', error);
                         }
+                        if (!resolved && currentViaRelay !== null) {
+                            // The profile carries no environment variables and this machine does
+                            // not know it: the relay choice is still the whole route, and it has
+                            // to reach the daemon before this turn starts.
+                            const policy = applyNetworkProxyPolicy({}, {
+                                viaRelay: currentViaRelay,
+                                label: session.sessionId,
+                            });
+                            await policy.settled;
+                            logger.debug(`[loop] Relay-only profile route applied: ${messageProfileId} (viaRelay=${currentViaRelay})`);
+                        }
                     }
                     if (currentSession) {
                         currentSession.claudeEnvVars = currentClaudeEnvVars;
-                        currentSession.claudeEnvVarsGeneration++;
+                        // The relay choice alone changes nothing the SDK process can see — the
+                        // loopback URL is the same — so it must not respawn the conversation.
+                        if (profileChanged || envChanged) {
+                            currentSession.claudeEnvVarsGeneration++;
+                        }
                     }
                 } else {
                     // profileId explicitly null → reset to daemon-spawn-time baseline
+                    await resetNetworkProxyPolicy();
                     applyProfileEnvToProcess(daemonClaudeEnvVars);
                     currentClaudeEnvVars = { ...daemonClaudeEnvVars };
                     if (currentSession) {
                         currentSession.claudeEnvVars = currentClaudeEnvVars;
-                        currentSession.claudeEnvVarsGeneration++;
+                        if (profileChanged) {
+                            currentSession.claudeEnvVarsGeneration++;
+                        }
                     }
                     logger.debug(`[loop] Profile cleared (profileId: null) → reset to daemon baseline: ${Object.keys(daemonClaudeEnvVars).join(', ') || '(none)'}`);
                 }
@@ -757,6 +819,10 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
         } else {
             logger.debug(`[loop] User message received with no profileId override, using current: ${currentProfileId ?? '(none)'}`);
         }
+        // The daemon's route table lives in memory, so a daemon restart under a live session
+        // empties it. A message is the one point where both processes are certainly alive; the
+        // re-registration costs one loopback request and nothing else when a route is already set.
+        reassertNetworkProxy();
 
         // Check for special commands before processing
         const specialCommand = parseSpecialCommand(getUserMessageText(message));

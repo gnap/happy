@@ -150,6 +150,8 @@ export async function spawnDaemonSession(opts: {
   environmentVariables?: Record<string, string>;
   resumeSessionTag?: string;
   sandboxConfig?: unknown;
+  /** Whether the profile's traffic goes through the relay. Absent means no, matching the profile default. */
+  proxyViaRelay?: boolean;
 }): Promise<{ success: boolean; sessionId?: string; error?: string }> {
   const result = await daemonPost('/spawn-session', {
     directory: opts.directory,
@@ -157,11 +159,35 @@ export async function spawnDaemonSession(opts: {
     environmentVariables: opts.environmentVariables,
     resumeSessionTag: opts.resumeSessionTag,
     sandboxConfig: opts.sandboxConfig,
+    proxyViaRelay: opts.proxyViaRelay,
   });
   if (result.error) return { success: false, error: result.error };
   if (result.success && result.sessionId) return { success: true, sessionId: result.sessionId };
   if (result.success) return { success: true };
   return { success: false, error: (result as any).error ?? 'Spawn failed' };
+}
+
+/**
+ * Registers the proxy route for one session, or clears it.
+ *
+ * Sent by the session process, not the daemon: the profile — and therefore the SOCKS5 address — is
+ * resolved where the agent's environment is built, while the proxy listener lives in the daemon.
+ * The token is the per-session credential, so it is the only thing the daemon needs to tell one
+ * session's requests from another's. Failures are left to the caller's fire-and-forget path: an
+ * unregistered token refuses requests, which is the safe direction.
+ */
+export async function notifyDaemonNetworkProxy(
+  token: string,
+  config: { socks5?: string; viaRelay: boolean; label?: string } | null,
+): Promise<{ error?: string } | any> {
+  return await daemonPost('/proxy-config', {
+    token,
+    // `null` hop with the relay off is the only combination that means "forget this route": a
+    // `null` hop with the relay on is a real route, the relay dialling targets itself.
+    socks5: config?.socks5 ?? null,
+    viaRelay: config?.viaRelay ?? false,
+    ...(config?.label ? { label: config.label } : {}),
+  });
 }
 
 export async function stopDaemonHttp(): Promise<void> {

@@ -138,6 +138,14 @@ export interface SpawnSessionOptions {
         // Common use case: When /tmp has limited space or different permissions
 
     };
+    /**
+     * Whether the profile's SOCKS5 hop is reached through the relay rather than dialled here.
+     *
+     * The daemon does not act on this itself; it becomes `HAPPY_PROXY_VIA_RELAY` in the child, and
+     * the child only applies it when a profile actually names a hop. Absent means off, matching
+     * the profile default: the hop is dialled from this machine unless the profile opts in.
+     */
+    proxyViaRelay?: boolean;
     /** Explicit session tag used when respawning/restarting cursor or ACP sessions. */
     resumeSessionTag?: string;
     /**

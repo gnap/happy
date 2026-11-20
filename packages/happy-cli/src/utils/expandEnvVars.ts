@@ -54,10 +54,10 @@ export function expandEnvironmentVariables(
             const resolvedValue = sourceEnv[varName];
             if (resolvedValue !== undefined) {
                 // Variable found in source environment - use its value
-                // Log for debugging (mask secret-looking values)
-                const isSensitive = varName.toLowerCase().includes('token') ||
-                                   varName.toLowerCase().includes('key') ||
-                                   varName.toLowerCase().includes('secret');
+                // Log for debugging (mask secret-looking variables, and any URL that carries
+                // credentials in its userinfo — a proxy URL is exactly that).
+                const isSensitive = /token|key|secret|password|passwd|proxy|socks|auth|credential/i.test(varName) ||
+                                   /^[a-z][a-z0-9+.-]*:\/\/[^/@\s]+@/i.test(resolvedValue);
                 const displayValue = isSensitive
                     ? (resolvedValue ? `<${resolvedValue.length} chars>` : '<empty>')
                     : resolvedValue;
