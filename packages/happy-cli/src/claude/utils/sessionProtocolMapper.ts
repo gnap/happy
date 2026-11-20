@@ -379,16 +379,23 @@ function resolveProviderSubagent(message: RawJSONLines, state: ClaudeSessionProt
         return explicitSubagent;
     }
 
+    // Only a sidechain message can belong to a subagent. Asked before the parent chain is
+    // followed: the SDK converter chains `parentUuid` across the whole stream, so the message
+    // right after a subagent record carries that record's uuid — and a main-thread reply read
+    // as a subagent's is buffered until a card that already exists consumes it, i.e. lost
+    // (a background Agent's card is from an earlier turn, and the turn boundary cleared the
+    // mapping). Inheritance stays for the legacy shape, which marks sidechain messages with
+    // `isSidechain` and no `parent_tool_use_id`.
+    if (!isSidechainMessage(message)) {
+        return undefined;
+    }
+
     const parentUuid = pickParentUuid(message);
     if (parentUuid) {
         const inheritedSubagent = getUuidToProviderSubagent(state).get(parentUuid);
         if (inheritedSubagent) {
             return inheritedSubagent;
         }
-    }
-
-    if (!isSidechainMessage(message)) {
-        return undefined;
     }
 
     const prompt = pickSidechainRootPrompt(message);
