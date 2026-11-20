@@ -41,8 +41,21 @@ export function shouldSyncMachineMetadata(current: MachineMetadata | null, next:
         current.happyCliVersion !== next.happyCliVersion ||
         current.homeDir !== next.homeDir ||
         current.happyHomeDir !== next.happyHomeDir ||
-        current.happyLibDir !== next.happyLibDir
+        current.happyLibDir !== next.happyLibDir ||
+        // The route names are what an App offers in a profile, so a route silently appearing or
+        // disappearing has to reach the server even when nothing else about the machine changed.
+        // Order is not meaningful here: the list is a set of names.
+        !sameNames(current.proxyRoutes, next.proxyRoutes)
     );
+}
+
+function sameNames(a: string[] | undefined, b: string[] | undefined): boolean {
+    const left = a ?? [];
+    const right = b ?? [];
+    if (left.length !== right.length) return false;
+    const sortedLeft = [...left].sort();
+    const sortedRight = [...right].sort();
+    return sortedLeft.every((name, i) => name === sortedRight[i]);
 }
 
 export function buildSyncedMachineMetadata(current: MachineMetadata | null, local: MachineMetadata): MachineMetadata {
