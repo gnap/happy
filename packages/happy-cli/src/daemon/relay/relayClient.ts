@@ -5,8 +5,10 @@
  * the LAN server's own challenge-response auth still decides who gets in. Nothing here widens what
  * the LAN API exposes -- it only changes how the bytes arrive.
  */
+import type { Duplex } from 'node:stream';
 import { logger } from '@/ui/logger';
 import { deriveRelayIdentity, signRegistration, type RelayIdentity } from './identity';
+import { RelayEgressStream } from './egressStream';
 
 export type RelayClientOptions = {
   /** `wss://host[:port]` of the relay. */
@@ -47,6 +49,18 @@ export type RelayClientHandle = {
    * answer is as fresh as the machine's own state is, without a client polling for it.
    */
   publishDirectory: () => void;
+  /**
+   * Opens a raw TCP pipe through the relay to `host:port`, as a duplex byte stream.
+   *
+   * The relay is the only party that can reach some of the machines a session's proxy is pointed
+   * at; this is how the daemon reaches them without a second connection or a second address. The
+   * stream is the transport, not the protocol: the caller speaks SOCKS5 over it.
+   *
+   * With `route`, the relay dials that route's own hop and speaks SOCKS5 on the daemon's behalf —
+   * the hop, its address and its credentials stay on the relay, and the bytes here are already the
+   * target's.
+   */
+  openEgress: (host: string, port: number, route?: string) => Promise<Duplex>;
   stop: () => void;
 };
 
@@ -101,6 +115,54 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
    * success for a frame nobody received.
    */
   let publishFrame: ((frame: unknown) => void) | null = null;
+  /** Egress pipes currently open through the registered connection, by the id we chose. */
+  const egressStreams = new Map<number, RelayEgressStream>();
+  /**
+   * Egress opens waiting for the relay's `eg-ok`/`eg-err`.
+   *
+   * Kept apart from `egressStreams` so a failed connect can reject its caller with the reason the
+   * relay gave, rather than surfacing later as a stream that closes for no visible cause.
+   */
+  const egressOpening = new Map<number, {
+    resolve: (stream: RelayEgressStream) => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
+  let nextEgressId = 1;
+
+  const openEgress = (host: string, port: number, route?: string): Promise<Duplex> => {
+    const send = publishFrame;
+    if (!send || stopped) return Promise.reject(new Error('relay is not connected'));
+    const id = nextEgressId++;
+    return new Promise<Duplex>((resolve, reject) => {
+      const stream = new RelayEgressStream(id, (frame) => {
+        try { send(frame); } catch { /* the close handler tears it down */ }
+      });
+      egressStreams.set(id, stream);
+      stream.once('close', () => { egressStreams.delete(id); });
+      const timer = setTimeout(() => {
+        if (!egressOpening.delete(id)) return;
+        egressStreams.delete(id);
+        stream.destroy();
+        reject(new Error('relay egress timed out'));
+      }, 15_000);
+      (timer as unknown as { unref?: () => void }).unref?.();
+      egressOpening.set(id, {
+        resolve: (open) => { clearTimeout(timer); resolve(open); },
+        reject: (error) => { clearTimeout(timer); egressStreams.delete(id); stream.destroy(); reject(error); },
+        timer,
+      });
+      try {
+        send(route ? { t: 'eg-open', id, host, port, route } : { t: 'eg-open', id, host, port });
+      } catch (error) {
+        clearTimeout(timer);
+        egressOpening.delete(id);
+        egressStreams.delete(id);
+        stream.destroy();
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  };
 
   /** Sends the session list the relay publishes, if it is different from the last one. */
   const publishSessions = () => {
@@ -189,6 +251,39 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
           directoryTimer = setInterval(publishDirectory, DIRECTORY_PUBLISH_INTERVAL_MS);
           (directoryTimer as any).unref?.();
         }
+      } else if (msg.t === 'eg-ok') {
+        const id = Number(msg.id);
+        const opening = egressOpening.get(id);
+        const stream = egressStreams.get(id);
+        if (opening) {
+          egressOpening.delete(id);
+          if (stream) opening.resolve(stream);
+          else opening.reject(new Error('relay egress closed while opening'));
+        }
+      } else if (msg.t === 'eg-err') {
+        const opening = egressOpening.get(Number(msg.id));
+        if (opening) {
+          egressOpening.delete(Number(msg.id));
+          opening.reject(new Error(String(msg.message ?? 'relay egress failed')));
+        }
+      } else if (msg.t === 'eg-data') {
+        const stream = egressStreams.get(Number(msg.id));
+        if (stream && typeof msg.d === 'string') stream.receiveData(Buffer.from(msg.d, 'base64'));
+      } else if (msg.t === 'eg-credit') {
+        const stream = egressStreams.get(Number(msg.id));
+        stream?.addCredit(Number(msg.n) || 0);
+      } else if (msg.t === 'eg-half') {
+        egressStreams.get(Number(msg.id))?.remoteHalf();
+      } else if (msg.t === 'eg-close') {
+        const id = Number(msg.id);
+        const stream = egressStreams.get(id);
+        egressStreams.delete(id);
+        stream?.remoteClose();
+        const opening = egressOpening.get(id);
+        if (opening) {
+          egressOpening.delete(id);
+          opening.reject(new Error('relay egress closed'));
+        }
       } else if (msg.t === 'http') {
         // The query is part of the picture for a history read: `since` is what says whether the
         // reader is taking pages or re-reading the log from the start every time. The client
@@ -260,6 +355,15 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
         try { entry.ws.close(); } catch { /* gone */ }
       }
       locals.clear();
+      // Every egress pipe rode this connection. The relay has already torn its ends down, so
+      // holding these open would only leave callers waiting on bytes that cannot arrive.
+      for (const opening of egressOpening.values()) {
+        clearTimeout(opening.timer);
+        opening.reject(new Error('relay connection closed'));
+      }
+      egressOpening.clear();
+      for (const stream of egressStreams.values()) stream.remoteClose();
+      egressStreams.clear();
       setConnected(false);
       if (stopped) return;
       const delay = opened ? minBackoff : backoff;
@@ -277,6 +381,7 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
     identity,
     isConnected: () => connected,
     publishDirectory,
+    openEgress,
     stop: () => {
       stopped = true;
       if (retryTimer) clearTimeout(retryTimer);

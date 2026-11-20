@@ -1,5 +1,6 @@
 import { describe, expect, it, afterEach } from 'bun:test';
 import nacl from 'tweetnacl';
+import { connect as connectTcp, createServer as createTcpServer, type Server as TcpServer, type Socket as TcpSocket } from 'node:net';
 import { startRelay, tagOfPublicKey, REGISTER_CONTEXT, type RelayHandle } from './relay';
 
 let relay: RelayHandle | null = null;
@@ -22,6 +23,127 @@ async function connectDaemon(port: number, pair = nacl.sign.keyPair(), sign = tr
     return { ws, frames, closed, tag: tagOfPublicKey(pair.publicKey) };
 }
 const until = async (fn: () => boolean) => { for (let i = 0; i < 100 && !fn(); i++) await Bun.sleep(20); };
+
+/**
+ * A target for the egress tests: it echoes what it is given and remembers its sockets, so a test
+ * can tell a pipe the relay opened from one it has since closed.
+ */
+async function startEchoTarget(): Promise<{ port: number; sockets: Set<TcpSocket>; close: () => Promise<void> }> {
+    const sockets = new Set<TcpSocket>();
+    const server: TcpServer = createTcpServer((socket) => {
+        sockets.add(socket);
+        socket.on('close', () => sockets.delete(socket));
+        socket.on('error', () => { /* the relay's close is the test's business */ });
+        socket.on('data', (chunk) => socket.write(chunk));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address() as { port: number };
+    return {
+        port: address.port,
+        sockets,
+        close: () => new Promise<void>((resolve) => {
+            for (const socket of sockets) socket.destroy();
+            server.close(() => resolve());
+        }),
+    };
+}
+
+/**
+ * A SOCKS5 hop for the route tests: no-auth by default, username/password when credentials are
+ * given. It remembers the CONNECT requests so a test can tell "the relay reached the target
+ * through this hop" from "the relay dialled the target itself".
+ */
+async function startSocks5Hop(options: { user?: string; pass?: string } = {}): Promise<{
+    port: number;
+    requests: Array<{ host: string; port: number }>;
+    close: () => Promise<void>;
+}> {
+    const requests: Array<{ host: string; port: number }> = [];
+    const sockets = new Set<TcpSocket>();
+    const server: TcpServer = createTcpServer((socket) => {
+        sockets.add(socket);
+        let buffered = Buffer.alloc(0);
+        let state: 'greeting' | 'auth' | 'request' | 'pipe' = 'greeting';
+        let upstream: TcpSocket | null = null;
+        // A hop owns the upstream it opened: when either side goes, the other must not linger,
+        // which is also what lets a test see the pipe actually close.
+        socket.on('close', () => { sockets.delete(socket); upstream?.destroy(); });
+        socket.on('error', () => { /* the test's assertions own the failure */ });
+        socket.on('data', (chunk: Buffer) => {
+            if (state === 'pipe') { upstream?.write(chunk); return; }
+            buffered = Buffer.concat([buffered, chunk]);
+            if (state === 'greeting') {
+                if (buffered.length < 2) return;
+                const count = buffered[1];
+                if (buffered.length < 2 + count) return;
+                const methods = [...buffered.subarray(2, 2 + count)];
+                buffered = buffered.subarray(2 + count);
+                if (options.user) {
+                    if (!methods.includes(0x02)) { socket.end(Buffer.from([0x05, 0xff])); return; }
+                    socket.write(Buffer.from([0x05, 0x02]));
+                    state = 'auth';
+                } else {
+                    socket.write(Buffer.from([0x05, 0x00]));
+                    state = 'request';
+                }
+            }
+            if (state === 'auth') {
+                if (buffered.length < 3) return;
+                const userLength = buffered[1];
+                if (buffered.length < 2 + userLength + 1) return;
+                const passLength = buffered[2 + userLength];
+                if (buffered.length < 3 + userLength + passLength) return;
+                const user = buffered.subarray(2, 2 + userLength).toString();
+                const pass = buffered.subarray(3 + userLength, 3 + userLength + passLength).toString();
+                buffered = buffered.subarray(3 + userLength + passLength);
+                if (user !== options.user || pass !== options.pass) { socket.end(Buffer.from([0x01, 0x01])); return; }
+                socket.write(Buffer.from([0x01, 0x00]));
+                state = 'request';
+            }
+            if (state === 'request') {
+                if (buffered.length < 5) return;
+                const atyp = buffered[3];
+                let host: string;
+                let offset: number;
+                if (atyp === 0x01) {
+                    if (buffered.length < 10) return;
+                    host = [...buffered.subarray(4, 8)].join('.');
+                    offset = 8;
+                } else if (atyp === 0x03) {
+                    const length = buffered[4];
+                    if (buffered.length < 7 + length) return;
+                    host = buffered.subarray(5, 5 + length).toString();
+                    offset = 5 + length;
+                } else {
+                    socket.end(Buffer.from([0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
+                    return;
+                }
+                const port = buffered.readUInt16BE(offset);
+                const early = buffered.subarray(offset + 2);
+                buffered = Buffer.alloc(0);
+                requests.push({ host, port });
+                upstream = connectTcp({ host, port });
+                upstream.on('error', () => socket.destroy());
+                upstream.on('connect', () => {
+                    socket.write(Buffer.from([0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
+                    if (early.length > 0) upstream!.write(early);
+                    state = 'pipe';
+                    upstream!.on('data', (data) => socket.write(data));
+                });
+            }
+        });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address() as { port: number };
+    return {
+        port: address.port,
+        requests,
+        close: () => new Promise<void>((resolve) => {
+            for (const socket of sockets) socket.destroy();
+            server.close(() => resolve());
+        }),
+    };
+}
 
 describe('relay', () => {
     /**
@@ -410,5 +532,155 @@ describe('relay', () => {
         hub.send({ t: 'open', id: 5, tag: 'c'.repeat(32), path: '/lan/socket' });
         await until(() => hub.reply('close', 5).length === 1);
         expect(hub.reply('close', 5)[0]).toMatchObject({ code: 4502, reason: 'offline' });
+    });
+
+    /**
+     * The raw pipe.
+     *
+     * The daemon uses this to reach a SOCKS5 hop that only the relay can dial; the relay is a
+     * byte pipe and deliberately knows nothing about SOCKS5 or about what is being proxied. What
+     * these tests pin down is that the pipe carries bytes in both directions, that the daemon is
+     * told when it cannot have one, and that a pipe never outlives the connection that owns it.
+     */
+    it('pipes bytes to a target the daemon names, crediting both directions', async () => {
+        relay = startRelay({ port: 0 });
+        const target = await startEchoTarget();
+        try {
+            const d = await connectDaemon(relay.port);
+            await until(() => d.frames.some((f) => f.t === 'ok'));
+
+            d.ws.send(JSON.stringify({ t: 'eg-open', id: 1, host: '127.0.0.1', port: target.port }));
+            await until(() => d.frames.some((f) => f.t === 'eg-ok'));
+            expect(d.frames.some((f) => f.t === 'eg-ok')).toBe(true);
+            expect(target.sockets.size).toBe(1);
+
+            d.ws.send(JSON.stringify({ t: 'eg-data', id: 1, d: Buffer.from('hello').toString('base64') }));
+            await until(() => d.frames.some((f) => f.t === 'eg-data'));
+            // The echo comes back as the same base64 the daemon sent.
+            const echoed = Buffer.from(d.frames.find((f) => f.t === 'eg-data').d, 'base64').toString();
+            expect(echoed).toBe('hello');
+            // And the bytes it handed over are credited once they have left for the target, which
+            // is what keeps the daemon from growing an unbounded queue here.
+            await until(() => d.frames.some((f) => f.t === 'eg-credit'));
+            expect(d.frames.find((f) => f.t === 'eg-credit')).toMatchObject({ id: 1, n: 5 });
+
+            d.ws.send(JSON.stringify({ t: 'eg-close', id: 1 }));
+            await until(() => target.sockets.size === 0);
+            expect(target.sockets.size).toBe(0);
+        } finally {
+            await target.close();
+        }
+    });
+
+    it('answers a connect that cannot be made rather than leaving the daemon waiting', async () => {
+        relay = startRelay({ port: 0 });
+        const d = await connectDaemon(relay.port);
+        await until(() => d.frames.some((f) => f.t === 'ok'));
+
+        // Port 1 on loopback: no listener, and connecting is refused rather than timing out.
+        d.ws.send(JSON.stringify({ t: 'eg-open', id: 7, host: '127.0.0.1', port: 1 }));
+        await until(() => d.frames.some((f) => f.t === 'eg-err'));
+        expect(d.frames.find((f) => f.t === 'eg-err')).toMatchObject({ id: 7 });
+    });
+
+    it('caps how many pipes one daemon can hold', async () => {
+        relay = startRelay({ port: 0 });
+        const target = await startEchoTarget();
+        try {
+            const d = await connectDaemon(relay.port);
+            await until(() => d.frames.some((f) => f.t === 'ok'));
+            for (let i = 0; i < 33; i++) {
+                d.ws.send(JSON.stringify({ t: 'eg-open', id: i, host: '127.0.0.1', port: target.port }));
+            }
+            await until(() => d.frames.filter((f) => f.t === 'eg-ok' || f.t === 'eg-err').length >= 33);
+            expect(d.frames.filter((f) => f.t === 'eg-ok')).toHaveLength(32);
+            expect(d.frames.filter((f) => f.t === 'eg-err')).toHaveLength(1);
+            expect(d.frames.find((f) => f.t === 'eg-err')).toMatchObject({ message: 'too many streams' });
+        } finally {
+            await target.close();
+        }
+    });
+
+    it('closes every pipe when the daemon that owns them goes away', async () => {
+        relay = startRelay({ port: 0 });
+        const target = await startEchoTarget();
+        try {
+            const d = await connectDaemon(relay.port);
+            await until(() => d.frames.some((f) => f.t === 'ok'));
+            d.ws.send(JSON.stringify({ t: 'eg-open', id: 3, host: '127.0.0.1', port: target.port }));
+            await until(() => d.frames.some((f) => f.t === 'eg-ok'));
+            expect(target.sockets.size).toBe(1);
+
+            d.ws.close();
+            await until(() => target.sockets.size === 0);
+            expect(target.sockets.size).toBe(0);
+        } finally {
+            await target.close();
+        }
+    });
+
+    /**
+     * A route is this relay's own definition: the daemon names it, the relay dials its hop and
+     * speaks SOCKS5. The machine learns the route's name and nothing else, which is the whole
+     * point — one place holds the address and its credentials.
+     */
+    it('carries a pipe through a named route without ever seeing the hop on the daemon', async () => {
+        const target = await startEchoTarget();
+        const hop = await startSocks5Hop();
+        try {
+            relay = startRelay({ port: 0, routes: { personal: `socks5h://127.0.0.1:${hop.port}` } });
+            const d = await connectDaemon(relay.port);
+            await until(() => d.frames.some((f) => f.t === 'ok'));
+
+            // What a machine is told: the names, never the addresses.
+            await until(() => d.frames.some((f) => f.t === 'routes'));
+            expect(d.frames.find((f) => f.t === 'routes').names).toEqual(['personal']);
+
+            d.ws.send(JSON.stringify({ t: 'eg-open', id: 1, route: 'personal', host: '127.0.0.1', port: target.port }));
+            await until(() => d.frames.some((f) => f.t === 'eg-ok'));
+            expect(d.frames.some((f) => f.t === 'eg-ok')).toBe(true);
+            // The hop is what carried it: the relay connected there, and asked for the target.
+            expect(hop.requests).toEqual([{ host: '127.0.0.1', port: target.port }]);
+            expect(target.sockets.size).toBe(1);
+
+            d.ws.send(JSON.stringify({ t: 'eg-data', id: 1, d: Buffer.from('via route').toString('base64') }));
+            await until(() => d.frames.some((f) => f.t === 'eg-data'));
+            expect(Buffer.from(d.frames.find((f) => f.t === 'eg-data').d, 'base64').toString()).toBe('via route');
+
+            d.ws.send(JSON.stringify({ t: 'eg-close', id: 1 }));
+            await until(() => target.sockets.size === 0);
+            expect(target.sockets.size).toBe(0);
+        } finally {
+            await hop.close();
+            await target.close();
+        }
+    });
+
+    it('refuses an unknown route instead of dialling the target itself', async () => {
+        relay = startRelay({ port: 0, routes: { personal: 'socks5h://127.0.0.1:1' } });
+        const d = await connectDaemon(relay.port);
+        await until(() => d.frames.some((f) => f.t === 'ok'));
+
+        d.ws.send(JSON.stringify({ t: 'eg-open', id: 2, route: 'not-defined', host: '127.0.0.1', port: 9 }));
+        await until(() => d.frames.some((f) => f.t === 'eg-err'));
+        expect(d.frames.find((f) => f.t === 'eg-err')).toMatchObject({ id: 2, message: 'unknown route' });
+    });
+
+    it('authenticates to the hop when the route carries credentials', async () => {
+        const target = await startEchoTarget();
+        const hop = await startSocks5Hop({ user: 'user-1', pass: 'pass-1' });
+        try {
+            relay = startRelay({ port: 0, routes: { personal: `socks5h://user-1:pass-1@127.0.0.1:${hop.port}` } });
+            const d = await connectDaemon(relay.port);
+            await until(() => d.frames.some((f) => f.t === 'ok'));
+
+            d.ws.send(JSON.stringify({ t: 'eg-open', id: 4, route: 'personal', host: '127.0.0.1', port: target.port }));
+            await until(() => d.frames.some((f) => f.t === 'eg-ok' || f.t === 'eg-err'));
+            expect(d.frames.find((f) => f.t === 'eg-ok')).toMatchObject({ id: 4 });
+            expect(hop.requests).toEqual([{ host: '127.0.0.1', port: target.port }]);
+        } finally {
+            await hop.close();
+            await target.close();
+        }
     });
 });

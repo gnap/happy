@@ -53,11 +53,24 @@ import { decodeBase64, encodeBase64, libsodiumEncryptForPublicKey } from '@/api/
 import { startLanDiscovery, type LanDiscoveryHandle } from './lanDiscovery';
 import { ENDPOINT_PROTOCOL_VERSION, startEndpointPublisher, type EndpointPublisherHandle, type LanEndpoint } from './lanEndpoints';
 import { startRelayClient, type RelayClientHandle } from './relay/relayClient';
+import { startLocalProxy, type LocalProxyHandle } from './proxy/httpProxy';
+import { loadLocalRoutes } from './proxy/routes';
+import type { ProxyRoute } from './proxy/transport';
 import { directoryRows, type DirectorySession } from './relay/directory';
 import { buildSessionScopeUnitName, resolveSessionScopeMode, scopeUnitFromProcCgroup, signalSession, spawnHappyCLIInSessionScope } from './linux/sessionScope';
 
 /** Time to wait for a spawned session to report via /session-started webhook before failing the spawn (Cursor cold start can exceed 30s). */
 const SESSION_WEBHOOK_TIMEOUT_MS = 60_000;
+
+/**
+ * How many session proxy routes the daemon keeps at once.
+ *
+ * A route is registered by the session and re-registered with every message, so the live sessions
+ * are always the most recently touched entries. Dead ones are evicted in that order once the cap is
+ * reached; without the cap a long-lived daemon would accumulate one route — and one hop credential
+ * — for every session it had ever spawned.
+ */
+const MAX_PROXY_ROUTES = 256;
 
 /**
  * The largest file the LAN file route carries in one response.
@@ -953,6 +966,13 @@ export async function startDaemon(): Promise<void> {
     const sessionScopeMode = resolveSessionScopeMode();
     logger.info(`[DAEMON RUN] Session spawn backend: ${sessionScopeMode.enabled ? `systemd scope (${sessionScopeMode.slice})` : `direct (${sessionScopeMode.reason})`}`);
 
+    /** Route per session token, filled by the session when it resolves its profile. */
+    const proxyRoutes = new Map<string, ProxyRoute>();
+    /** The loopback HTTP proxy sessions are pointed at; started below, beside the control server. */
+    let localProxy: LocalProxyHandle | null = null;
+    /** One fixed-port listener per named relay route, from the machine's own configuration. */
+    const routeProxies: LocalProxyHandle[] = [];
+
     // Spawn a new session (sessionId reserved for future --resume functionality)
     const spawnSession = async (options: SpawnSessionOptions): Promise<SpawnSessionResult> => {
       logger.debugLargeJson('[DAEMON RUN] Spawning session', options);
@@ -1033,6 +1053,8 @@ export async function startDaemon(): Promise<void> {
         // Layer 2: Profile environment variables
         // Priority: GUI-provided profile > CLI local active profile > none
         let profileEnv: Record<string, string> = {};
+        /** The local profile's relay/direct choice, when that is where the profile came from. */
+        let localProfileViaRelay: boolean | undefined;
 
         if (options.environmentVariables && Object.keys(options.environmentVariables).length > 0) {
           // GUI provided profile environment variables - highest priority for profile settings
@@ -1051,6 +1073,8 @@ export async function startDaemon(): Promise<void> {
                 settings.activeProfileId,
                 options.agent || 'claude'
               );
+              localProfileViaRelay =
+                settings.profiles.find((profile) => profile.id === settings.activeProfileId)?.proxyViaRelay;
 
               logger.debug(`[DAEMON RUN] Loaded ${Object.keys(profileEnv).length} environment variables from CLI local profile for agent ${options.agent || 'claude'}`);
               logger.debug(`[DAEMON RUN] CLI profile env var keys: ${Object.keys(profileEnv).join(', ')}`);
@@ -1072,6 +1096,19 @@ export async function startDaemon(): Promise<void> {
         // Example: ANTHROPIC_AUTH_TOKEN="${Z_AI_AUTH_TOKEN}" → ANTHROPIC_AUTH_TOKEN="sk-real-key"
         extraEnv = expandEnvironmentVariables(extraEnv, process.env);
         logger.debug(`[DAEMON RUN] After variable expansion: ${Object.keys(extraEnv).join(', ')}`);
+
+        // One loopback proxy URL per session process, minted even when no profile names a hop
+        // yet: a profile can switch to one on a later message, and the process must already know
+        // where its proxy is by then. The token is the only thing that ties a request back to
+        // this session, and the daemon learns the route from the session itself.
+        if (localProxy) {
+          const token = randomBytes(16).toString('hex');
+          extraEnv.HAPPY_LOCAL_PROXY_URL = `http://${token}@127.0.0.1:${localProxy.port}`;
+          // Only a profile that opts in uses the relay; otherwise the daemon dials the hop from
+          // this machine, which is what a profile naming a reachable hop always did.
+          const viaRelay = options.proxyViaRelay ?? localProfileViaRelay ?? false;
+          extraEnv.HAPPY_PROXY_VIA_RELAY = viaRelay ? '1' : '0';
+        }
 
         // Minted here rather than in the child, so the session has a name before its process
         // exists. The row can then be listed while it starts instead of appearing only once the
@@ -2254,6 +2291,9 @@ export async function startDaemon(): Promise<void> {
         agent,
         resumeSessionTag: sessionTag,
         environmentVariables: recoveredProfile?.environmentVariables ?? undefined,
+        ...(typeof recoveredProfile?.proxyViaRelay === 'boolean'
+          ? { proxyViaRelay: recoveredProfile.proxyViaRelay }
+          : {}),
         sandboxConfig: perSessionSandbox,
         // The spec this spawn realizes, and what it replaces. Both are for this machine's own
         // records — the child is told only its tag.
@@ -2283,6 +2323,38 @@ export async function startDaemon(): Promise<void> {
       }
     };
 
+    // Starts before the control server that can spawn a session, because the proxy URL has to be
+    // in that session's environment from its very first moment. A profile can name a hop on a
+    // later message too, and the process must already have the URL by then.
+    try {
+      localProxy = await startLocalProxy({
+        getRoute: (token) => proxyRoutes.get(token) ?? null,
+        relay: () => relayClient,
+      });
+      logger.debug(`[DAEMON RUN] Session proxy listening on 127.0.0.1:${localProxy.port}`);
+    } catch (error) {
+      // Not fatal: a session whose profile names a hop refuses its requests instead of dialling
+      // the hop directly, which is the safe half of the feature and no worse than no proxy.
+      logger.warn('[DAEMON RUN] Session proxy not started; SOCKS5 profiles will be refused', { error: String(error) });
+    }
+
+    // Named routes, on the fixed ports this machine assigned them. These belong to no session:
+    // any process that points at the port uses the route, and a route that fails to start is
+    // reported and skipped rather than taking the others down.
+    const routeConfig = loadLocalRoutes(join(configuration.happyHomeDir, 'proxy-routes.json'));
+    for (const route of routeConfig) {
+      try {
+        routeProxies.push(await startLocalProxy({
+          fixedRoute: { relayRoute: route.name, viaRelay: true, label: `route:${route.name}` },
+          port: route.port,
+          relay: () => relayClient,
+        }));
+        logger.debug(`[DAEMON RUN] Route "${route.name}" listening on 127.0.0.1:${route.port}`);
+      } catch (error) {
+        logger.warn(`[DAEMON RUN] Route "${route.name}" not started on port ${route.port}`, { error: String(error) });
+      }
+    }
+
     // Start control server
     const { port: controlPort, stop: stopControlServer } = await startDaemonControlServer({
       getChildren: getCurrentChildren,
@@ -2296,6 +2368,25 @@ export async function startDaemon(): Promise<void> {
       requestShutdown: () => requestShutdown('happy-cli'),
       onHappySessionWebhook,
       onSessionEnding,
+      onProxyConfig: (token, config) => {
+        if (!config) {
+          proxyRoutes.delete(token);
+          return;
+        }
+        // Sessions re-register on every message, so recency is liveness: the eviction order
+        // below only ever discards routes whose session has stopped reporting.
+        proxyRoutes.delete(token);
+        proxyRoutes.set(token, {
+          // Absent when the profile names no hop: the relay dials the target itself.
+          ...(config.socks5 ? { socks5: config.socks5 } : {}),
+          viaRelay: config.viaRelay,
+          ...(config.label ? { label: config.label } : {}),
+        });
+        if (proxyRoutes.size > MAX_PROXY_ROUTES) {
+          const oldest = proxyRoutes.keys().next().value;
+          if (oldest !== undefined) proxyRoutes.delete(oldest);
+        }
+      },
     });
 
     // Start Unix Domain Socket server for real-time daemon ↔ session IPC.
@@ -3784,6 +3875,10 @@ export async function startDaemon(): Promise<void> {
       // Withdraw the advertisement before the listener goes away, so peers do not keep a
       // stale record pointing at a closed port.
       endpointPublisher?.stop();
+      await localProxy?.stop().catch(() => undefined);
+      localProxy = null;
+      await Promise.all(routeProxies.map((proxy) => proxy.stop().catch(() => undefined)));
+      routeProxies.length = 0;
       relayClient?.stop();
       await lanDiscovery?.stop().catch(() => undefined);
       await lanServer?.stop().catch(() => undefined);

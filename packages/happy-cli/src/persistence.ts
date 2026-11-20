@@ -97,6 +97,15 @@ export const AIBackendProfileSchema = z.object({
     // Environment variables (validated)
     environmentVariables: z.array(EnvironmentVariableSchema).default([]),
 
+    /**
+     * Send this profile's traffic through the relay: through the SOCKS5 hop when the environment
+     * names one, straight from the relay otherwise. Absent means off — the profile keeps the
+     * machine's own route — because only a profile that needs the relay should pay for it. The
+     * App sends the same field on the spawn request and on each user message, because either the
+     * choice or the hop can change mid-session.
+     */
+    proxyViaRelay: z.boolean().optional(),
+
     // Default session type for this profile
     defaultSessionType: z.enum(['simple', 'worktree']).optional(),
 

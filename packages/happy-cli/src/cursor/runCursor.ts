@@ -19,6 +19,7 @@ import { join, resolve } from 'node:path';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { configuration } from '@/configuration';
 import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
+import { applyNetworkProxyPolicy, networkProxySettled, reassertNetworkProxy, resetNetworkProxyPolicy } from '@/utils/networkProxy';
 
 import { ApiClient } from '@/api/api';
 import { logger } from '@/ui/logger';
@@ -546,10 +547,29 @@ export async function runCursor(opts: {
       session.updateMetadata((m) => ({ ...m, profileId: currentProfileId }))
         .catch((err) => logger.debug('[Cursor] Failed to persist profileId to session metadata', err));
     }
-    if (message.meta?.environmentVariables && Object.keys(message.meta.environmentVariables).length > 0) {
-      currentProfileEnv = expandEnvironmentVariables(message.meta.environmentVariables, process.env);
+    if (messageProfileId === null) {
+      // Clearing the profile clears the hop as well. The spawn baseline may name its own proxy,
+      // but it must not name this one, so the injected URL goes back to what it replaced.
+      resetNetworkProxyPolicy();
+      currentProfileEnv = undefined;
+    }
+    const carriedEnv = message.meta?.environmentVariables;
+    const hasEnv = carriedEnv !== undefined && Object.keys(carriedEnv).length > 0;
+    const relayCarried = typeof message.meta?.proxyViaRelay === 'boolean';
+    if (hasEnv || relayCarried) {
+      const expanded = hasEnv ? expandEnvironmentVariables(carriedEnv, process.env) : {};
+      // Cursor's agent merges this record over process.env and lets it win, so the SOCKS5 entries
+      // have to be resolved here or they would ride along beside the loopback URL. The relay
+      // choice applies on its own too: a profile with no environment variables still routes
+      // everything through the relay when its switch is on.
+      currentProfileEnv = applyNetworkProxyPolicy(expanded, {
+        viaRelay: relayCarried ? message.meta!.proxyViaRelay as boolean : undefined,
+        label: session.sessionId,
+      }).env;
       logger.debug(`[Cursor] Env profile keys: ${Object.keys(currentProfileEnv).join(', ')}`);
     }
+    // A daemon restart empties the route table; a message is when both processes are known alive.
+    reassertNetworkProxy();
     const mode: CursorMode = {
       permissionMode: messagePermissionMode || 'default',
       model: messageModel,
@@ -630,6 +650,10 @@ export async function runCursor(opts: {
   session = initialSession;
   attachSessionMetadataListener(session);
   syncInMemoryMaxModeFromSessionMetadata('session-start');
+  // A profile supplied at spawn is already in process.env. Resolve its SOCKS5 hop now, before any
+  // turn inherits that environment: the agent speaks to the daemon's loopback proxy or to nothing,
+  // never to the hop directly.
+  applyNetworkProxyPolicy({}, { label: session.sessionId });
   const currentCursorMode = (): CursorMode => ({
     permissionMode: currentPermissionMode ?? 'default',
     model: currentModel,
@@ -1154,6 +1178,9 @@ export async function runCursor(opts: {
 
         // Spawn cursor-agent process (second+ turn uses --resume so cursor-agent continues same chat)
         // A2A inbox turns use live currentModel (queue mode may be stale from schedule time).
+        // The agent's very first request must find a route: a profile change was just posted to
+        // the daemon, and this turn is the first thing that could reach the proxy.
+        await networkProxySettled();
         const cursorModel = (isA2AInboxTurn ? currentModel : mode.model)
           ?? process.env.CURSOR_MODEL
           ?? 'auto';

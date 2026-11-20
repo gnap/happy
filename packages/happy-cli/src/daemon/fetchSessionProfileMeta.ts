@@ -13,6 +13,11 @@ import { logger } from '@/ui/logger';
 export interface SessionProfileMeta {
     profileId: string | null;
     environmentVariables: Record<string, string> | null;
+    /**
+     * The profile's relay/direct choice for its proxy hop, or null when the message did not carry
+     * one. Null lets the spawn path keep its default instead of turning "unknown" into "direct".
+     */
+    proxyViaRelay: boolean | null;
 }
 
 type RawMessage = {
@@ -90,12 +95,15 @@ export async function fetchSessionProfileMeta(sessionId: string): Promise<Sessio
         const profileId = (meta as { profileId?: string | null }).profileId ?? null;
         const envVars = (meta as { environmentVariables?: Record<string, string> }).environmentVariables;
         const environmentVariables = envVars && Object.keys(envVars).length > 0 ? envVars : null;
+        const viaRelay = (meta as { proxyViaRelay?: unknown }).proxyViaRelay;
+        const proxyViaRelay = typeof viaRelay === 'boolean' ? viaRelay : null;
         logger.debug(
             `[DAEMON RUN] fetchSessionProfileMeta: recovered profileId=${profileId ?? 'null'} `
             + `envKeys=${environmentVariables ? Object.keys(environmentVariables).join(',') : '(none)'} `
+            + `proxyViaRelay=${proxyViaRelay === null ? '(unset)' : proxyViaRelay} `
             + `from message seq=${message.seq}`,
         );
-        return { profileId, environmentVariables };
+        return { profileId, environmentVariables, proxyViaRelay };
     }
     logger.debug(`[DAEMON RUN] fetchSessionProfileMeta: no message with profileId meta in ${messages.length} recent message(s)`);
     return null;
