@@ -40,6 +40,15 @@ export const VIA_RELAY_ENV = 'HAPPY_PROXY_VIA_RELAY';
  * address.
  */
 export const ROUTE_ENV = 'HAPPY_PROXY_ROUTE';
+/**
+ * The reserved route name meaning "no proxy at all".
+ *
+ * Not a route the relay defines: naming it is the profile saying the agent should reach the
+ * network itself, with nothing in its environment pointing elsewhere. It exists because an empty
+ * route means "the profile has no opinion", which for a profile that also names a SOCKS5 hop is
+ * not the same thing.
+ */
+export const DIRECT_ROUTE = 'direct';
 
 const PROXY_KEYS = [
     'ALL_PROXY', 'all_proxy', 'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy',
@@ -140,6 +149,19 @@ export function applyNetworkProxyPolicy(
     // hop for this process to see. It wins over the profile's own socks entries — naming a route
     // is saying "use that path", and the route is where the machine's operator put it.
     const routeName = (expandedProfile[ROUTE_ENV] ?? process.env[ROUTE_ENV] ?? '').trim();
+    if (routeName === DIRECT_ROUTE) {
+        // "Direct" is a decision, not an absence: the agent gets no proxy, no matter what the
+        // profile's environment or the relay switch would otherwise have done. Removing the
+        // entries from this process as well is the only way to keep them out of the agent it
+        // inherits — the SDK takes its environment from here.
+        delete env[ROUTE_ENV];
+        for (const key of PROXY_KEYS) {
+            delete env[key];
+            delete process.env[key];
+        }
+        logger.debug('[proxy] direct for this session: the agent is given no proxy');
+        return { env, registration: null, settled: clearRegistration() };
+    }
     if (routeName) {
         delete env[ROUTE_ENV];
         for (const key of PROXY_KEYS) delete env[key];

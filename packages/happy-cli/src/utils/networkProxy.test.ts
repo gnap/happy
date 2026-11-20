@@ -117,6 +117,23 @@ describe('applyNetworkProxyPolicy', () => {
         expect(notify).not.toHaveBeenCalled();
     });
 
+    it('gives the agent nothing when the profile names direct', () => {
+        process.env.HAPPY_LOCAL_PROXY_URL = LOCAL_URL;
+
+        // "direct" is a decision: it overrides both a hop in the environment and the relay switch.
+        const policy = applyNetworkProxyPolicy(
+            { HAPPY_PROXY_ROUTE: 'direct', ALL_PROXY: HOP, ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic' },
+            { viaRelay: true },
+        );
+
+        expect(policy.registration).toBeNull();
+        expect(policy.env).toEqual({ ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic' });
+        expect(process.env.ALL_PROXY).toBeUndefined();
+        expect(process.env.HTTPS_PROXY).toBeUndefined();
+        expect(process.env.HTTP_PROXY).toBeUndefined();
+        expect(notify).not.toHaveBeenCalled();
+    });
+
     it('refuses a named route this machine does not serve', () => {
         const home = mkdtempSync(join(tmpdir(), 'happy-route-'));
         writeFileSync(join(home, 'proxy-routes.json'), JSON.stringify({ personal: 57999 }));
