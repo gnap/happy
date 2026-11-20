@@ -276,6 +276,23 @@ export function stripNetworkProxyKeys(env: Record<string, string>): Record<strin
     return copy;
 }
 
+/**
+ * Whether a profile's environment changed in a way the agent process can see.
+ *
+ * Proxy keys are excluded on purpose. They never reach the agent — the policy replaces them with
+ * the daemon's loopback URL, which is the same whatever the hop is — so a profile that still names
+ * a hop would otherwise look different on every message: the message carries the socks entry, the
+ * applied environment has it stripped, and the comparison kept respawning the agent every turn.
+ */
+export function profileEnvChanged(current: Record<string, string>, next: Record<string, string>): boolean {
+    const left = stripNetworkProxyKeys(current);
+    const right = stripNetworkProxyKeys(next);
+    const leftKeys = Object.keys(left).filter((key) => left[key] !== undefined).sort();
+    const rightKeys = Object.keys(right).filter((key) => right[key] !== undefined).sort();
+    if (leftKeys.length !== rightKeys.length) return true;
+    return leftKeys.some((key, i) => key !== rightKeys[i] || left[key] !== right[key]);
+}
+
 function restoreInjection(): void {
     if (!injected) return;
     for (const [key, value] of injected) {
