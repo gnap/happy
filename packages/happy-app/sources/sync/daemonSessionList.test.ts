@@ -48,6 +48,28 @@ describe('daemonSessionRows', () => {
         expect(daemonSessionRows([report({ happySessionId: undefined, tag: undefined })], 10)).toEqual({});
     });
 
+    it('carries the want beside the observation, including a stuck one', () => {
+        const rows = daemonSessionRows([report({
+            phase: 'Stopped',
+            generation: 4,
+            observedGeneration: 3,
+            desiredLifecycle: 'running',
+            divergence: {
+                desired: 'running',
+                generation: 4,
+                reason: 'want-not-observed',
+                since: 1_000,
+                attempts: 5,
+                blocked: true,
+            },
+        })], 10);
+
+        expect(rows['session-1']).toMatchObject({
+            desiredLifecycle: 'running',
+            divergence: { generation: 4, blocked: true, attempts: 5 },
+        });
+    });
+
     it('leaves the projection off when an older machine says nothing about it', () => {
         expect(daemonSessionRows([report()], 10)['session-1']).toEqual({
             isAlive: true,
@@ -120,6 +142,29 @@ describe('mergeSessionRuntime', () => {
             s1: { phase: 'Running', generation: 2, at: 20 },
         });
     });
+
+    it('keeps an outstanding want when a statement does not mention it', () => {
+        const divergence = { desired: 'running', generation: 2, reason: 'in-flight', since: 10 };
+        const first = mergeSessionRuntime({}, [{ sessionId: 's1', phase: 'Starting', divergence }], 10);
+
+        expect(mergeSessionRuntime(first, [{ sessionId: 's1', phase: 'Starting' }], 20)).toEqual({
+            s1: { phase: 'Starting', divergence, at: 20 },
+        });
+    });
+
+    it('clears a want the listing says the facts have caught up with', () => {
+        // A divergence is the one projection that has to be removable: unlike a phase, it stops
+        // being true. The listing is complete, so its `null` is the statement that it is over.
+        const first = mergeSessionRuntime({}, [{
+            sessionId: 's1',
+            phase: 'Stopped',
+            divergence: { desired: 'running', generation: 2, reason: 'want-not-observed', since: 10 },
+        }], 10);
+
+        expect(mergeSessionRuntime(first, [{ sessionId: 's1', phase: 'Running', divergence: null }], 20)).toEqual({
+            s1: { phase: 'Running', at: 20 },
+        });
+    });
 });
 
 describe('daemonSessionListSignature', () => {
@@ -136,6 +181,18 @@ describe('daemonSessionListSignature', () => {
     it('changes when the generation moves, even if the phase reads the same', () => {
         expect(daemonSessionListSignature(daemonSessionRows([report({ phase: 'Restarting', generation: 2 })], 10)))
             .not.toBe(daemonSessionListSignature(daemonSessionRows([report({ phase: 'Restarting', generation: 3 })], 10)));
+    });
+
+    it('changes when a want goes from retrying to stuck', () => {
+        const divergence = { desired: 'running', generation: 2, reason: 'want-not-observed', since: 10 };
+        const retrying = daemonSessionRows([report({ phase: 'Stopped', generation: 2, divergence })], 10);
+        const blocked = daemonSessionRows([report({
+            phase: 'Stopped',
+            generation: 2,
+            divergence: { ...divergence, attempts: 5, blocked: true },
+        })], 10);
+
+        expect(daemonSessionListSignature(retrying)).not.toBe(daemonSessionListSignature(blocked));
     });
 
     it('does not depend on the order the machines answered in', () => {

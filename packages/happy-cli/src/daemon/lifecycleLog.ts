@@ -180,22 +180,48 @@ export type LifecycleSpec = {
 /**
  * The newest desired state of every session the log names.
  *
- * Keyed by the tag when the entry carries one, because that is the name this machine has from the
+ * Keyed by the tag when the lineage has one, because that is the name this machine has from the
  * moment it schedules a session and the one a later statement repeats. An entry known only by the
- * server id — a deletion for a row this machine no longer holds — is keyed by that id instead; it
- * is a spec for a session whose local lineage this machine can no longer name.
+ * server id — a deletion for a row this machine no longer holds — is keyed by that id when no
+ * entry ever paired it with a tag.
+ *
+ * Pairing first, folding second, is what makes an id-only statement land on the same session as
+ * the tag-keyed ones. A deletion recorded from the server's name alone and the creation that
+ * carried both names are one lineage; folding them separately would leave a `running` spec beside
+ * the `archived` one and leave a reconciler choosing between them.
  *
  * Entries written before the spec existed carry neither field; they are read as what they meant:
  * a `created` entry wants the session running, a `deleted` entry wants it archived, generation 0.
  * That is what lets a log from an older machine fold into the same picture.
  */
 export function foldLifecycleSpecs(entries: readonly LifecycleEntry[]): Map<string, LifecycleSpec> {
+    // Either name is enough to identify a session, and both are present on almost every entry.
+    // The maps are built first so an id-only entry can still be folded under its tag — and a
+    // tag-only one under its id.
+    const tagBySessionId = new Map<string, string>();
+    const sessionIdByTag = new Map<string, string>();
+    for (const entry of entries) {
+        if (entry.op !== 'created' && entry.op !== 'deleted') {
+            continue;
+        }
+        if (entry.tag !== undefined && entry.sessionId !== undefined) {
+            if (!tagBySessionId.has(entry.sessionId)) {
+                tagBySessionId.set(entry.sessionId, entry.tag);
+            }
+            if (!sessionIdByTag.has(entry.tag)) {
+                sessionIdByTag.set(entry.tag, entry.sessionId);
+            }
+        }
+    }
+
     const specs = new Map<string, LifecycleSpec>();
     for (const entry of entries) {
         if (entry.op !== 'created' && entry.op !== 'deleted') {
             continue;
         }
-        const key = entry.tag ?? entry.sessionId;
+        const tag = entry.tag ?? (entry.sessionId !== undefined ? tagBySessionId.get(entry.sessionId) : undefined);
+        const sessionId = entry.sessionId ?? (tag !== undefined ? sessionIdByTag.get(tag) : undefined);
+        const key = tag ?? sessionId;
         if (key === undefined) {
             continue;
         }
@@ -203,8 +229,8 @@ export function foldLifecycleSpecs(entries: readonly LifecycleEntry[]): Map<stri
             lifecycle: entry.lifecycle ?? (entry.op === 'created' ? 'running' : 'archived'),
             generation: entry.generation ?? 0,
             at: entry.at,
-            ...(entry.tag !== undefined ? { tag: entry.tag } : {}),
-            ...(entry.sessionId !== undefined ? { sessionId: entry.sessionId } : {}),
+            ...(tag !== undefined ? { tag } : {}),
+            ...(sessionId !== undefined ? { sessionId } : {}),
         });
     }
     return specs;

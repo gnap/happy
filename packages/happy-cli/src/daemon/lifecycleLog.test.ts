@@ -163,6 +163,34 @@ describe('LifecycleLog', () => {
         });
     });
 
+    it('folds an id-only deletion onto the tag that names the same lineage', () => {
+        // The App can know a session by its server id after this machine's catalog lost the tag
+        // pairing. The creation still carries both, so folding the two separately would leave a
+        // `running` spec beside the `archived` one for the same session.
+        const log = logAt();
+        log.record({ op: 'created', tag: 'a', sessionId: 's1', lifecycle: 'running', generation: 2 });
+        log.record({ op: 'deleted', sessionId: 's1', lifecycle: 'archived', generation: 3 });
+
+        const specs = foldLifecycleSpecs(log.read());
+        expect(specs.size).toBe(1);
+        expect(specs.get('a')).toMatchObject({
+            lifecycle: 'archived',
+            generation: 3,
+            tag: 'a',
+            sessionId: 's1',
+        });
+    });
+
+    it('lets a later creation override an earlier id-only deletion', () => {
+        const log = logAt();
+        log.record({ op: 'deleted', sessionId: 's1', lifecycle: 'archived', generation: 3 });
+        log.record({ op: 'created', tag: 'a', sessionId: 's1', lifecycle: 'running', generation: 4 });
+
+        const specs = foldLifecycleSpecs(log.read());
+        expect(specs.size).toBe(1);
+        expect(specs.get('a')).toMatchObject({ lifecycle: 'running', generation: 4 });
+    });
+
     it('reads a lifecycle that contradicts its op as a torn line, not as a fact', () => {
         const dir = mkdtempSync(join(tmpdir(), 'happy-lifecycle-'));
         const file = join(dir, 'lifecycle.jsonl');

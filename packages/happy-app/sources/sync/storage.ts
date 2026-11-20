@@ -7,10 +7,11 @@ import { bump } from './metrics';
 import { Message } from "./typesMessage";
 import { collapseDuplicateMessages, mergePageIntoWindow } from "./messageIdentity";
 import { NormalizedMessage } from "./typesRaw";
-import type { DaemonRoute, LanSighting, RelayEndpoint, SessionChannel } from './lan/types';
-import { daemonSessionListSignature, daemonSessionRows, dropDeletedDaemonSessionRows, keepPendingDaemonSessionRows, mergeSessionRuntime, type DaemonSessionEntry, type DaemonSessionReport, type SessionRuntimeEntry } from './daemonSessionList';
+import type { DaemonRoute, LanSighting, RelayEndpoint, SessionChannel, SessionDivergence } from './lan/types';
+import { daemonSessionListSignature, daemonSessionRows, dropDeletedDaemonSessionRows, keepPendingDaemonSessionRows, mergeSessionRuntime, type DaemonSessionEntry, type DaemonSessionReport, type SessionRuntimeEntry, type SessionRuntimeReport } from './daemonSessionList';
 
 export type { DaemonSessionEntry } from './daemonSessionList';
+
 import type { RelayDirectoryEntry } from './lan/relayDirectory';
 import { advanceLanEndpoint, advanceRelayEndpoint, parseLanEndpoints, parseRelayEndpoint } from './lan/relay';
 import type { DaemonConnectionState } from './lan/daemonConnections';
@@ -26,6 +27,18 @@ import { KeyedStore, shallowEqual, useAllKeyedValues, useKeyedSelector, useKeyed
 
 export { channelLinks, type ChannelLink } from './channelLinks';
 export type { ChannelLinkState } from './channels/types';
+
+/** Whether two runtime divergences say the same thing. A repeated push must not redraw the row. */
+function sameDivergence(a: SessionDivergence | undefined, b: SessionDivergence | undefined): boolean {
+    if (a === b) return true;
+    if (a === undefined || b === undefined) return false;
+    return a.desired === b.desired
+        && a.generation === b.generation
+        && a.reason === b.reason
+        && a.since === b.since
+        && a.attempts === b.attempts
+        && a.blocked === b.blocked;
+}
 import { applySettings, Settings } from "./settings";
 import { LocalSettings, applyLocalSettings } from "./localSettings";
 import { Purchases, customerInfoToPurchases } from "./purchases";
@@ -234,7 +247,7 @@ interface StorageState {
      */
     sessionRuntime: Record<string, SessionRuntimeEntry>;
     /** Merge what machines said; null forgets everything (sign-out, or a machine being removed). */
-    applySessionRuntime: (entries: (Partial<Omit<SessionRuntimeEntry, 'at'>> & { sessionId: string })[] | null) => void;
+    applySessionRuntime: (entries: SessionRuntimeReport[] | null) => void;
     /**
      * Sessions this device has deleted, by id.
      *
@@ -2128,7 +2141,8 @@ export const storage = create<StorageState>()((set, get) => {
             }
             // A deleted session has no status in any channel; a late projection for one is stale.
             const offered = entries.filter((entry) => state.deletedSessions[entry.sessionId] === undefined);
-            const next = mergeSessionRuntime(state.sessionRuntime, offered, Date.now());
+            const at = Date.now();
+            const next = mergeSessionRuntime(state.sessionRuntime, offered, at);
             // A push that repeats what the row already says must not redraw it.
             const same = offered.every((entry) => {
                 const before = state.sessionRuntime[entry.sessionId];
@@ -2138,9 +2152,28 @@ export const storage = create<StorageState>()((set, get) => {
                     && before.generation === after.generation
                     && before.observedGeneration === after.observedGeneration
                     && before.observedAt === after.observedAt
-                    && before.reason === after.reason;
+                    && before.reason === after.reason
+                    && before.desiredLifecycle === after.desiredLifecycle
+                    && sameDivergence(before.divergence, after.divergence);
             });
-            if (same) return state;
+            if (same) {
+                // The fields did not move, but a want still outstanding was just restated: its
+                // arrival time is what lets a reader age the statement out, so it has to move
+                // even when nothing a row draws has changed. Only rows still carrying a want are
+                // touched — a settled projection has nothing to age, and refreshing it would
+                // redraw every running session on every listing.
+                const restated = offered.some((entry) => entry.divergence !== null
+                    && next[entry.sessionId]?.divergence !== undefined);
+                if (!restated) return state;
+                const refreshed = { ...state.sessionRuntime };
+                for (const entry of offered) {
+                    const current = refreshed[entry.sessionId];
+                    if (current?.divergence !== undefined) {
+                        refreshed[entry.sessionId] = { ...current, at };
+                    }
+                }
+                return { ...state, sessionRuntime: refreshed };
+            }
             return { ...state, sessionRuntime: next };
         }),
         setSessionChannelOverride: (sessionId: string, channel: SessionChannel | null) => set((state) => {
@@ -2659,6 +2692,19 @@ export function useSessionMachineId(sessionId: string): string | undefined {
  */
 export function useSessionDeletePending(sessionId: string): boolean {
     return storage((state) => state.pendingSessionDeletes[sessionId] !== undefined);
+}
+
+/**
+ * What the machine last said about this session's runtime, if it said anything.
+ *
+ * Kept out of the session row on purpose: it arrives on the machine's own schedule, is not part
+ * of the session's persisted state, and most rows never draw it. The statement is selected with
+ * `useShallow` so a listing that replaces the entry object without changing what it says does not
+ * wake the row — only a field a reader could act on (or the arrival time of an outstanding want)
+ * does.
+ */
+export function useSessionRuntimeEntry(sessionId: string): SessionRuntimeEntry | undefined {
+    return storage(useShallow((state) => state.sessionRuntime[sessionId]));
 }
 
 /**

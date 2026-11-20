@@ -4767,7 +4767,10 @@ class Sync {
                 // The projection beside the timestamp is runtime state, not persisted session
                 // state: it goes to the in-memory store below, where the next listing and the
                 // next push meet, and a server refresh cannot freeze it into the cache.
-                if (updateData.body.phase !== undefined || updateData.body.generation !== undefined) {
+                if (updateData.body.phase !== undefined
+                    || updateData.body.generation !== undefined
+                    || updateData.body.divergence !== undefined
+                    || updateData.body.desiredLifecycle !== undefined) {
                     storage.getState().applySessionRuntime([{
                         sessionId: updateData.body.id,
                         phase: updateData.body.phase ?? undefined,
@@ -4775,6 +4778,12 @@ class Sync {
                         observedGeneration: updateData.body.observedGeneration ?? undefined,
                         observedAt: updateData.body.observedAt ?? undefined,
                         reason: updateData.body.reason ?? undefined,
+                        desiredLifecycle: updateData.body.desiredLifecycle ?? undefined,
+                        // `null` is the machine saying the want has been realized; absent means this
+                        // update says nothing about it, which must not clear a stored verdict.
+                        ...(updateData.body.divergence !== undefined
+                            ? { divergence: updateData.body.divergence ?? null }
+                            : {}),
                     }]);
                 }
 
@@ -6545,7 +6554,8 @@ class Sync {
             if (!sessionId) return [];
             if (summary.phase === undefined && summary.generation === undefined
                 && summary.observedGeneration === undefined && summary.observedAt === undefined
-                && summary.reason === undefined) {
+                && summary.reason === undefined && summary.desiredLifecycle === undefined
+                && summary.divergence === undefined) {
                 return [];
             }
             return [{
@@ -6555,6 +6565,11 @@ class Sync {
                 observedGeneration: summary.observedGeneration,
                 observedAt: summary.observedAt,
                 reason: summary.reason,
+                desiredLifecycle: summary.desiredLifecycle,
+                // A listing is a complete statement about the row: the want is either outstanding
+                // in it or it is not, so a divergence it does not carry is one the facts caught up
+                // with — the explicit `null` is what clears it.
+                divergence: summary.divergence ?? null,
             }];
         });
         if (runtime.length > 0) {

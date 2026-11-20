@@ -42,6 +42,10 @@ export type DirectorySession = Pick<
   | 'observedGeneration'
   | 'observedAt'
   | 'reason'
+  // The want beside the observation: whether the machine is still working on the row, and why it
+  // stopped if it did. Small, and exactly what a directory reader needs to draw a stuck row.
+  | 'desiredLifecycle'
+  | 'divergence'
 >;
 
 /**
@@ -67,6 +71,8 @@ export function directoryRows(summaries: readonly LanSessionSummary[]): Director
       ...(summary.observedGeneration === undefined ? {} : { observedGeneration: summary.observedGeneration }),
       ...(summary.observedAt === undefined ? {} : { observedAt: summary.observedAt }),
       ...(summary.reason === undefined ? {} : { reason: summary.reason }),
+      ...(summary.desiredLifecycle === undefined ? {} : { desiredLifecycle: summary.desiredLifecycle }),
+      ...(summary.divergence === undefined ? {} : { divergence: summary.divergence }),
     });
   }
   return rows;

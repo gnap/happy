@@ -1,4 +1,4 @@
-import type { DaemonRoute } from './lan/types';
+import type { DaemonRoute, SessionDivergence } from './lan/types';
 
 /**
  * One row as a machine's daemon answered it, keyed by server id or — before the server has named
@@ -29,6 +29,13 @@ export type DaemonSessionEntry = {
     observedGeneration?: number;
     observedAt?: number;
     reason?: string;
+    /** The lifecycle the machine's log wants, when it has a spec for the row. */
+    desiredLifecycle?: string;
+    /**
+     * A want the machine accepted and has not realized yet. `blocked` means it has stopped
+     * retrying — the row is stuck, not still starting.
+     */
+    divergence?: SessionDivergence;
 };
 
 /** What a machine reported for one row, before the store stamps when it heard it. */
@@ -67,6 +74,8 @@ export function daemonSessionRows(
             ...(session.observedGeneration !== undefined ? { observedGeneration: session.observedGeneration } : {}),
             ...(session.observedAt !== undefined ? { observedAt: session.observedAt } : {}),
             ...(session.reason !== undefined ? { reason: session.reason } : {}),
+            ...(session.desiredLifecycle !== undefined ? { desiredLifecycle: session.desiredLifecycle } : {}),
+            ...(session.divergence !== undefined ? { divergence: session.divergence } : {}),
         };
     }
     return rows;
@@ -136,8 +145,23 @@ export type SessionRuntimeEntry = {
     observedGeneration?: number;
     observedAt?: number;
     reason?: string;
+    desiredLifecycle?: string;
+    divergence?: SessionDivergence;
     /** When this entry was last said, so a reader can age the projection out. */
     at: number;
+};
+
+/**
+ * One machine statement about a session's runtime.
+ *
+ * `divergence` is the one field that has to be clearable: unlike a phase, which is always stated,
+ * a divergence exists only while the want is outstanding, and a reader that kept the last one
+ * would draw a stuck row forever. `undefined` says the statement has nothing to say about it;
+ * `null` says the facts have caught up.
+ */
+export type SessionRuntimeReport = Partial<Omit<SessionRuntimeEntry, 'at' | 'divergence'>> & {
+    sessionId: string;
+    divergence?: SessionDivergence | null;
 };
 
 /**
@@ -149,7 +173,7 @@ export type SessionRuntimeEntry = {
  */
 export function mergeSessionRuntime(
     current: Record<string, SessionRuntimeEntry>,
-    entries: readonly (Partial<Omit<SessionRuntimeEntry, 'at'>> & { sessionId: string })[],
+    entries: readonly SessionRuntimeReport[],
     at: number,
 ): Record<string, SessionRuntimeEntry> {
     const next = { ...current };
@@ -161,11 +185,19 @@ export function mergeSessionRuntime(
         const observedGeneration = entry.observedGeneration ?? previous?.observedGeneration;
         const observedAt = entry.observedAt ?? previous?.observedAt;
         const reason = entry.reason ?? previous?.reason;
+        const desiredLifecycle = entry.desiredLifecycle ?? previous?.desiredLifecycle;
+        // A full listing states the row's whole truth, so it passes `null` for a want that has
+        // been realized; a partial push that says nothing about it leaves the stored one alone.
+        const divergence = entry.divergence === undefined
+            ? previous?.divergence
+            : entry.divergence ?? undefined;
         if (phase !== undefined) merged.phase = phase;
         if (generation !== undefined) merged.generation = generation;
         if (observedGeneration !== undefined) merged.observedGeneration = observedGeneration;
         if (observedAt !== undefined) merged.observedAt = observedAt;
         if (reason !== undefined) merged.reason = reason;
+        if (desiredLifecycle !== undefined) merged.desiredLifecycle = desiredLifecycle;
+        if (divergence !== undefined) merged.divergence = divergence;
         next[entry.sessionId] = merged;
     }
     return next;
@@ -182,9 +214,13 @@ export function mergeSessionRuntime(
 export function daemonSessionListSignature(list: Record<string, DaemonSessionEntry>): string {
     return Object.keys(list).sort().map((id) => {
         const s = list[id];
+        const divergence = s.divergence === undefined
+            ? ''
+            : [s.divergence.desired, s.divergence.generation, s.divergence.reason, s.divergence.since,
+                s.divergence.attempts ?? '', s.divergence.blocked ? 1 : 0].join('/');
         return [id, s.isAlive ? 1 : 0, s.directory, s.agent, s.via, s.machineId, s.origin ?? '', s.tag ?? '',
             s.restartingSince ?? '', s.phase ?? '', s.generation ?? '', s.observedGeneration ?? '',
-            s.observedAt ?? '', s.reason ?? '',
+            s.observedAt ?? '', s.reason ?? '', s.desiredLifecycle ?? '', divergence,
             s.desktop?.required ? 1 : 0, s.desktop?.available ? 1 : 0].join('\u0000');
     }).join('\u0001');
 }
