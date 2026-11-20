@@ -52,6 +52,8 @@ export function ProfileEditForm({
         () => collectProxyRoutes(machines, profile.proxyRoute),
         [machines, profile.proxyRoute],
     );
+    // The list stays collapsed until asked for: it is a choice, not a menu to read every time.
+    const [routePickerOpen, setRoutePickerOpen] = React.useState(false);
 
     const handleSave = () => {
         if (!name.trim()) return;
@@ -129,26 +131,46 @@ export function ProfileEditForm({
                     {t('profiles.proxyRouteDescription')}
                 </Text>
                 {knownRoutes.length > 0 ? (
-                    <View style={formStyles.routeList}>
-                        {[undefined, ...knownRoutes].map((route) => {
-                            const selected = route === undefined
-                                ? !proxyRoute.trim()
-                                : proxyRoute.trim() === route;
-                            return (
-                                <Pressable
-                                    key={route ?? '__none__'}
-                                    style={[formStyles.routeOption, selected && formStyles.routeOptionActive]}
-                                    onPress={() => setProxyRoute(route ?? '')}
-                                >
-                                    <Text style={formStyles.routeOptionText}>
-                                        {route ?? t('profiles.proxyRouteNone')}
-                                    </Text>
-                                    {selected && (
-                                        <Ionicons name="checkmark" size={18} color={theme.colors.button.primary.tint} />
-                                    )}
-                                </Pressable>
-                            );
-                        })}
+                    <View style={formStyles.routeFieldBlock}>
+                        <Pressable
+                            style={formStyles.routeField}
+                            onPress={() => setRoutePickerOpen((open) => !open)}
+                        >
+                            <Text style={formStyles.routeFieldText}>
+                                {proxyRoute.trim() || t('profiles.proxyRouteNone')}
+                            </Text>
+                            <Ionicons
+                                name={routePickerOpen ? 'chevron-up' : 'chevron-down'}
+                                size={18}
+                                color={theme.colors.textSecondary}
+                            />
+                        </Pressable>
+                        {routePickerOpen && (
+                            <View style={formStyles.routeList}>
+                                {[undefined, ...knownRoutes].map((route) => {
+                                    const selected = route === undefined
+                                        ? !proxyRoute.trim()
+                                        : proxyRoute.trim() === route;
+                                    return (
+                                        <Pressable
+                                            key={route ?? '__none__'}
+                                            style={[formStyles.routeOption, selected && formStyles.routeOptionActive]}
+                                            onPress={() => {
+                                                setProxyRoute(route ?? '');
+                                                setRoutePickerOpen(false);
+                                            }}
+                                        >
+                                            <Text style={formStyles.routeOptionText}>
+                                                {route ?? t('profiles.proxyRouteNone')}
+                                            </Text>
+                                            {selected && (
+                                                <Ionicons name="checkmark" size={18} color={theme.colors.button.primary.tint} />
+                                            )}
+                                        </Pressable>
+                                    );
+                                })}
+                            </View>
+                        )}
                     </View>
                 ) : (
                     // Nothing published yet — a newer relay route or a machine that has not
@@ -268,12 +290,31 @@ const formStyles = StyleSheet.create((theme) => ({
         flex: 1,
         ...Typography.default('semiBold'),
     },
+    routeFieldBlock: {
+        marginBottom: theme.margins.md,
+    },
+    routeField: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        backgroundColor: theme.colors.input.background,
+        borderRadius: theme.borderRadius.lg,
+        borderWidth: 1,
+        borderColor: theme.colors.textSecondary,
+        paddingHorizontal: theme.margins.sm,
+        paddingVertical: 10,
+    },
+    routeFieldText: {
+        fontSize: 15,
+        color: theme.colors.text,
+        ...Typography.default(),
+    },
     routeList: {
         borderRadius: theme.borderRadius.lg,
         borderWidth: 1,
         borderColor: theme.colors.textSecondary,
         overflow: 'hidden',
-        marginBottom: theme.margins.md,
+        marginTop: 6,
     },
     routeOption: {
         flexDirection: 'row',
