@@ -26,6 +26,7 @@ import nacl from 'tweetnacl';
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { connect as connectTcp, type Socket as TcpSocket } from 'node:net';
+import { parseSocks5Url, socks5Connect, type Socks5Endpoint } from './socks5';
 
 export const REGISTER_CONTEXT = 'happy-relay-v1.register.';
 
@@ -45,6 +46,12 @@ export type RelayOptions = {
     httpTimeoutMs?: number;
     /** Requests per IP per minute on the public side. */
     ratePerMinute?: number;
+    /**
+     * Named egress routes: `name -> socks5://…`. A daemon can ask for `eg-open {route, host, port}`
+     * instead of naming the hop itself, so the hop's address and credentials stay on this relay and
+     * never reach a machine. Absent or empty means the relay only dials targets the daemon names.
+     */
+    routes?: Record<string, string>;
 };
 
 export type RelayHandle = { port: number; stop: () => void; daemonCount: () => number };
@@ -177,6 +184,8 @@ function directorySession(entry: unknown): DirectorySession | null {
 type Egress = {
     /** The daemon's id for this pipe, echoed on every frame about it. */
     id: number;
+    /** The named route this pipe left through, when the daemon named one. Never an address. */
+    route?: string;
     /** What the daemon asked for, for logs. */
     target: string;
     socket: TcpSocket;
@@ -287,6 +296,19 @@ export function startRelay(options: RelayOptions): RelayHandle {
     const httpTimeout = options.httpTimeoutMs ?? 15_000;
     const rate = options.ratePerMinute ?? 600;
     const daemons = new Map<string, Daemon>();
+    /**
+     * Route name -> hop. Parsed once at startup: a route that cannot be parsed is refused here,
+     * loudly, rather than turning every request through it into a runtime failure.
+     */
+    const routes = new Map<string, Socks5Endpoint>();
+    for (const [name, raw] of Object.entries(options.routes ?? {})) {
+        const endpoint = parseSocks5Url(raw);
+        if (!endpoint) {
+            console.error(`[relay] ignoring route "${name}": not a socks5:// URL`);
+            continue;
+        }
+        routes.set(name, endpoint);
+    }
     /** Hub connections, so the directory can be pushed the moment a machine comes or goes. */
     const hubClients = new Set<any>();
     /** The directory frame last pushed to hub clients, so a no-op republish sends nothing. */
@@ -514,6 +536,9 @@ export function startRelay(options: RelayOptions): RelayHandle {
                         try { previous.ws.close(4000, 'replaced'); } catch { /* gone */ }
                     }
                     ws.send(JSON.stringify({ t: 'ok', tag }));
+                    // Names only. A machine needs to know which routes exist so it can offer them
+                    // and refuse an unknown one early; what a route points at stays here.
+                    ws.send(JSON.stringify({ t: 'routes', names: [...routes.keys()] }));
                     // A machine coming online is the event an App is waiting for, so it is pushed
                     // rather than left for the client to notice on a timer.
                     broadcastDirectory();
@@ -804,17 +829,27 @@ export function startRelay(options: RelayOptions): RelayHandle {
     /**
      * Opens one raw TCP pipe for an authenticated daemon.
      *
-     * The relay does not interpret what will flow through it — in practice a SOCKS5 handshake and
-     * then the proxied bytes — so there is nothing here to get wrong about the target's protocol.
-     * The only judgement made is about resources: per-daemon concurrency, a connect deadline, and
-     * an idle deadline.
+     * Two shapes. Without a route the relay dials the target the daemon named and moves bytes;
+     * with one it dials that route's hop and performs the SOCKS5 handshake itself before any
+     * byte reaches the daemon, which is what keeps the hop's address and credentials off every
+     * machine. In both, the only judgement made is about resources: per-daemon concurrency, a
+     * connect deadline, and an idle deadline.
      */
     function openEgress(daemon: Daemon, msg: any): void {
         const id = Number(msg.id);
         const host = typeof msg.host === 'string' ? msg.host.trim() : '';
         const port = Number(msg.port);
+        const routeName = typeof msg.route === 'string' ? msg.route.trim() : '';
         if (!Number.isInteger(id) || id < 0 || !host || host.length > 255 || !Number.isInteger(port) || port < 1 || port > 65535) {
             if (Number.isInteger(id)) egressSend(daemon, { t: 'eg-err', id, message: 'bad request' });
+            return;
+        }
+        // A named route means this relay dials the hop and speaks SOCKS5 on it; the daemon never
+        // learns where the hop is or what it needs. An unknown name is refused, never read as
+        // "dial the target directly" — that would put the traffic somewhere nobody chose.
+        const route = routeName ? routes.get(routeName) : undefined;
+        if (routeName && !route) {
+            egressSend(daemon, { t: 'eg-err', id, message: 'unknown route' });
             return;
         }
         if (daemon.egress.has(id)) {
@@ -826,10 +861,10 @@ export function startRelay(options: RelayOptions): RelayHandle {
             return;
         }
 
-        const socket = connectTcp({ host, port });
+        const socket = route ? connectTcp({ host: route.host, port: route.port }) : connectTcp({ host, port });
         socket.setNoDelay(true);
         const egress: Egress = {
-            id, socket, target: `${host}:${port}`, credit: EGRESS_WINDOW_BYTES,
+            id, socket, route: routeName || undefined, target: `${host}:${port}`, credit: EGRESS_WINDOW_BYTES,
             pending: [], received: 0, sent: 0, openedAt: Date.now(), opened: false, closed: false,
         };
         daemon.egress.set(id, egress);
@@ -840,28 +875,50 @@ export function startRelay(options: RelayOptions): RelayHandle {
             destroyEgress(daemon, id, egress, false, 'connect timeout');
         }, EGRESS_CONNECT_TIMEOUT_MS);
 
-        socket.on('connect', () => {
+        /**
+         * The pipe is usable. Told to the daemon only now: a route's handshake bytes are the
+         * relay's own conversation with the hop, and letting the daemon's stream start before it
+         * finishes would interleave them with the target's.
+         */
+        const open = (): void => {
             clearTimeout(connectTimer);
-            if (egress.closed) { socket.destroy(); return; }
+            if (egress.closed || egress.opened) return;
             egress.opened = true;
             egressSend(daemon, { t: 'eg-ok', id });
             // Reset by any read or write, so this measures silence on the connection rather than
             // time since it opened — a long download is not idle, an abandoned tunnel is.
             socket.setTimeout(EGRESS_IDLE_TIMEOUT_MS, () => destroyEgress(daemon, id, egress, true, 'idle'));
+            socket.on('data', (buf: Buffer) => {
+                if (egress.closed) return;
+                egress.received += buf.length;
+                for (let offset = 0; offset < buf.length; offset += EGRESS_CHUNK_BYTES) {
+                    egress.pending.push(Buffer.from(buf.subarray(offset, offset + EGRESS_CHUNK_BYTES)));
+                }
+                flushEgress(daemon, egress);
+            });
+            // The target closed its write side. The daemon is told so it can half-close in turn
+            // while still reading what the target already sent.
+            socket.on('end', () => {
+                if (!egress.closed) egressSend(daemon, { t: 'eg-half', id });
+            });
             socket.resume();
-        });
-        socket.on('data', (buf: Buffer) => {
-            if (egress.closed) return;
-            egress.received += buf.length;
-            for (let offset = 0; offset < buf.length; offset += EGRESS_CHUNK_BYTES) {
-                egress.pending.push(Buffer.from(buf.subarray(offset, offset + EGRESS_CHUNK_BYTES)));
+        };
+
+        socket.on('connect', () => {
+            if (egress.closed) { socket.destroy(); return; }
+            if (!route) {
+                open();
+                return;
             }
-            flushEgress(daemon, egress);
-        });
-        // The target closed its write side. The daemon is told so it can half-close in turn while
-        // still reading what the target already sent.
-        socket.on('end', () => {
-            if (!egress.closed) egressSend(daemon, { t: 'eg-half', id });
+            socks5Connect(socket, host, port, route).then(open).catch((error: unknown) => {
+                clearTimeout(connectTimer);
+                if (egress.closed) return;
+                egressSend(daemon, {
+                    t: 'eg-err', id,
+                    message: error instanceof Error ? error.message : 'socks5 failed',
+                });
+                destroyEgress(daemon, id, egress, false, 'socks5 failed');
+            });
         });
         socket.on('close', () => {
             clearTimeout(connectTimer);
@@ -910,9 +967,10 @@ export function startRelay(options: RelayOptions): RelayHandle {
         try { egress.socket.destroy(); } catch { /* gone */ }
     }
 
-    /** Host, byte counts and lifetime only: the pipe carries no credential this side can name. */
+    /** Host, route name, byte counts and lifetime only: the hop and its credentials stay out. */
     function logEgress(daemon: Daemon, egress: Egress, what: string): void {
-        console.log(`[egress] ${daemon.tag.slice(0, 8)} -> ${egress.target} ${what} rx=${egress.received} tx=${egress.sent} ms=${Date.now() - egress.openedAt}`);
+        const via = egress.route ? ` via ${egress.route}` : '';
+        console.log(`[egress] ${daemon.tag.slice(0, 8)} -> ${egress.target}${via} ${what} rx=${egress.received} tx=${egress.sent} ms=${Date.now() - egress.openedAt}`);
     }
 
     function teardown(daemon: Daemon) {
