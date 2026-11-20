@@ -164,6 +164,12 @@ function isRunningUnderSystemdService(): boolean {
   return typeof process.env.INVOCATION_ID === 'string' && process.env.INVOCATION_ID.length > 0;
 }
 
+/**
+ * The named routes this machine serves, read once at load: the same list backs the listeners the
+ * daemon starts and the names it publishes, so the two cannot disagree.
+ */
+const localRouteConfig = loadLocalRoutes(join(configuration.happyHomeDir, 'proxy-routes.json'));
+
 // Prepare initial metadata
 export const initialMachineMetadata: MachineMetadata = {
   host: os.hostname(),
@@ -171,7 +177,8 @@ export const initialMachineMetadata: MachineMetadata = {
   happyCliVersion: configuration.currentCliVersion,
   homeDir: os.homedir(),
   happyHomeDir: configuration.happyHomeDir,
-  happyLibDir: projectPath()
+  happyLibDir: projectPath(),
+  ...(localRouteConfig.length > 0 ? { proxyRoutes: localRouteConfig.map((route) => route.name) } : {})
 };
 
 /**
@@ -2341,8 +2348,7 @@ export async function startDaemon(): Promise<void> {
     // Named routes, on the fixed ports this machine assigned them. These belong to no session:
     // any process that points at the port uses the route, and a route that fails to start is
     // reported and skipped rather than taking the others down.
-    const routeConfig = loadLocalRoutes(join(configuration.happyHomeDir, 'proxy-routes.json'));
-    for (const route of routeConfig) {
+    for (const route of localRouteConfig) {
       try {
         routeProxies.push(await startLocalProxy({
           fixedRoute: { relayRoute: route.name, viaRelay: true, label: `route:${route.name}` },

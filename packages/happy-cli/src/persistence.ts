@@ -106,6 +106,13 @@ export const AIBackendProfileSchema = z.object({
      */
     proxyViaRelay: z.boolean().optional(),
 
+    /**
+     * A named route the relay defines and this machine serves on a fixed port. Takes precedence
+     * over `proxyViaRelay` and over any SOCKS5 hop in the environment: naming a route is saying
+     * where the traffic leaves from.
+     */
+    proxyRoute: z.string().optional(),
+
     // Default session type for this profile
     defaultSessionType: z.enum(['simple', 'worktree']).optional(),
 
@@ -146,6 +153,11 @@ export function getProfileEnvironmentVariables(profile: AIBackendProfile): Recor
   profile.environmentVariables.forEach(envVar => {
     envVars[envVar.name] = envVar.value;
   });
+
+  // A named relay route the machine serves. The profile carries the name; the port behind it is
+  // the machine's, and the hop behind that is the relay's.
+  const route = profile.proxyRoute?.trim();
+  if (route) envVars.HAPPY_PROXY_ROUTE = route;
 
   // Add Anthropic config
   if (profile.anthropicConfig) {
