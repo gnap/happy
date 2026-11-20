@@ -180,7 +180,7 @@ export interface SpawnSessionOptions {
     environmentVariables?: Record<string, string>;
     /**
      * Reach the profile's SOCKS5 hop through the relay rather than dialling it from the machine.
-     * Omitted means the daemon's default (on).
+     * Omitted means the daemon's default (direct).
      */
     proxyViaRelay?: boolean;
     /** Per-session sandbox config override (falls back to machine-global settings.json). */

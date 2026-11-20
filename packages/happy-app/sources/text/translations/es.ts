@@ -1056,7 +1056,7 @@ export const es: TranslationStructure = {
         copyProfile: 'Copiar Perfil',
         deleteProfile: 'Eliminar Perfil',
         proxyViaRelay: 'SOCKS5 a través del relay',
-        proxyViaRelayDescription: 'Cuando este perfil configura un proxy SOCKS5, las solicitudes llegan a él a través del relay en lugar de desde esta máquina. Desactívalo si la máquina puede alcanzar el salto directamente.',
+        proxyViaRelayDescription: 'Cuando este perfil configura un proxy SOCKS5, las solicitudes llegan a él a través del relay en lugar de desde esta máquina. Actívalo solo cuando esta máquina no pueda alcanzar el salto directamente.',
 
         addProfileTitle: 'Agregar Nuevo Perfil',
         delete: {

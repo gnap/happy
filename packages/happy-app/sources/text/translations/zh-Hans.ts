@@ -1035,7 +1035,7 @@ export const zhHans: TranslationStructure = {
         copyProfile: '复制配置文件',
         deleteProfile: '删除配置文件',
         proxyViaRelay: '通过中继转发 SOCKS5',
-        proxyViaRelayDescription: '当此配置文件设置 SOCKS5 代理时，请求将通过中继到达代理，而不是从本机直接连接。如果本机可以直连该跳板，请关闭此项。',
+        proxyViaRelayDescription: '当此配置文件设置 SOCKS5 代理时，请求将通过中继到达代理，而不是从本机直接连接。仅当本机无法直连该跳板时才需要开启。',
 
         profileName: '配置文件名称',
         enterName: '输入配置文件名称',
