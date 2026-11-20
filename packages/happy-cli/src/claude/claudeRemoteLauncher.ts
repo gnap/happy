@@ -69,6 +69,7 @@ import { buildClaudeTurnUsagePayload, type ClaudeLastInferenceUsage } from "./ut
 import { createEnvelope } from '@slopus/happy-wire';
 import { createSessionScanner } from "./utils/sessionScanner";
 import { delay } from "@/utils/time";
+import { randomUUID } from "node:crypto";
 
 interface PermissionsField {
     date: number;
@@ -857,6 +858,24 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
                                 : 'Claude exited with an error';
                             session.client.sendSessionEvent({ type: 'message', message: msg });
                         } else {
+                            // A local command (/usage, /cost, …) runs inside the CLI, not the model.
+                            // Its output exists in two places: a synthetic assistant message — dropped
+                            // above, because that is also how resumed history is replayed — and this
+                            // result's `result` field. Without this it reaches the App nowhere.
+                            const localCommand = (result as unknown as { local_command?: unknown }).local_command;
+                            if (
+                                typeof localCommand === 'string' && localCommand.length > 0 &&
+                                typeof result.result === 'string' && result.result.trim().length > 0
+                            ) {
+                                session.client.sendClaudeSessionMessage({
+                                    type: 'assistant',
+                                    uuid: randomUUID(),
+                                    message: {
+                                        role: 'assistant',
+                                        content: [{ type: 'text', text: result.result.trim() }],
+                                    },
+                                } as RawJSONLines);
+                            }
                             session.client.closeClaudeSessionTurn('completed', extras);
                         }
                         if (session.claudeTurnActiveRef) {
