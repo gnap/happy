@@ -1030,10 +1030,14 @@ function NewSessionWizard() {
 
             // Get environment variables from selected profile
             let environmentVariables: Record<string, string> | undefined = undefined;
+            // The relay is the default for a profile's SOCKS5 hop: the hop may not be reachable
+            // from this machine at all. Only an explicit opt-out selects a direct connection.
+            let proxyViaRelay: boolean | undefined = undefined;
             if (selectedProfileId) {
                 const selectedProfile = profileMap.get(selectedProfileId);
                 if (selectedProfile) {
                     environmentVariables = transformProfileToEnvironmentVars(selectedProfile, agentType);
+                    proxyViaRelay = selectedProfile.proxyViaRelay ?? true;
                 }
             }
             // Pass initial permission/model to CLI so ACP cursor starts with user-selected mode (not default)
@@ -1059,6 +1063,7 @@ function NewSessionWizard() {
                 approvedNewDirectoryCreation: true,
                 agent: agentType,
                 environmentVariables,
+                proxyViaRelay,
                 sandboxConfig,
                 requiresDesktop,
             });

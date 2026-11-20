@@ -1055,6 +1055,8 @@ export const zhHant: TranslationStructure = {
         editProfile: '編輯設定檔',
         copyProfile: '複製設定檔',
         deleteProfile: '刪除設定檔',
+        proxyViaRelay: '透過中繼轉送 SOCKS5',
+        proxyViaRelayDescription: '當此設定檔設定 SOCKS5 代理時，請求將透過中繼抵達代理，而不是從本機直接連線。如果本機可以直連該跳板，請關閉此項。',
 
         addProfileTitle: '新增設定檔',
         delete: {

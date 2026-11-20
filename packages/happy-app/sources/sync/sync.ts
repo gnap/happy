@@ -78,7 +78,7 @@ import { getFriendsList, getUserProfile } from './apiFriends';
 import { fetchFeed } from './apiFeed';
 import { FeedItem } from './feedTypes';
 import { UserProfile } from './friendTypes';
-import { resolveMessageModeMeta, resolveMessageProfileEnv } from './messageMeta';
+import { resolveMessageModeMeta, resolveMessageProfileEnv, resolveMessageProxyViaRelay } from './messageMeta';
 import { loadMessageCache, saveMessageCache, clearMessageCache, clearAllMessageCaches, preloadSessionCacheDB, getCachedLastSeq } from './cache/messageCache';
 import { mergePageIntoWindow } from './messageIdentity';
 import { MAX_CACHED_MESSAGES } from './cache/limits';
@@ -1707,6 +1707,7 @@ class Sync {
         const { permissionMode, model, maxMode, effort, sandboxIsolation } = resolveMessageModeMeta(session);
         const settings = storage.getState().settings;
         const environmentVariables = resolveMessageProfileEnv(session, settings.profiles ?? []);
+        const proxyViaRelay = resolveMessageProxyViaRelay(session, settings.profiles ?? []);
 
         // Reuse existing localId on retry so the same bubble is reused; generate fresh one otherwise.
         const localId = existingLocalId ?? randomUUID();
@@ -1774,6 +1775,7 @@ class Sync {
                 ...(sandboxIsolation !== undefined ? { sandboxIsolation } : {}),
                 profileId: session.profileId ?? null,
                 ...(environmentVariables ? { environmentVariables } : {}),
+                ...(proxyViaRelay !== undefined ? { proxyViaRelay } : {}),
                 ...(displayText && { displayText }), // Add displayText if provided
                 appMessageId: localId, // Carried through CLI round-trip for O(1) dedup
             }
