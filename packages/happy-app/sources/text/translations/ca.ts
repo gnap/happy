@@ -1037,7 +1037,7 @@ export const ca: TranslationStructure = {
         proxyRoute: 'Ruta del relé',
         proxyRouteDescription: 'Envia aquest perfil per una ruta amb nom que serveix la màquina, com ara "personal". La ruta es defineix al relé; la màquina l\'exposa en un port fix. Deixa-ho buit per fer servir l\'interruptor de dalt.',
         proxyRoutePlaceholder: 'personal',
-        proxyRouteNone: 'Sense ruta',
+        proxyRouteNone: 'Directe',
 
         profileName: 'Nom del perfil',
         enterName: 'Introdueix el nom del perfil',

@@ -102,7 +102,7 @@ export const ja: TranslationStructure = {
         proxyRoute: 'リレールート',
         proxyRouteDescription: 'このプロファイルを、マシンが公開している名前付きルート（例: "personal"）経由で送信します。ルートはリレー側で定義され、マシンは固定ポートで公開します。空欄の場合は上のスイッチを使用します。',
         proxyRoutePlaceholder: 'personal',
-        proxyRouteNone: 'ルートを使わない',
+        proxyRouteNone: '直接接続',
 
         addProfileTitle: '新しいプロファイルを追加',
         delete: {

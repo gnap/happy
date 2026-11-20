@@ -1055,7 +1055,7 @@ export const en = {
         proxyRoute: 'Relay route',
         proxyRouteDescription: 'Send this profile through a named route the machine serves, such as "personal". The route is defined on the relay; the machine exposes it on a fixed port. Leave empty to use the switch above.',
         proxyRoutePlaceholder: 'personal',
-        proxyRouteNone: 'No route',
+        proxyRouteNone: 'Direct',
         addProfileTitle: 'Add New Profile',
         delete: {
             title: 'Delete Profile',
