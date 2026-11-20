@@ -31,6 +31,27 @@ export function resolveMessageProfileEnv(
     return Object.keys(env).length > 0 ? env : undefined;
 }
 
+/**
+ * The relay choice carried by every message for a profile-backed session.
+ *
+ * Sending it per message is what makes a profile edit take effect on the next turn without a
+ * restart, and what restores the route when the daemon restarted under a live session. A session
+ * with no profile has no hop, so it states no choice (undefined), which keeps whatever it has.
+ *
+ * A profile that does not opt in states `false` rather than staying silent: silence means "keep
+ * the current route", which would let a relay choice outlive the profile that made it.
+ */
+export function resolveMessageProxyViaRelay(
+    session: Pick<Session, 'profileId'>,
+    customProfiles: AIBackendProfile[],
+): boolean | undefined {
+    const profile = resolveProfileById(session.profileId, customProfiles);
+    if (!profile) {
+        return undefined;
+    }
+    return profile.proxyViaRelay ?? false;
+}
+
 export function resolveMessageModeMeta(
     session: Pick<Session, 'permissionMode' | 'modelMode' | 'maxMode' | 'thinkingLevel' | 'metadata' | 'sandboxIsolation'>,
 ): { permissionMode: PermissionModeKey; model: string | null; maxMode?: boolean; effort?: string; sandboxIsolation?: string } {

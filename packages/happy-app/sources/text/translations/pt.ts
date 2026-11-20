@@ -1032,6 +1032,8 @@ export const pt: TranslationStructure = {
         editProfile: 'Editar perfil',
         copyProfile: 'Copiar perfil',
         deleteProfile: 'Eliminar perfil',
+        proxyViaRelay: 'Encaminhar o tráfego pelo relay',
+        proxyViaRelayDescription: 'Envia o tráfego deste perfil através do relay: pelo proxy SOCKS5 se o ambiente definir um, ou diretamente a partir do relay caso contrário. Desativado, usa as definições de proxy desta máquina.',
 
         profileName: 'Nome do perfil',
         enterName: 'Digite o nome do perfil',

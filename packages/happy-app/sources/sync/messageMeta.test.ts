@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveMessageModeMeta, resolveMessageProfileEnv } from './messageMeta';
+import { resolveMessageModeMeta, resolveMessageProfileEnv, resolveMessageProxyViaRelay } from './messageMeta';
 import type { AIBackendProfile } from './settings';
 
 describe('resolveMessageModeMeta', () => {
@@ -102,5 +102,17 @@ describe('resolveMessageProfileEnv', () => {
     it('returns undefined when no profile is selected', () => {
         expect(resolveMessageProfileEnv({ profileId: null }, [llmCenterProfile])).toBeUndefined();
         expect(resolveMessageProfileEnv({ profileId: undefined }, [llmCenterProfile])).toBeUndefined();
+    });
+
+    it('sends direct by default and follows an explicit relay opt-in', () => {
+        expect(resolveMessageProxyViaRelay({ profileId: 'llm-center-test' }, [llmCenterProfile])).toBe(false);
+        expect(resolveMessageProxyViaRelay(
+            { profileId: 'relay-test' },
+            [{ ...llmCenterProfile, id: 'relay-test', proxyViaRelay: true }],
+        )).toBe(true);
+    });
+
+    it('states no relay choice when the session has no profile', () => {
+        expect(resolveMessageProxyViaRelay({ profileId: null }, [llmCenterProfile])).toBeUndefined();
     });
 });

@@ -7,6 +7,7 @@ import { t } from '@/text';
 import { AIBackendProfile } from '@/sync/settings';
 import { getBuiltInProfileDocumentation } from '@/sync/profileUtils';
 import { EnvironmentVariablesList } from '@/components/EnvironmentVariablesList';
+import { Switch } from '@/components/Switch';
 
 export interface ProfileEditFormProps {
     profile: AIBackendProfile;
@@ -34,12 +35,17 @@ export function ProfileEditForm({
 
     const [name, setName] = React.useState(profile.name || '');
 
+    // Off unless the profile opted in. When on, all of this profile's traffic leaves through the
+    // relay; with a SOCKS5 hop in the environment, the relay connects to that hop first.
+    const [proxyViaRelay, setProxyViaRelay] = React.useState(profile.proxyViaRelay ?? false);
+
     const handleSave = () => {
         if (!name.trim()) return;
         onSave({
             ...profile,
             name: name.trim(),
             environmentVariables,
+            proxyViaRelay,
             updatedAt: Date.now(),
         });
     };
@@ -98,6 +104,22 @@ export function ProfileEditForm({
                     profileDocs={profileDocs}
                     onChange={setEnvironmentVariables}
                 />
+
+                {/* SOCKS5 egress route */}
+                <View style={formStyles.switchRow}>
+                    <View style={formStyles.switchText}>
+                        <Text style={formStyles.sectionTitle}>
+                            {t('profiles.proxyViaRelay')}
+                        </Text>
+                        <Text style={formStyles.switchDescription}>
+                            {t('profiles.proxyViaRelayDescription')}
+                        </Text>
+                    </View>
+                    <Switch
+                        value={proxyViaRelay}
+                        onValueChange={setProxyViaRelay}
+                    />
+                </View>
 
                 {/* Actions */}
                 <View style={formStyles.actions}>
@@ -186,6 +208,21 @@ const formStyles = StyleSheet.create((theme) => ({
         fontWeight: '600',
         flex: 1,
         ...Typography.default('semiBold'),
+    },
+    switchRow: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 12,
+        marginBottom: theme.margins.md,
+    },
+    switchText: {
+        flex: 1,
+    },
+    switchDescription: {
+        fontSize: 12,
+        color: theme.colors.textSecondary,
+        lineHeight: 17,
+        ...Typography.default(),
     },
     actions: {
         flexDirection: 'row',

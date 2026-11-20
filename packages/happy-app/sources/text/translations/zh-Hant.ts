@@ -1055,6 +1055,8 @@ export const zhHant: TranslationStructure = {
         editProfile: '編輯設定檔',
         copyProfile: '複製設定檔',
         deleteProfile: '刪除設定檔',
+        proxyViaRelay: '透過中繼轉送流量',
+        proxyViaRelayDescription: '將此設定檔的流量經中繼發出：環境變數裡設定了 SOCKS5 代理時先經該代理，否則由中繼直接連線目標。關閉時依本機的代理設定。',
 
         addProfileTitle: '新增設定檔',
         delete: {

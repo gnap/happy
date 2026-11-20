@@ -1032,6 +1032,8 @@ export const ca: TranslationStructure = {
         editProfile: 'Edita el perfil',
         copyProfile: 'Copia el perfil',
         deleteProfile: 'Eliminar perfil',
+        proxyViaRelay: 'Encamina el trànsit a través del relé',
+        proxyViaRelayDescription: 'Envia el trànsit d\'aquest perfil a través del relé: pel proxy SOCKS5 si l\'entorn en defineix un, o directament des del relé en cas contrari. Desactivat, s\'apliquen els paràmetres de proxy d\'aquesta màquina.',
 
         profileName: 'Nom del perfil',
         enterName: 'Introdueix el nom del perfil',
