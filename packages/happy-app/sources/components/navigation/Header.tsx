@@ -1,7 +1,10 @@
 import * as React from 'react';
-import { View, Text, Platform, StatusBar, Pressable } from 'react-native';
+import { View, Text, Platform, StatusBar, Pressable, type ColorValue } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import type { NativeStackHeaderProps } from '@react-navigation/native-stack';
+// The type must come from expo-router, not the standalone @react-navigation/native-stack
+// package: expo-router vendors its own React Navigation types, and the two `header` callbacks
+// are unrelated function types under strictFunctionTypes.
+import type { NativeStackHeaderProps } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { layout } from '../layout';
 import { useHeaderHeight, useIsTablet } from '@/utils/responsive';
@@ -90,7 +93,7 @@ interface ExtendedNavigationOptions extends Partial<NativeStackHeaderProps['opti
 }
 
 // Default back button component
-const DefaultBackButton: React.FC<{ tintColor?: string; onPress: () => void }> = ({ tintColor = '#000', onPress }) => {
+const DefaultBackButton: React.FC<{ tintColor?: ColorValue; onPress: () => void }> = ({ tintColor = '#000', onPress }) => {
     return (
         <Pressable onPress={onPress} hitSlop={15}>
             <Ionicons
@@ -185,9 +188,11 @@ const NavigationHeaderComponent: React.FC<NativeStackHeaderProps> = React.memo((
 });
 
 // Export a render function for React Navigation
-export const createHeader = (props: NativeStackHeaderProps) => {
+export const createHeader = (props: NativeStackHeaderProps): React.ReactNode => {
     if (props.options.headerShown === false) {
-        return null;
+        // A fragment, not null: React Navigation's header renderer is typed to return a React
+        // node, and a fragment renders nothing while satisfying that contract.
+        return <></>;
     }
     return <NavigationHeaderComponent {...props} />;
 };

@@ -1456,7 +1456,7 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
                                                 <Text style={{
                                                     fontSize: 15,
                                                     fontWeight: isSelected ? '600' : '400',
-                                                    color: isSelected ? theme.colors.textPrimary : theme.colors.textSecondary,
+                                                    color: isSelected ? theme.colors.text : theme.colors.textSecondary,
                                                 }}>
                                                     {label}
                                                 </Text>
@@ -1921,7 +1921,7 @@ function SandboxIndicatorButton({ isolation, onPress }: { isolation: SandboxIsol
             <Octicons
                 name={isActive ? "shield-check" : "shield"}
                 size={12}
-                color={isActive ? theme.colors.gitAdded : theme.colors.button.secondary.tint}
+                color={isActive ? theme.colors.success : theme.colors.button.secondary.tint}
             />
         </Pressable>
     );

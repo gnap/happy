@@ -475,6 +475,9 @@ export function SessionsList() {
                         isSingle={isSingle}
                     />
                 );
+
+            default:
+                return null;
         }
     }, [pathname, visibleData, compactSessionView, collapsedProjects, hiddenOfflineHosts]);
 

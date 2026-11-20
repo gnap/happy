@@ -71,7 +71,6 @@ export default function ProfileEditScreen() {
                 ]}>
                     <ProfileEditForm
                         profile={profile}
-                        machineId={params.machineId || null}
                         onSave={handleSave}
                         onCancel={handleCancel}
                     />

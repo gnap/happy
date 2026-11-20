@@ -610,7 +610,7 @@ class Sync {
     private backgroundSendTimeout: ReturnType<typeof setTimeout> | null = null;
     private backgroundSendNotificationId: string | null = null;
     private backgroundSendStartedAt: number | null = null;
-    private backgroundTaskId: number | null = null;
+    private backgroundTaskId: string | null = null;
     private sessionsRefreshInterval: ReturnType<typeof setInterval> | null = null;
     /**
      * The timer for the next deletion whose machine was unreachable. The intents themselves are
@@ -1619,7 +1619,7 @@ class Sync {
             try {
                 const { beginBackgroundTask } = await import('./iosBackgroundTask');
                 const result = await beginBackgroundTask('Send pending messages');
-                if (result.success) {
+                if (result.success && result.taskId) {
                     this.backgroundTaskId = result.taskId;
                     log.log(`📨 Background task started (id=${result.taskId})`);
                 }

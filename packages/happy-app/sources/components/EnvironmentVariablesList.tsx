@@ -327,7 +327,7 @@ const styles = StyleSheet.create((theme) => ({
     pasteButton: {
         flexDirection: 'row',
         alignItems: 'center',
-        backgroundColor: theme.colors.button.secondary.background,
+        backgroundColor: theme.colors.surfaceHigh,
         borderRadius: theme.borderRadius.md,
         paddingHorizontal: theme.margins.sm,
         paddingVertical: 5,
