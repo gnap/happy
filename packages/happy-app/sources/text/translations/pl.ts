@@ -99,6 +99,11 @@ export const pl: TranslationStructure = {
         activeNow: 'Aktywny teraz',
         unknown: 'nieznane',
         creating: 'Tworzenie…',
+        archiving: 'Archiwizowanie…',
+        applying: 'Stosowanie…',
+        couldNotStart: 'Nie udało się uruchomić',
+        couldNotArchive: 'Nie udało się zarchiwizować',
+        couldNotApply: 'Nie udało się zastosować zmiany',
     },
 
     time: {
@@ -397,6 +402,9 @@ export const pl: TranslationStructure = {
         channelWhyNotOnNetwork: 'Maszyny nie widać w tej sieci',
         channelWhyNoKey: 'Brak klucza tej maszyny na tym urządzeniu',
         channelWhyUnknown: 'Oczekiwanie na dane sesji',
+        machineStatus: 'Stan maszyny',
+        machineStatusDetail: ({ generation, observed }: { generation: number; observed: number }) =>
+            `Wersja ${generation} · zaobserwowano ${observed}`,
         created: 'Utworzono',
         lastUpdated: 'Ostatnia aktualizacja',
         sequence: 'Sekwencja',

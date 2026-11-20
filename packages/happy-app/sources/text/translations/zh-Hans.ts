@@ -90,6 +90,11 @@ export const zhHans: TranslationStructure = {
         activeNow: '当前活跃',
         unknown: '未知',
         creating: '创建中…',
+        archiving: '正在归档…',
+        applying: '正在应用…',
+        couldNotStart: '无法启动',
+        couldNotArchive: '无法归档',
+        couldNotApply: '无法应用更改',
     },
 
     time: {
@@ -388,6 +393,9 @@ export const zhHans: TranslationStructure = {
         channelWhyNotOnNetwork: '当前网络中未发现该机器',
         channelWhyNoKey: '此设备上没有该机器的密钥',
         channelWhyUnknown: '正在等待会话信息',
+        machineStatus: '机器状态',
+        machineStatusDetail: ({ generation, observed }: { generation: number; observed: number }) =>
+            `版本 ${generation} · 已确认 ${observed}`,
         created: '创建时间',
         lastUpdated: '最后更新',
         sequence: '序列',

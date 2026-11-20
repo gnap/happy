@@ -89,6 +89,11 @@ export const zhHant: TranslationStructure = {
         activeNow: '目前活躍',
         unknown: '未知',
         creating: '建立中…',
+        archiving: '正在封存…',
+        applying: '正在套用…',
+        couldNotStart: '無法啟動',
+        couldNotArchive: '無法封存',
+        couldNotApply: '無法套用變更',
     },
 
     time: {
@@ -387,6 +392,9 @@ export const zhHant: TranslationStructure = {
         channelWhyNotOnNetwork: '目前網路中未發現該機器',
         channelWhyNoKey: '此裝置上沒有該機器的金鑰',
         channelWhyUnknown: '正在等待工作階段資訊',
+        machineStatus: '機器狀態',
+        machineStatusDetail: ({ generation, observed }: { generation: number; observed: number }) =>
+            `版本 ${generation} · 已確認 ${observed}`,
         created: '建立時間',
         lastUpdated: '最後更新',
         sequence: '序列',
