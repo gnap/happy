@@ -377,6 +377,19 @@ describe('Api server error handling', () => {
             expect((sanitized as Record<string, unknown>).lifecycleState).toBeUndefined();
         });
 
+        it('publishes the lineage uid but never the CLI tag', () => {
+            // Two names for one session, and only one of them is the App's to hold: the tag stays
+            // CLI-private, the uid is the identity the App persists beside the server id.
+            const sanitized = sanitizeSessionMetadataForApp({
+                ...testMetadata,
+                sessionTag: 'tag-private',
+                sessionUid: 'uid-public',
+            });
+
+            expect(sanitized.sessionUid).toBe('uid-public');
+            expect((sanitized as Record<string, unknown>).sessionTag).toBeUndefined();
+        });
+
         it('keeps the working tree the session publishes', () => {
             // The sanitizer is a whitelist applied on every write *and* on every received push: a
             // field missing from it is silently dropped in both directions, which is exactly the
@@ -422,6 +435,31 @@ describe('Api server error handling', () => {
             expect(synced.flavor).toBe('cursor');
             expect(synced.summary).toEqual({ text: 'keep me', updatedAt: 1 });
             expect(synced.currentModelCode).toBe('gpt-4o');
+        });
+
+        it('pushes a uid onto a session that predates uids', () => {
+            // The session was created before this build, so the server's metadata has none. The
+            // resumed process knows the lineage's uid and is the one that can write it down.
+            expect(shouldSyncSessionMetadata(testMetadata, { ...testMetadata, sessionUid: 'uid-1' })).toBe(true);
+            expect(buildSyncedSessionMetadata(testMetadata, { ...testMetadata, sessionUid: 'uid-1' }).sessionUid).toBe('uid-1');
+        });
+
+        it('never erases a uid when the caller has nothing to say about it', () => {
+            // Write-once: a build that does not publish a uid must not be read as "this session has
+            // none". The absence is silence, and silence is not a change.
+            const current = { ...testMetadata, sessionUid: 'uid-1' };
+            expect(shouldSyncSessionMetadata(current, testMetadata)).toBe(false);
+            expect(buildSyncedSessionMetadata(current, testMetadata).sessionUid).toBe('uid-1');
+        });
+
+        it('does not rename a lineage when the process carries a different uid', () => {
+            // The local file can be lost and the uid re-minted. The record's uid was written first,
+            // and a second name is not an update; it is a different lineage's name.
+            const current = { ...testMetadata, sessionUid: 'uid-1' };
+            const next = { ...testMetadata, sessionUid: 'uid-2' };
+
+            expect(shouldSyncSessionMetadata(current, next)).toBe(false);
+            expect(buildSyncedSessionMetadata(current, next).sessionUid).toBe('uid-1');
         });
     });
 });

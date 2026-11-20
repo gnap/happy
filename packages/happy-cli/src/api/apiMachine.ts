@@ -14,6 +14,7 @@ import { encodeBase64, decodeBase64, encrypt, decrypt } from './encryption';
 import { backoff } from '@/utils/time';
 import { isBun, isNode } from '@/utils/runtime';
 import { RpcHandlerManager } from './rpc/RpcHandlerManager';
+import type { ArchiveSessionResult, RestartSessionResult } from '../daemon/types';
 
 /** How long a best-effort daemon-state write may take before the caller moves on. */
 const DAEMON_STATE_WRITE_TIMEOUT_MS = 2000;
@@ -111,8 +112,8 @@ interface DaemonToServerEvents {
 type MachineRpcHandlers = {
     spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
     stopSession: (sessionId: string) => boolean;
-    archiveSession: (sessionId: string) => boolean;
-    restartSession: (sessionId: string, sandboxConfig?: any, requiresDesktop?: boolean) => Promise<{ success: boolean; newSessionId?: string; error?: string }>;
+    archiveSession: (sessionId: string) => ArchiveSessionResult;
+    restartSession: (sessionId: string, sandboxConfig?: any, requiresDesktop?: boolean, expectGeneration?: number, mode?: 'wait' | 'accept') => Promise<RestartSessionResult>;
     requestShutdown: () => void;
 }
 
@@ -146,19 +147,48 @@ export class ApiMachineClient {
     }: MachineRpcHandlers) {
         // Register spawn session handler
         this.rpcHandlerManager.registerHandler('spawn-happy-session', async (params: any) => {
-            const { directory, sessionId, machineId, approvedNewDirectoryCreation, agent, token, environmentVariables, sandboxConfig, requiresDesktop } = params || {};
+            const { directory, sessionId, machineId, approvedNewDirectoryCreation, agent, token, environmentVariables, sandboxConfig, requiresDesktop, expect, generation } = params || {};
             logger.debug(`[API MACHINE] Spawning session with params: ${JSON.stringify(params)}`);
 
             if (!directory) {
                 throw new Error('Directory is required');
             }
 
-            const result = await spawnSession({ directory, sessionId, machineId, approvedNewDirectoryCreation, agent, token, environmentVariables, sandboxConfig, ...(requiresDesktop === true ? { requiresDesktop: true } : {}) });
+            const result = await spawnSession({
+                directory, sessionId, machineId, approvedNewDirectoryCreation, agent, token, environmentVariables, sandboxConfig,
+                ...(requiresDesktop === true ? { requiresDesktop: true } : {}),
+                ...(expect === 'accepted' ? { expectAccepted: true } : {}),
+                ...(typeof generation === 'number' ? { generation } : {}),
+            });
 
             switch (result.type) {
                 case 'success':
                     logger.debug(`[API MACHINE] Spawned session ${result.sessionId}`);
-                    return { type: 'success', sessionId: result.sessionId };
+                    // Additive: `type`/`sessionId` are what earlier Apps read; the rest says
+                    // which generation was realized and that it is settled.
+                    return {
+                        type: 'success',
+                        sessionId: result.sessionId,
+                        accepted: true,
+                        stage: 'running',
+                        ref: result.sessionId,
+                        ...(result.tag ? { tag: result.tag } : {}),
+                        ...(result.generation !== undefined ? { generation: result.generation } : {}),
+                        phase: 'Running',
+                    };
+
+                case 'accepted':
+                    logger.debug(`[API MACHINE] Session accepted (tag ${result.tag.slice(0, 8)}…), waiting to register`);
+                    return {
+                        type: 'accepted',
+                        success: true,
+                        accepted: true,
+                        stage: 'starting',
+                        ref: result.ref,
+                        tag: result.tag,
+                        generation: result.generation,
+                        phase: result.phase,
+                    };
 
                 case 'requestToApproveDirectoryCreation':
                     logger.debug(`[API MACHINE] Requesting directory creation approval for: ${result.directory}`);
@@ -195,31 +225,65 @@ export class ApiMachineClient {
             }
 
             // Stop first if still running
-            stopSession(sessionId);
+            const stopped = stopSession(sessionId);
 
-            // Then archive from stopped list
+            // Then record the deletion. This is applied even when the machine has no row for the
+            // id: the tombstone is what the server replay consumes, and it is the App's delete.
             const archived = archiveSession(sessionId);
-            logger.debug(`[API MACHINE] killSession: ${sessionId} — stopped=${archived}`);
-            return { success: true, message: archived ? 'Session archived' : 'Session stopped' };
+            logger.debug(`[API MACHINE] killSession: ${sessionId} — stopped=${stopped} applied=${archived.applied} known=${archived.known}`);
+            // `success` remains for older Apps; accepted/applied/reason are what a newer one reads.
+            // A stopped process and a recorded deletion are different facts, and the caller now
+            // gets both instead of a single boolean that hid the one that did not happen.
+            return {
+                success: archived.applied,
+                accepted: true,
+                applied: archived.applied,
+                // Additive to the fields older Apps read: which stage the deletion reached and
+                // what the session is now. A tombstone that landed means the row is Archived.
+                stage: archived.applied ? 'done' : 'failed',
+                ref: sessionId,
+                ...(archived.applied ? { phase: 'Archived' } : {}),
+                stopped,
+                known: archived.known,
+                reason: archived.applied
+                    ? (stopped ? 'stopped-and-archived' : 'archived')
+                    : 'archive-failed',
+                message: archived.applied
+                    ? (stopped ? 'Session stopped and archived' : 'Session archived')
+                    : 'Session could not be archived',
+            };
         });
 
         // Register restart session handler.
         // Returns immediately (fire-and-forget) to avoid server-side RPC timeout.
         // The actual restart runs asynchronously; the App will see the session come
         // back online through normal session update events.
-        this.rpcHandlerManager.registerHandler('restartSession', (params: any) => {
-            const { sessionId, sandboxConfig, requiresDesktop } = params || {};
+        this.rpcHandlerManager.registerHandler('restartSession', async (params: any) => {
+            const { sessionId, sandboxConfig, requiresDesktop, expect, generation } = params || {};
             if (!sessionId) {
                 throw new Error('Session ID is required');
             }
-            logger.debug(`[API MACHINE] restartSession params: sessionId=${sessionId}, sandboxConfig=${JSON.stringify(sandboxConfig)}`);
-            // Fire-and-forget — don't await, don't block the RPC response
-            restartSession(sessionId, sandboxConfig, typeof requiresDesktop === 'boolean' ? requiresDesktop : undefined).then(r => {
+            logger.debug(`[API MACHINE] restartSession params: sessionId=${sessionId}, sandboxConfig=${JSON.stringify(sandboxConfig)}, expect=${expect ?? 'legacy'}, generation=${generation ?? '-'}`);
+            const desktop = typeof requiresDesktop === 'boolean' ? requiresDesktop : undefined;
+
+            if (expect === 'accepted' || typeof generation === 'number') {
+                // The acceptance answer is synchronous work (the generation checks and recording
+                // the desired state), so awaiting it does not wait for the restart itself. This is
+                // what lets a refusal — a generation this machine does not know — reach the caller
+                // instead of being silently dropped.
+                const result = await restartSession(sessionId, sandboxConfig, desktop, typeof generation === 'number' ? generation : undefined, 'accept');
+                logger.debug(`[API MACHINE] restartSession: ${sessionId} — accepted=${result.accepted} stage=${result.stage} reason=${result.reason ?? '-'}`);
+                return result;
+            }
+
+            // Legacy callers get the same fire-and-forget they always got; the added fields say
+            // what this machine can honestly say at this point in the work.
+            restartSession(sessionId, sandboxConfig, desktop).then(r => {
                 logger.debug(`[API MACHINE] restartSession: ${sessionId} — success=${r.success}`);
             }).catch(err => {
                 logger.debug(`[API MACHINE] restartSession: ${sessionId} — error:`, err);
             });
-            return { success: true };
+            return { success: true, accepted: true, stage: 'scheduled', ref: sessionId, phase: 'Restarting' };
         });
 
         // Register stop daemon handler

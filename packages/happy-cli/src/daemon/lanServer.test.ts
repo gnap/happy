@@ -8,8 +8,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Readable } from 'node:stream';
 import nacl from 'tweetnacl';
-import { startLanServer, lanProofFor, LAN_PROTOCOL_VERSION, type LanHistory, type LanServerHandle, type LanSessionSummary } from './lanServer';
+import { startLanServer, lanProofFor, LAN_PROTOCOL_VERSION, type LanHistory, type LanServerHandle, type LanSessionSummary, type LanServerOptions } from './lanServer';
 import { accountProofMessage } from './accountProof';
+import type { ArchiveSessionResult } from './types';
 
 const SECRET = new Uint8Array(32).fill(3);
 const WRONG_SECRET = new Uint8Array(32).fill(4);
@@ -133,10 +134,25 @@ let sessionListingHandler: ((args: { sessionId: string }) => Promise<{ gitRepo: 
 /** One file's diff; unset by default, like a daemon from before the route. */
 let sessionDiffHandler: ((args: { sessionId: string; path: string }) => Promise<{ diff: string } | null>) | undefined;
 /** Left unset by default, which is how a daemon that predates the route behaves. */
-let restartHandler: ((sessionId: string) => Promise<{ success: boolean; newSessionId?: string; error?: string }>) | undefined;
+let restartHandler: ((
+    sessionId: string,
+    sandboxConfig?: unknown,
+    requiresDesktop?: boolean,
+    expectGeneration?: number,
+    mode?: 'wait' | 'accept',
+) => Promise<{
+    success: boolean;
+    newSessionId?: string;
+    error?: string;
+    accepted?: boolean;
+    stage?: string;
+    ref?: string;
+    generation?: number;
+    phase?: string;
+}>) | undefined;
 /** Sessions the archive route was asked to delete, in order. Unset by default, like restart. */
 let archived: string[] = [];
-let archiveHandler: ((sessionId: string) => boolean) | undefined;
+let archiveHandler: ((sessionId: string) => ArchiveSessionResult) | undefined;
 
 let server: LanServerHandle | null = null;
 /** What a socket reader should be handed on connect; mutable so one test can set it. */
@@ -158,7 +174,20 @@ async function start(limits?: Parameters<typeof startLanServer>[0]['limits']) {
         },
         // Only when a test asked for it: a daemon without the handler is a daemon from before the
         // route existed, and the 404 it answers is what sends a caller to the server instead.
-        ...(restartHandler ? { restartSession: restartHandler } : {}),
+        // The fixture answers with the legacy shape; these tests pin that the route passes a
+        // handler's answer through unchanged, so the adapter must not add fields. It forwards
+        // every argument so the request fields can be observed.
+        ...(restartHandler
+            ? {
+                restartSession: ((
+                    sessionId: string,
+                    sandboxConfig?: unknown,
+                    requiresDesktop?: boolean,
+                    expectGeneration?: number,
+                    mode?: 'wait' | 'accept',
+                ) => restartHandler!(sessionId, sandboxConfig, requiresDesktop, expectGeneration, mode)) as NonNullable<LanServerOptions['restartSession']>,
+            }
+            : {}),
         ...(archiveHandler ? { archiveSession: archiveHandler } : {}),
         ...(toolContentHandler ? { getToolContent: toolContentHandler } : {}),
         ...(sessionFileHandler ? { getSessionFile: sessionFileHandler } : {}),
@@ -413,6 +442,45 @@ describe('lanServer read-only API', () => {
             expect(restarted).toEqual(['sess-1']);
         });
 
+        it('passes an acceptance request and its generation through', async () => {
+            // The two additive request fields are what a newer caller uses: `generation` makes a
+            // repeat land on the state its first ask reached, and `expect: accepted` asks for the
+            // decision rather than the outcome. The route must hand both to the daemon, and its
+            // answer — including the reason when it refuses — must come back unchanged.
+            const seen: Array<{ sessionId: string; generation: number | undefined; mode: string | undefined }> = [];
+            restartHandler = async (sessionId, _sandboxConfig, _desktop, generation, mode) => {
+                restarted.push(sessionId);
+                seen.push({ sessionId, generation, mode });
+                return {
+                    success: true,
+                    accepted: true,
+                    stage: 'scheduled',
+                    ref: sessionId,
+                    generation: 3,
+                    phase: 'Restarting',
+                };
+            };
+            await start();
+            const token = await getToken();
+
+            const res = await fetch(url('/lan/sessions/sess-1/restart'), signed('/lan/sessions/sess-1/restart', {
+                token,
+                body: { expect: 'accepted', generation: 2 },
+            }));
+
+            expect(res.status).toBe(200);
+            expect(await res.json()).toEqual({
+                v: 1,
+                success: true,
+                accepted: true,
+                stage: 'scheduled',
+                ref: 'sess-1',
+                generation: 3,
+                phase: 'Restarting',
+            });
+            expect(seen).toEqual([{ sessionId: 'sess-1', generation: 2, mode: 'accept' }]);
+        });
+
         it('reports a refusal as an answer, not as an unroutable request', async () => {
             // A refusal is this machine's verdict and the caller must not go and ask the server the
             // same question: the two routes call the same handler, so it would come back the same
@@ -487,7 +555,7 @@ describe('lanServer read-only API', () => {
         it('records the deletion and says so', async () => {
             archiveHandler = (sessionId) => {
                 archived.push(sessionId);
-                return true;
+                return { applied: true, known: true };
             };
             await start();
             const token = await getToken();
@@ -495,14 +563,40 @@ describe('lanServer read-only API', () => {
             const res = await fetch(url('/lan/sessions/sess-1/archive'), signed('/lan/sessions/sess-1/archive', { token }));
 
             expect(res.status).toBe(200);
-            expect(await res.json()).toEqual({ v: 1 });
+            // `v` is still the first thing an older reader sees; the structured fields are the
+            // additive answer a newer one reads: the deletion reached its end state.
+            expect(await res.json()).toEqual({
+                v: 1,
+                success: true,
+                accepted: true,
+                stage: 'done',
+                ref: 'sess-1',
+                phase: 'Archived',
+            });
             expect(archived).toEqual(['sess-1']);
         });
 
-        it('says 404 for a session this machine has nothing to delete', async () => {
-            // The one answer that belongs to another channel: the server may still hold the row,
-            // so the caller's own delete path continues there.
-            archiveHandler = () => false;
+        it('records a deletion for a session this machine no longer holds', async () => {
+            // The row may have been pruned, or only ever lived on the server. The id is what the
+            // server addresses, so the tombstone is still the transaction; a 404 here is what used
+            // to send the caller down a road that left the server's row alive.
+            archiveHandler = (sessionId) => {
+                archived.push(sessionId);
+                return { applied: true, known: false };
+            };
+            await start();
+            const token = await getToken();
+
+            const res = await fetch(url('/lan/sessions/sess-1/archive'), signed('/lan/sessions/sess-1/archive', { token }));
+
+            expect(res.status).toBe(200);
+            expect(archived).toEqual(['sess-1']);
+        });
+
+        it('says 404 when the machine could not record the deletion', async () => {
+            // The remaining reason for the route's negative answer: the fact could not be written.
+            // The caller's own delete path may still try the server.
+            archiveHandler = () => ({ applied: false, known: false });
             await start();
             const token = await getToken();
 
@@ -524,7 +618,7 @@ describe('lanServer read-only API', () => {
         it('is not reachable without a token', async () => {
             archiveHandler = (sessionId) => {
                 archived.push(sessionId);
-                return true;
+                return { applied: true, known: true };
             };
             await start();
 

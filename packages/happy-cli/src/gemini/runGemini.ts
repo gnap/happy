@@ -128,6 +128,7 @@ export async function runGemini(opts: {
     flavor: 'gemini',
     machineId,
     startedBy: opts.startedBy,
+    sessionTag,
     sandbox: sandboxConfig,
   });
 

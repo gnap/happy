@@ -53,6 +53,36 @@ describe('directoryRows', () => {
   });
 });
 
+describe('directoryRows: the machine projection', () => {
+  it('carries phase and generation so a row can be drawn without asking the machine', () => {
+    expect(directoryRows([full({
+      isAlive: false,
+      phase: 'Scheduling',
+      generation: 2,
+      observedGeneration: 1,
+      observedAt: 1_500,
+      reason: 'spawn-pending',
+    })])).toEqual([
+      {
+        happySessionId: 'session-1',
+        tag: 'tag-1',
+        isAlive: false,
+        phase: 'Scheduling',
+        generation: 2,
+        observedGeneration: 1,
+        observedAt: 1_500,
+        reason: 'spawn-pending',
+      },
+    ]);
+  });
+
+  it('leaves the projection off a row that has none, so an older daemon publishes as before', () => {
+    expect(directoryRows([full()])).toEqual([
+      { happySessionId: 'session-1', tag: 'tag-1', isAlive: true },
+    ]);
+  });
+});
+
 describe('directoryRows: restartingSince', () => {
   it('carries when the machine is restarting the session, so a reader can tell it from a crash', () => {
     expect(directoryRows([full({ isAlive: false, restartingSince: 1_234 })])).toEqual([

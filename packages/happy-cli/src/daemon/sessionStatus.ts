@@ -1,0 +1,213 @@
+/**
+ * What this machine says a session *is*, derived in one place.
+ *
+ * The roster already says several partial things — `isAlive`, `restartingSince`, `origin`, the
+ * stored `status` — and each was added when one reader needed one distinction. That works until a
+ * second reader needs a different combination: then the same session reads differently on the LAN,
+ * in the relay directory, and in a control result, because each spot recomputes the rules (or
+ * forgets one). This module is the single projection: facts the daemon has, phase a reader sees.
+ *
+ * The phase is deliberately *above* the existing flags rather than replacing them. `isAlive` is
+ * still the honest answer to "is a process running", `restartingSince` is still the timestamp
+ * readers apply their own grace to, and both stay on the wire unchanged. A reader that does not
+ * know about `phase` loses nothing.
+ *
+ * That ordering is also why restarting wins over liveness: during a restart the old process has
+ * been signalled and the new one has not registered, so a phase derived from liveness alone would
+ * read `Stopped` for as long as the restart takes — the exact reading the restart machinery was
+ * added to stop. The facts below are ordered by how much this daemon knows about the session, not
+ * by how recently each was written.
+ */
+
+export type SessionPhase =
+    /** A spawn was requested and the spec is on disk; no process has reported yet. */
+    | 'Scheduling'
+    /** A process of ours is running but the server has not named the session yet. */
+    | 'Starting'
+    /** A process of ours is running and registered with the server. */
+    | 'Running'
+    /** This daemon is replacing the process; nothing is registered while it happens. */
+    | 'Restarting'
+    /** Known to this machine, with no process behind it. */
+    | 'Stopped'
+    /** Removed from this machine's catalog. */
+    | 'Archived'
+    /** Known only as another machine's record — this machine cannot say anything about it. */
+    | 'Unknown';
+
+export type SessionConditionType = 'Spawned' | 'Registered';
+
+export type SessionCondition = {
+    type: SessionConditionType;
+    status: 'True' | 'False' | 'Unknown';
+    /** Why the condition has that value, when the answer is not self-evident. */
+    reason?: string;
+    /** When this condition was observed, in epoch milliseconds. */
+    updatedAt: number;
+};
+
+export type SessionStatus = {
+    phase: SessionPhase;
+    /**
+     * The spec revision this phase is being reconciled against. `0` means this machine has no
+     * spec for the session — a legacy row, or a record imported from the server.
+     */
+    generation: number;
+    /**
+     * The spec revision the phase actually reflects.
+     *
+     * Below `generation` means the machine has accepted a newer spec but has not converged on it
+     * yet: a row is `Starting` while `generation` is the process it is starting. Equal means
+     * nothing is outstanding. This is what lets a reader distinguish "settled" from "working"
+     * without inventing another flag.
+     */
+    observedGeneration: number;
+    /** When the phase was last justified by a fact, in epoch milliseconds. */
+    observedAt: number;
+    /** A short, human-readable explanation of the phase. */
+    reason?: string;
+    conditions: SessionCondition[];
+};
+
+/** The facts this machine can have about one session. All are as of `now`. */
+export type SessionStatusFacts = {
+    /** A process this daemon owns and can see running right now. */
+    live?: {
+        pid?: number;
+        /** When the process was spawned, if known. */
+        spawnTime?: number;
+        /** The last time the session reported in, if ever. */
+        lastHeartbeat?: number;
+    };
+    /** The server has named the session (the session webhook arrived). */
+    registered?: boolean;
+    /** This daemon has a spawn spec on disk and no process for it yet. */
+    schedulingSince?: number;
+    /** This daemon is replacing the process, since this timestamp. */
+    restartingSince?: number;
+    /** The durable record, when this machine has one. */
+    stored?: {
+        origin?: 'daemon' | 'server';
+        status?: 'running' | 'stopped';
+        exitReason?: string;
+        exitTime?: number;
+        lastHeartbeat?: number;
+        updatedAt?: number;
+        generation?: number;
+    };
+    /** The tombstone, when the session was removed from this machine's catalog. */
+    archivedAt?: number;
+    /** The spec revision, when known independently of the stored record. */
+    generation?: number;
+    now?: number;
+};
+
+/**
+ * The session's phase and the conditions behind it.
+ *
+ * Precedence is knowledge, not recency: a tombstone is the strongest statement, a restart in
+ * flight is next (it explains why liveness reads false), a live process next, and only then the
+ * durable record and the import.
+ */
+export function sessionStatusOf(facts: SessionStatusFacts): SessionStatus {
+    const now = facts.now ?? Date.now();
+    const generation = facts.generation ?? facts.stored?.generation ?? 0;
+
+    const spawned: SessionCondition = facts.live
+        ? { type: 'Spawned', status: 'True', updatedAt: facts.live.spawnTime ?? now }
+        : {
+            type: 'Spawned',
+            status: facts.schedulingSince !== undefined || facts.stored ? 'False' : 'Unknown',
+            ...(facts.stored?.exitReason ? { reason: facts.stored.exitReason } : {}),
+            updatedAt: facts.stored?.exitTime ?? facts.schedulingSince ?? now,
+        };
+    const registered: SessionCondition = facts.registered
+        ? { type: 'Registered', status: 'True', updatedAt: facts.live?.lastHeartbeat ?? now }
+        : {
+            type: 'Registered',
+            status: facts.live ? 'False' : 'Unknown',
+            ...(facts.live ? { reason: 'waiting for the server to name the session' } : {}),
+            updatedAt: facts.live?.spawnTime ?? now,
+        };
+    const conditions = [spawned, registered];
+
+    if (facts.archivedAt !== undefined) {
+        return {
+            phase: 'Archived',
+            generation,
+            observedGeneration: generation,
+            observedAt: facts.archivedAt,
+            reason: 'removed from this machine',
+            conditions,
+        };
+    }
+
+    if (facts.restartingSince !== undefined) {
+        return {
+            phase: 'Restarting',
+            generation,
+            // The replacement is the new spec; nothing has observed it yet.
+            observedGeneration: Math.max(0, generation - 1),
+            observedAt: facts.restartingSince,
+            reason: 'replacing the process',
+            conditions,
+        };
+    }
+
+    if (facts.live) {
+        const observedAt = facts.live.lastHeartbeat ?? facts.live.spawnTime ?? now;
+        if (facts.registered) {
+            return { phase: 'Running', generation, observedGeneration: generation, observedAt, conditions };
+        }
+        return {
+            phase: 'Starting',
+            generation,
+            observedGeneration: Math.max(0, generation - 1),
+            observedAt,
+            reason: 'waiting for the server to name the session',
+            conditions,
+        };
+    }
+
+    if (facts.schedulingSince !== undefined) {
+        return {
+            phase: 'Scheduling',
+            generation,
+            observedGeneration: Math.max(0, generation - 1),
+            observedAt: facts.schedulingSince,
+            reason: 'spawn requested; no process has reported yet',
+            conditions,
+        };
+    }
+
+    if (!facts.stored) {
+        return {
+            phase: 'Unknown',
+            generation,
+            observedGeneration: 0,
+            observedAt: now,
+            reason: 'this machine has no record of the session',
+            conditions,
+        };
+    }
+
+    if (facts.stored.origin === 'server') {
+        return {
+            phase: 'Unknown',
+            generation,
+            observedGeneration: 0,
+            observedAt: facts.stored.updatedAt ?? facts.stored.lastHeartbeat ?? now,
+            reason: 'imported from the server; this machine does not run it',
+            conditions,
+        };
+    }
+
+    return {
+        phase: 'Stopped',
+        generation,
+        observedGeneration: generation,
+        observedAt: facts.stored.exitTime ?? facts.stored.updatedAt ?? facts.stored.lastHeartbeat ?? now,
+        reason: facts.stored.exitReason ?? 'no process is running',
+        conditions,
+    };
+}

@@ -340,6 +340,13 @@ export type Metadata = {
   hostPid?: number,
   /** Happy server session tag (UUID) reported by the session on startup, used by daemon for restart */
   sessionTag?: string,
+  /**
+   * The lineage's public name: opaque, minted once, stable across restarts and server ids.
+   *
+   * The App stores it beside `sessionId` and will eventually use it as the key; the server never
+   * sees it outside this encrypted metadata. Unlike `sessionTag` it is meant to be published.
+   */
+  sessionUid?: string,
   startedBy?: 'daemon' | 'terminal',
   // Lifecycle state management
   lifecycleState?: 'running' | 'archiveRequested' | 'archived' | string,
@@ -419,6 +426,7 @@ export function sanitizeSessionMetadataForApp(metadata: Metadata): AppCompatible
     os,
     summary,
     machineId,
+    sessionUid,
     claudeSessionId,
     sessionModel,
     sessionProvider,
@@ -454,6 +462,7 @@ export function sanitizeSessionMetadataForApp(metadata: Metadata): AppCompatible
     ...(os !== undefined ? { os } : {}),
     ...(summary !== undefined ? { summary } : {}),
     ...(machineId !== undefined ? { machineId } : {}),
+    ...(sessionUid !== undefined ? { sessionUid } : {}),
     ...(claudeSessionId !== undefined ? { claudeSessionId } : {}),
     ...(sessionModel !== undefined ? { sessionModel } : {}),
     ...(sessionProvider !== undefined ? { sessionProvider } : {}),
@@ -479,6 +488,13 @@ export function shouldSyncSessionMetadata(current: Metadata | null, next: Metada
     return true;
   }
 
+  // The uid is write-once. A session created before uids existed gets the one its process knows,
+  // but once the record has one, a process that disagrees (its local file was lost and the uid
+  // re-minted) does not get to rename the lineage: the server's copy is the first one written.
+  if (next.sessionUid !== undefined && current.sessionUid === undefined) {
+    return true;
+  }
+
   return SESSION_STATIC_METADATA_KEYS.some((key) => current[key] !== next[key]);
 }
 
@@ -490,6 +506,12 @@ export function buildSyncedSessionMetadata(current: Metadata | null, next: Metad
     version: next.version,
     os: next.os,
     machineId: next.machineId,
+    // Write-once: whatever the record already says is the lineage's uid. A process that has none
+    // to offer must not erase it, and one that offers a different value (its local file was lost)
+    // must not rename it either. Only a record with no uid adopts the one the process carries.
+    ...(current?.sessionUid !== undefined
+      ? { sessionUid: current.sessionUid }
+      : next.sessionUid !== undefined ? { sessionUid: next.sessionUid } : {}),
     homeDir: next.homeDir,
     happyHomeDir: next.happyHomeDir,
     happyLibDir: next.happyLibDir ?? current?.happyLibDir ?? '',
