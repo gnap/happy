@@ -21,9 +21,9 @@
  * removed and nothing is put in their place. An agent that fell back to dialling the hop directly
  * would be sending traffic from the wrong address, which is exactly what the profile chose against.
  */
-import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { logger } from '@/ui/logger';
+import { loadLocalRoutes } from '@/daemon/proxy/routes';
 import { notifyDaemonNetworkProxy } from '@/daemon/controlClient';
 import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
 import { configuration } from '@/configuration';
@@ -397,14 +397,11 @@ function routeScope(profileEnv: Record<string, string>): string[] {
 }
 
 function readRoutePort(name: string): number | null {
-    try {
-        const home = process.env.HAPPY_HOME_DIR ?? configuration.happyHomeDir;
-        const parsed = JSON.parse(readFileSync(join(home, 'proxy-routes.json'), 'utf8')) as Record<string, unknown>;
-        const port = Number(parsed[name]);
-        return Number.isInteger(port) && port > 0 && port < 65536 ? port : null;
-    } catch {
-        return null;
-    }
+    const home = process.env.HAPPY_HOME_DIR ?? configuration.happyHomeDir;
+    // The daemon's own loader, so the session and the listener understand the same file: a bare
+    // port, or the object form that also names the hosts the route covers.
+    const route = loadLocalRoutes(join(home, 'proxy-routes.json')).find((entry) => entry.name === name);
+    return route ? route.port : null;
 }
 
 function localProxyUrl(): string | null {

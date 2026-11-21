@@ -191,6 +191,21 @@ describe('applyNetworkProxyPolicy', () => {
         expect(notify).not.toHaveBeenCalled();
     });
 
+    it('reads a route entry written in the scoped form', () => {
+        const home = mkdtempSync(join(tmpdir(), 'happy-route-'));
+        writeFileSync(join(home, 'proxy-routes.json'), JSON.stringify({
+            personal: { port: 57999, only: ['api.test'] },
+        }));
+        process.env.HAPPY_HOME_DIR = home;
+
+        const policy = applyNetworkProxyPolicy({ HAPPY_PROXY_ROUTE: 'personal' });
+
+        // The session and the daemon must understand the same file, or the listener runs while the
+        // agent is told the route does not exist.
+        expect(policy.registration).toBeNull();
+        expect(process.env.ALL_PROXY).toBe('http://127.0.0.1:57999');
+    });
+
     it('refuses a named route this machine does not serve', () => {
         const home = mkdtempSync(join(tmpdir(), 'happy-route-'));
         writeFileSync(join(home, 'proxy-routes.json'), JSON.stringify({ personal: 57999 }));
