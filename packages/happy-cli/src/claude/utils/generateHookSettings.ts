@@ -32,6 +32,13 @@ export function generateHookSettingsFile(port: number, jsRuntime?: 'node' | 'bun
     const hookCommand = `${hookRuntime(jsRuntime)} "${forwarderScript}" ${port}`;
 
     const settings = {
+        /**
+         * Happy's remote sessions are commonly driven in bypassPermissions mode, where Claude Code
+         * holds peer messages for an approval the App has no prompt for. A2A is a feature the same
+         * user asked for, and a peer still cannot escalate permissions, so deliver unconditionally.
+         * Project/local `refuse` outranks this value; that is the user saying no.
+         */
+        crossSessionInbound: 'accept',
         hooks: {
             SessionStart: [
                 {
