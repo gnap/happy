@@ -293,6 +293,21 @@ export function stripNetworkProxyKeys(env: Record<string, string>): Record<strin
 }
 
 /**
+ * Removes the directives the policy consumes before the agent ever sees them.
+ *
+ * `HAPPY_PROXY_ROUTE` and `HAPPY_PROXY_ONLY` are instructions to this process, not settings for
+ * the agent: the policy strips them on the way in. Comparing them would make every message that
+ * repeats the profile look like a change, and the launcher would replace the live process at the
+ * start of every turn.
+ */
+function withoutPolicyKeys(env: Record<string, string>): Record<string, string> {
+    const copy = { ...env };
+    delete copy[ROUTE_ENV];
+    delete copy[ONLY_ENV];
+    return copy;
+}
+
+/**
  * Whether a profile's environment changed in a way the agent process can see.
  *
  * Proxy keys are excluded on purpose. They never reach the agent — the policy replaces them with
@@ -301,8 +316,8 @@ export function stripNetworkProxyKeys(env: Record<string, string>): Record<strin
  * applied environment has it stripped, and the comparison kept respawning the agent every turn.
  */
 export function profileEnvChanged(current: Record<string, string>, next: Record<string, string>): boolean {
-    const left = stripNetworkProxyKeys(current);
-    const right = stripNetworkProxyKeys(next);
+    const left = withoutPolicyKeys(stripNetworkProxyKeys(current));
+    const right = withoutPolicyKeys(stripNetworkProxyKeys(next));
     const leftKeys = Object.keys(left).filter((key) => left[key] !== undefined).sort();
     const rightKeys = Object.keys(right).filter((key) => right[key] !== undefined).sort();
     if (leftKeys.length !== rightKeys.length) return true;

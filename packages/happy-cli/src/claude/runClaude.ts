@@ -646,12 +646,15 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
             const candidate = message.meta.effort as string;
             if (candidates.includes(candidate as EffortLevel)) {
                 messageEffort = candidate as EffortLevel;
-                currentEffort = messageEffort;
-                // Bump generation so claudeRemote re-spawns with the new --effort flag.
-                if (currentSession) {
-                    currentSession.claudeEnvVarsGeneration++;
+                // Only a different level needs a new process: the flag is fixed at spawn, but a
+                // message repeating the current one must not cost the conversation its process.
+                if (messageEffort !== currentEffort) {
+                    currentEffort = messageEffort;
+                    if (currentSession) {
+                        currentSession.claudeEnvVarsGeneration++;
+                    }
+                    logger.debug(`[loop] Effort updated from user message to: ${messageEffort}`);
                 }
-                logger.debug(`[loop] Effort updated from user message to: ${messageEffort}`);
             } else {
                 logger.debug(`[loop] Ignoring unknown effort from user message: ${candidate}`);
             }

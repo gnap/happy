@@ -57,6 +57,18 @@ describe('profileEnvChanged', () => {
         expect(profileEnvChanged(applied, message)).toBe(false);
     });
 
+    it('ignores the routing directives the policy consumes', () => {
+        // A profile that names a route repeats that name on every message; the applied environment
+        // has it stripped. Counting it as a change replaced the live process at every turn.
+        const applied = { CLAUDE_CODE_OAUTH_TOKEN: 't', TZ: 'America/Los_Angeles' };
+        const message = {
+            ...applied,
+            HAPPY_PROXY_ROUTE: 'Luo Yang Anthropic',
+            HAPPY_PROXY_ONLY: 'api.deepseek.com',
+        };
+        expect(profileEnvChanged(applied, message)).toBe(false);
+    });
+
     it('still notices a value or key the agent can see', () => {
         expect(profileEnvChanged({ A: '1' }, { A: '2' })).toBe(true);
         expect(profileEnvChanged({ A: '1' }, { A: '1', B: '2' })).toBe(true);
