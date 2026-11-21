@@ -353,6 +353,7 @@ export const it: TranslationStructure = {
 
     session: {
         inputPlaceholder: 'Scrivi un messaggio ...',
+        peerMessage: "Da un'altra sessione di Claude",
         encrypting: 'handshaking…',
         backgroundTasks: 'Attività in background',
         activityScheduled: 'Programmato',

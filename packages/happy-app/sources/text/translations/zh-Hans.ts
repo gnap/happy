@@ -317,6 +317,7 @@ export const zhHans: TranslationStructure = {
 
     session: {
         inputPlaceholder: '输入消息...',
+        peerMessage: '来自另一个 Claude 会话',
         encrypting: '连接中…',
         backgroundTasks: '后台任务',
         activityScheduled: '定时任务',

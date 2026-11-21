@@ -356,6 +356,7 @@ export const ja: TranslationStructure = {
 
     session: {
         inputPlaceholder: 'メッセージを入力...',
+        peerMessage: '別の Claude セッションから',
         encrypting: '接続を確立中…',
         backgroundTasks: 'バックグラウンドタスク',
         activityScheduled: 'スケジュール',

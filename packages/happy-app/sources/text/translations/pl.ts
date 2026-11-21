@@ -326,6 +326,7 @@ export const pl: TranslationStructure = {
 
     session: {
         inputPlaceholder: 'Wpisz wiadomość...',
+        peerMessage: 'Z innej sesji Claude',
         encrypting: 'nawiązywanie połączenia…',
         backgroundTasks: 'Zadania w tle',
         activityScheduled: 'Zaplanowane',
