@@ -8,7 +8,7 @@ import { Message } from "./typesMessage";
 import { collapseDuplicateMessages, mergePageIntoWindow } from "./messageIdentity";
 import { NormalizedMessage } from "./typesRaw";
 import type { DaemonRoute, LanSighting, RelayEndpoint, SessionChannel, SessionDivergence } from './lan/types';
-import { daemonSessionListSignature, daemonSessionRows, dropDeletedDaemonSessionRows, keepPendingDaemonSessionRows, mergeSessionRuntime, type DaemonSessionEntry, type DaemonSessionReport, type SessionRuntimeEntry, type SessionRuntimeReport } from './daemonSessionList';
+import { daemonSessionListSignature, daemonSessionRows, dropDeletedDaemonSessionRows, isStaleSessionRuntimeStatement, keepPendingDaemonSessionRows, mergeSessionRuntime, type DaemonSessionEntry, type DaemonSessionReport, type SessionRuntimeEntry, type SessionRuntimeReport } from './daemonSessionList';
 
 export type { DaemonSessionEntry } from './daemonSessionList';
 
@@ -2178,12 +2178,17 @@ export const storage = create<StorageState>()((set, get) => {
                 // arrival time is what lets a reader age the statement out, so it has to move
                 // even when nothing a row draws has changed. Only rows still carrying a want are
                 // touched — a settled projection has nothing to age, and refreshing it would
-                // redraw every running session on every listing.
+                // redraw every running session on every listing. A statement older than the
+                // stored one is not a restatement: letting it move the age would keep a want the
+                // machine has already moved past alive for as long as some stale channel repeats
+                // it.
                 const restated = offered.some((entry) => entry.divergence !== null
+                    && !isStaleSessionRuntimeStatement(state.sessionRuntime[entry.sessionId], entry)
                     && next[entry.sessionId]?.divergence !== undefined);
                 if (!restated) return state;
                 const refreshed = { ...state.sessionRuntime };
                 for (const entry of offered) {
+                    if (isStaleSessionRuntimeStatement(state.sessionRuntime[entry.sessionId], entry)) continue;
                     const current = refreshed[entry.sessionId];
                     if (current?.divergence !== undefined) {
                         refreshed[entry.sessionId] = { ...current, at };

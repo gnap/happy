@@ -57,7 +57,7 @@ import { channelDrivers as buildChannelDrivers, relayOriginFrom } from './channe
 import { channelAvailability } from './channels/resolve';
 import { candidateInputsFor, orderedCandidates } from './channels/candidates';
 import { attemptFromStatus, carryOperation, type CarryOutcome, type HealthRecorder } from './channels/execute';
-import { dropDeletedDaemonSessionRows } from './daemonSessionList';
+import { dropDeletedDaemonSessionRows, preferDaemonSessionAnswer } from './daemonSessionList';
 import { fetchToolContent, fetchSessionListing, fetchSessionDiff, fetchPreviewGrant, previewUrlFor, type SessionListing } from './lan/client';
 import { downloadSessionFileFromDaemon, downloadSessionFolderFromDaemon } from './lan/fileDownload';
 import { getGitStatusFiles as getGitStatusFilesViaRpc, parseGitStatusFiles, type GitStatusFiles } from './gitStatusFiles';
@@ -6541,10 +6541,11 @@ class Sync {
             for (const summary of answer.sessions) {
                 const key = summary.happySessionId ?? summary.tag;
                 if (!key) continue;
-                const previous = byKey.get(key);
-                if (!previous || (summary.origin !== 'server' && previous.summary.origin === 'server')) {
-                    byKey.set(key, { summary, machineId: answer.machineId, via: answer.via });
-                }
+                byKey.set(key, preferDaemonSessionAnswer(byKey.get(key), {
+                    summary,
+                    machineId: answer.machineId,
+                    via: answer.via,
+                }));
             }
         }
         const sessions = [...byKey.values()].map(({ summary, machineId, via }) => ({ ...summary, via, machineId }));
