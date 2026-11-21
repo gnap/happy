@@ -21,6 +21,11 @@ export type DaemonSessionEntry = {
     /** The server's id, when the machine has one for this row; a scheduled row has only a tag. */
     happySessionId?: string;
     tag?: string;
+    /**
+     * The lineage's public name. Stable across a server id change, so a deletion recorded against
+     * it keeps applying when the row comes back under a different id.
+     */
+    sessionUid?: string;
     origin?: 'daemon' | 'server';
     restartingSince?: number;
     desktop?: { required: boolean; available: boolean };
@@ -66,6 +71,7 @@ export function daemonSessionRows(
             machineId: session.machineId,
             ...(session.happySessionId !== undefined ? { happySessionId: session.happySessionId } : {}),
             ...(session.tag !== undefined ? { tag: session.tag } : {}),
+            ...(session.sessionUid !== undefined ? { sessionUid: session.sessionUid } : {}),
             ...(session.origin ? { origin: session.origin } : {}),
             at,
             ...(session.restartingSince !== undefined ? { restartingSince: session.restartingSince } : {}),
@@ -90,15 +96,19 @@ export function daemonSessionRows(
  * later, no longer names it. Without this a deleted session would come back from any channel that
  * was a beat behind, which is exactly what made a delete look like it did nothing.
  *
- * A row with no server id is a spawn the machine has scheduled and cannot be one of these: a
- * deletion is only ever known by the id the server gave.
+ * A row is dropped by either name it can be matched on: the server id a deletion was recorded
+ * under, or the lineage uid. The uid is what carries the deletion across a server id change — the
+ * same conversation under a new id is still the one the person removed. Older machines publish no
+ * uid, so that check simply never fires for them.
  */
-export function dropDeletedDaemonSessionRows<T extends { happySessionId?: string }>(
+export function dropDeletedDaemonSessionRows<T extends { happySessionId?: string; sessionUid?: string }>(
     sessions: readonly T[],
     deleted: Readonly<Record<string, number>>,
+    deletedUids: Readonly<Record<string, number>> = {},
 ): T[] {
     return sessions.filter((session) =>
-        session.happySessionId === undefined || deleted[session.happySessionId] === undefined);
+        (session.happySessionId === undefined || deleted[session.happySessionId] === undefined)
+        && (session.sessionUid === undefined || deletedUids[session.sessionUid] === undefined));
 }
 
 /**
@@ -219,7 +229,7 @@ export function daemonSessionListSignature(list: Record<string, DaemonSessionEnt
             : [s.divergence.desired, s.divergence.generation, s.divergence.reason, s.divergence.since,
                 s.divergence.attempts ?? '', s.divergence.blocked ? 1 : 0].join('/');
         return [id, s.isAlive ? 1 : 0, s.directory, s.agent, s.via, s.machineId, s.origin ?? '', s.tag ?? '',
-            s.restartingSince ?? '', s.phase ?? '', s.generation ?? '', s.observedGeneration ?? '',
+            s.sessionUid ?? '', s.restartingSince ?? '', s.phase ?? '', s.generation ?? '', s.observedGeneration ?? '',
             s.observedAt ?? '', s.reason ?? '', s.desiredLifecycle ?? '', divergence,
             s.desktop?.required ? 1 : 0, s.desktop?.available ? 1 : 0].join('\u0000');
     }).join('\u0001');

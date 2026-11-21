@@ -6549,6 +6549,7 @@ class Sync {
         const runtime = dropDeletedDaemonSessionRows(
             [...byKey.values()].map(({ summary }) => summary),
             storage.getState().deletedSessions,
+            storage.getState().deletedSessionUids,
         ).flatMap((summary) => {
             const sessionId = summary.happySessionId;
             if (!sessionId) return [];
@@ -6590,8 +6591,11 @@ class Sync {
             // webhook names it and a later listing carries the id.
             const id = summary.happySessionId;
             if (!id) continue;
-            catalogIds.add(id);
             const existing = knownSessions[id];
+            const uid = summary.sessionUid ?? existing?.sessionUid;
+            // A deletion of the lineage is a deletion of this row, whatever id it arrives under.
+            if (uid !== undefined && storage.getState().deletedSessionUids[uid] !== undefined) continue;
+            catalogIds.add(id);
             let metadata = existing?.metadata ?? null;
             let metadataVersion = existing?.metadataVersion ?? 0;
             let agentState = existing?.agentState ?? null;
@@ -6663,6 +6667,10 @@ class Sync {
                 thinkingAt: existing?.thinkingAt ?? 0,
                 presence: active ? 'online' : at,
                 origin: owner ? 'daemon' : 'server',
+                // The machine's name for the lineage, when it publishes one. Absent from an older
+                // daemon, and from a spawn that has not minted it yet; keeping the held value on
+                // absence is the same rule the metadata lift follows.
+                ...(uid !== undefined ? { sessionUid: uid } : {}),
                 ...(summary.restartingSince !== undefined ? { restartingAt: summary.restartingSince } : {}),
             } as Session);
         }
@@ -6673,11 +6681,44 @@ class Sync {
         // The deletion log, applied as state: the server's copy may lag until the daemon's replay
         // reaches it, so a tombstone is the local reason the row is gone now.
         const tombstoned = new Set<string>();
+        // A tombstone names the server id it was recorded under, but the row can be back under a
+        // different one — a conversation resumed after the id changed. The uid is what says the two
+        // ids are the same deletion, so rows are also looked up by it. Built once per poll: the
+        // machine's archived set only grows, and one pass over the sessions is cheaper than one
+        // pass per tombstone.
+        let byUid: Map<string, { id: string }> | null = null;
+        const sessionsByUid = () => {
+            if (byUid === null) {
+                byUid = new Map();
+                for (const session of Object.values(getSessions())) {
+                    const uid = session.sessionUid ?? session.metadata?.sessionUid;
+                    if (uid !== undefined && !byUid.has(uid)) {
+                        byUid.set(uid, session);
+                    }
+                }
+            }
+            return byUid;
+        };
         for (const answer of answers) {
             for (const tombstone of answer.tombstones ?? []) {
+                // Recorded even when no row is held right now: the point is that a later listing
+                // cannot bring the lineage back, not only that today's copy goes away.
+                if (tombstone.sessionUid !== undefined) {
+                    storage.getState().rememberDeletedSessionUid(tombstone.sessionUid, tombstone.at);
+                }
+                const matches = new Set<string>();
                 if (getSession(tombstone.sessionId)) {
-                    storage.getState().deleteSession(tombstone.sessionId);
-                    tombstoned.add(tombstone.sessionId);
+                    matches.add(tombstone.sessionId);
+                }
+                if (tombstone.sessionUid !== undefined) {
+                    const byName = sessionsByUid().get(tombstone.sessionUid);
+                    if (byName !== undefined) {
+                        matches.add(byName.id);
+                    }
+                }
+                for (const id of matches) {
+                    storage.getState().deleteSession(id);
+                    tombstoned.add(id);
                 }
             }
         }

@@ -408,7 +408,7 @@ export type LanSessionList = {
      * Sessions the daemon has archived. A reader applies these as deletions; the server's own
      * copy may lag until the daemon's replay reaches it.
      */
-    tombstones?: Array<{ sessionId: string; tag?: string; at: number }>;
+    tombstones?: Array<{ sessionId: string; tag?: string; sessionUid?: string; at: number }>;
 };
 
 export async function fetchSessions(baseUrl: string, token: string): Promise<LanSessionList> {
@@ -426,12 +426,13 @@ export async function fetchSessions(baseUrl: string, token: string): Promise<Lan
         ...(typeof body.revision === 'number' ? { revision: body.revision } : {}),
         ...(Array.isArray(body.tombstones)
             ? {
-                tombstones: (body.tombstones as Array<{ sessionId?: unknown; tag?: unknown; at?: unknown }>)
-                    .filter((tombstone): tombstone is { sessionId: string; tag?: string; at: number } =>
+                tombstones: (body.tombstones as Array<{ sessionId?: unknown; tag?: unknown; sessionUid?: unknown; at?: unknown }>)
+                    .filter((tombstone): tombstone is { sessionId: string; tag?: string; sessionUid?: string; at: number } =>
                         typeof tombstone?.sessionId === 'string' && typeof tombstone.at === 'number')
                     .map((tombstone) => ({
                         sessionId: tombstone.sessionId,
                         ...(typeof tombstone.tag === 'string' ? { tag: tombstone.tag } : {}),
+                        ...(typeof tombstone.sessionUid === 'string' ? { sessionUid: tombstone.sessionUid } : {}),
                         at: tombstone.at,
                     })),
             }

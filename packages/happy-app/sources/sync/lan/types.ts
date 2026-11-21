@@ -98,6 +98,14 @@ export type LanSessionSummary = {
     /** The CLI's own tag, set before the server issues an id, and kept after. */
     tag?: string;
     /**
+     * The lineage's public name, minted by the CLI per tag.
+     *
+     * Stable across a server id change, so a reader can keep one conversation's state together
+     * when the id moves. Absent for a machine that has no uid for the row (an older CLI, or a
+     * spawn whose process has not started yet), in which case the row is keyed the older way.
+     */
+    sessionUid?: string;
+    /**
      * The session's metadata, ciphertext and revision. Mirrored by the daemon from the session's
      * own `update-session`, so it is the same record the server holds.
      */

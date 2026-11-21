@@ -70,6 +70,13 @@ describe('daemonSessionRows', () => {
         });
     });
 
+    it('carries the lineage uid beside the server id', () => {
+        // The id may change; the uid is what a deletion can name the conversation by.
+        const rows = daemonSessionRows([report({ sessionUid: 'uid-1' })], 10);
+
+        expect(rows['session-1'].sessionUid).toBe('uid-1');
+    });
+
     it('leaves the projection off when an older machine says nothing about it', () => {
         expect(daemonSessionRows([report()], 10)['session-1']).toEqual({
             isAlive: true,
@@ -97,6 +104,24 @@ describe('dropDeletedDaemonSessionRows', () => {
         const pending = report({ happySessionId: undefined, tag: 'tag-1', phase: 'Scheduling' });
 
         expect(dropDeletedDaemonSessionRows([pending], { 'session-1': 100 })).toEqual([pending]);
+    });
+
+    it('drops the same lineage offered under a server id issued after the delete', () => {
+        // The person deleted the conversation, not the id it happened to be wearing. A resumed
+        // session can come back under a new id, and the uid is what still identifies it.
+        const resumed = report({ happySessionId: 'session-2', sessionUid: 'uid-1' });
+
+        expect(dropDeletedDaemonSessionRows([resumed], {}, { 'uid-1': 100 })).toEqual([]);
+    });
+
+    it('keeps a row whose lineage nothing deleted', () => {
+        const other = report({ sessionUid: 'uid-2' });
+
+        expect(dropDeletedDaemonSessionRows([other], {}, { 'uid-1': 100 })).toEqual([other]);
+    });
+
+    it('treats an absent uid as nothing to match, so an older machine keeps its row', () => {
+        expect(dropDeletedDaemonSessionRows([report()], {}, { 'uid-1': 100 })).toEqual([report()]);
     });
 });
 

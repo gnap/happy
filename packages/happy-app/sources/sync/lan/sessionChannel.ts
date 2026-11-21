@@ -217,7 +217,7 @@ export async function listSessionsOverLan(options: {
     baseUrl: string;
     sessions: LanSessionSummary[];
     revision?: number;
-    tombstones?: Array<{ sessionId: string; tag?: string; at: number }>;
+    tombstones?: Array<{ sessionId: string; tag?: string; sessionUid?: string; at: number }>;
 }[]> {
     const answers: {
         machineId: string;
@@ -225,7 +225,7 @@ export async function listSessionsOverLan(options: {
         baseUrl: string;
         sessions: LanSessionSummary[];
         revision?: number;
-        tombstones?: Array<{ sessionId: string; tag?: string; at: number }>;
+        tombstones?: Array<{ sessionId: string; tag?: string; sessionUid?: string; at: number }>;
     }[] = [];
     const answered = new Set<string>();
     const discovered = options.browseLan === false

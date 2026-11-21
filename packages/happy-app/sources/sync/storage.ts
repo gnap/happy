@@ -44,7 +44,7 @@ import { LocalSettings, applyLocalSettings } from "./localSettings";
 import { Purchases, customerInfoToPurchases } from "./purchases";
 import { Profile } from "./profile";
 import { UserProfile, RelationshipUpdatedEvent } from "./friendTypes";
-import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionMaxModes, saveSessionMaxModes, loadSessionProfileIds, saveSessionProfileIds, loadSessionSandboxIsolations, saveSessionSandboxIsolations, loadRelayEndpoints, saveRelayEndpoints, loadDeletedSessions, saveDeletedSessions, loadPendingSessionDeletes, savePendingSessionDeletes, type PendingSessionDelete } from "./persistence";
+import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionMaxModes, saveSessionMaxModes, loadSessionProfileIds, saveSessionProfileIds, loadSessionSandboxIsolations, saveSessionSandboxIsolations, loadRelayEndpoints, saveRelayEndpoints, loadDeletedSessions, saveDeletedSessions, loadDeletedSessionUids, saveDeletedSessionUids, loadPendingSessionDeletes, savePendingSessionDeletes, type PendingSessionDelete } from "./persistence";
 import type { PermissionModeKey } from '@/components/PermissionModeSelector';
 import type { CustomerInfo } from './revenueCat/types';
 import React from "react";
@@ -257,6 +257,17 @@ interface StorageState {
      * putting back a row that has only been *offered* to deletion so far.
      */
     deletedSessions: Record<string, number>;
+    /**
+     * The same deletions, by lineage uid.
+     *
+     * A server id is not the only name a deleted row can return under: a resumed conversation can
+     * be issued a new one, and the person's deletion is of the conversation. A row carrying a
+     * tombstoned uid is dropped wherever it appears, whatever id it arrives with. Empty on every
+     * install that has never seen a uid from a machine.
+     */
+    deletedSessionUids: Record<string, number>;
+    /** Records that a lineage was deleted, so a row with that uid cannot come back under a new id. */
+    rememberDeletedSessionUid: (uid: string, at: number) => void;
     /**
      * Deletions this device has asked for, waiting for the machine that owns each session.
      *
@@ -998,6 +1009,7 @@ export const storage = create<StorageState>()((set, get) => {
         daemonSessionList: {},
         sessionRuntime: {},
         deletedSessions: loadDeletedSessions(),
+        deletedSessionUids: loadDeletedSessionUids(),
         pendingSessionDeletes: loadPendingSessionDeletes(),
         daemonVersions: {},
         channelOverride: {},
@@ -1134,7 +1146,12 @@ export const storage = create<StorageState>()((set, get) => {
             // the deletion while it reaches them — a machine's catalog keeps listing a row until
             // its own delete is written, and the server keeps serving one until that deletion is
             // replayed to it — and re-adding the row here would undo what the person asked for.
-            const sessions = offered.filter((session) => state.deletedSessions[session.id] === undefined);
+            const sessions = offered.filter((session) => {
+                if (state.deletedSessions[session.id] !== undefined) return false;
+                // The same conversation under a name the server issued after the delete.
+                const uid = session.sessionUid ?? session.metadata?.sessionUid;
+                return uid === undefined || state.deletedSessionUids[uid] === undefined;
+            });
             // A delta that says nothing new must cost nothing: this runs for every list refresh
             // and used to be reached every two seconds by the activity heartbeat. Compare the
             // fields the merge below can change before touching MMKV, the list, or the store.
@@ -2116,7 +2133,7 @@ export const storage = create<StorageState>()((set, get) => {
             // this account holds it a listing that has not replayed it yet is stale; drawing that
             // row is what makes a delete look like it did nothing. Same rule as the session list
             // applies above, enforced where channel-derived rows enter the store.
-            const listed = dropDeletedDaemonSessionRows(sessions, state.deletedSessions);
+            const listed = dropDeletedDaemonSessionRows(sessions, state.deletedSessions, state.deletedSessionUids);
             // The same fact the daemon pushes, arriving the other way: a device that reads a
             // listing instead of holding a socket has to be told, and a restarting session is
             // listed with no live process — which is why the field travels with the listing at all.
@@ -2266,7 +2283,18 @@ export const storage = create<StorageState>()((set, get) => {
             savePendingSessionDeletes(pendingSessionDeletes);
             return { ...state, pendingSessionDeletes };
         }),
+        rememberDeletedSessionUid: (uid: string, at: number) => set((state) => {
+            if (state.deletedSessionUids[uid] !== undefined) {
+                return state;
+            }
+            const deletedSessionUids = { ...state.deletedSessionUids, [uid]: at };
+            saveDeletedSessionUids(deletedSessionUids);
+            return { ...state, deletedSessionUids };
+        }),
         deleteSession: (sessionId: string) => set((state) => {
+            // The row is about to leave the store, so its lineage name is read first: a deletion
+            // of a conversation must not depend on which server id it happened to be wearing.
+            const removed = sessionLive.get(sessionId);
             // Remove session from the keyed store; the derived subscription rebuilds the list.
             sessionLive.delete(sessionId);
 
@@ -2279,6 +2307,16 @@ export const storage = create<StorageState>()((set, get) => {
                 : (() => {
                     const next = { ...state.deletedSessions, [sessionId]: Date.now() };
                     saveDeletedSessions(next);
+                    return next;
+                })();
+            // And the lineage, when the row had said which one it is, so an id the server issues
+            // later cannot bring the conversation back.
+            const uid = removed?.sessionUid ?? removed?.metadata?.sessionUid;
+            const deletedSessionUids = uid === undefined || state.deletedSessionUids[uid] !== undefined
+                ? state.deletedSessionUids
+                : (() => {
+                    const next = { ...state.deletedSessionUids, [uid]: Date.now() };
+                    saveDeletedSessionUids(next);
                     return next;
                 })();
 
@@ -2308,6 +2346,7 @@ export const storage = create<StorageState>()((set, get) => {
             return {
                 ...state,
                 deletedSessions,
+                deletedSessionUids,
             };
         }),
         // Outbox (send status tracking)
