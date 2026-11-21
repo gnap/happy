@@ -42,7 +42,7 @@ import { AsyncLock } from '@/utils/lock';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { Message } from './typesMessage';
 import { EncryptionCache } from './encryption/encryptionCache';
-import { fetchIdentity, LanRequestError, archiveSessionAt, restartSessionAt, sessionControlAt, type LanRestartVerdict } from './lan/client';
+import { fetchIdentity, LanRequestError, archiveSessionAt, restartAskBody, restartSessionAt, sessionControlAt, type LanRestartVerdict, type RestartAsk } from './lan/client';
 import { accountProofHeaders } from '@/auth/accountProof';
 import { getLanCredential } from './lan/credentials';
 import { readSessionOverLan, listSessionsOverLan, toNormalizedMessages, type LanConnection, type LanSessionRead } from './lan/sessionChannel';
@@ -6409,17 +6409,18 @@ class Sync {
     }
 
     /**
-     * Replays what each machine says it has started and archived, from where this App left off.
+     * Asks a machine to replace a session's process, over whichever channel carries it.
      *
-     * The App learns about a session here before the server knows it exists, which is the point:
-     * the machine has it, so the App can be shown it, and the server catching up is a separate
-     * progress. Asked on occasions rather than on a timer — a machine's own socket coming live, and
-     * the hint it sends when its log moves — because the log changes a handful of times a day and a
-     * poll would be all cost.
+     * The ask can say more than "restart". A generation makes a repeat land on the restart that
+     * has already happened instead of killing a second process, and `expectAccepted` narrows the
+     * wait from the finished outcome to the machine taking responsibility — a restart outlives any
+     * request, and the row's phase carries the rest. Both travel on the LAN route and on the
+     * server's RPC to the same daemon handler, because the machine is the one that decides.
      *
-     * Never fatal: an address that has moved is a reason to try again on the next occasion.
+     * A channel that was asked and did not answer is reported as success: the work may well be
+     * under way, and the next listing is what says so. `null` is kept for "no channel offered it".
      */
-    async restartSession(sessionId: string, machineId: string, options?: { requiresDesktop?: boolean }): Promise<{ success: boolean; newSessionId?: string; error?: string } | null> {
+    async restartSession(sessionId: string, machineId: string, options?: RestartAsk): Promise<LanRestartVerdict | null> {
         const machineKey = this.getMachineKey(machineId);
         if (!machineKey) {
             return null;
@@ -6432,18 +6433,27 @@ class Sync {
             operation: 'restart',
             path: `/lan/sessions/${encodeURIComponent(sessionId)}/restart`,
             proof: { operation: 'restart', target: sessionId },
-            run: (baseUrl, token, proof) => restartSessionAt(baseUrl, token, sessionId, proof ?? undefined, options?.requiresDesktop),
+            run: (baseUrl, token, proof) => restartSessionAt(baseUrl, token, sessionId, proof ?? undefined, options),
             // The server carries the same action by asking the daemon on this App's behalf. It is a
-            // channel like the others: tried when its turn comes, and skipped when it cannot.
-            onServer: () => apiSocket.machineRPC<LanRestartVerdict, { sessionId: string; requiresDesktop?: boolean }>(
-                machineId, 'restartSession', options?.requiresDesktop === undefined
-                    ? { sessionId }
-                    : { sessionId, requiresDesktop: options.requiresDesktop },
+            // channel like the others: tried when its turn comes, and skipped when it cannot. The
+            // daemon reads the same fields from this path as from its own route, so the ask is
+            // built once rather than described twice and allowed to drift.
+            onServer: () => apiSocket.machineRPC<
+                LanRestartVerdict,
+                { sessionId: string; requiresDesktop?: boolean; generation?: number; expect?: 'accepted' }
+            >(
+                machineId, 'restartSession', { sessionId, ...(restartAskBody(options) ?? {}) },
             ),
         });
         if (outcome.kind === 'done') {
-            log.log(`🔄 restart ${sessionId}: ${outcome.value.success ? 'accepted' : outcome.value.error ?? 'refused'}`);
-            return outcome.value;
+            const verdict = outcome.value;
+            log.log(
+                `🔄 restart ${sessionId}: ${verdict.success ? 'accepted' : verdict.error ?? 'refused'}`
+                + `${verdict.stage ? ` stage=${verdict.stage}` : ''}`
+                + `${verdict.generation !== undefined ? ` generation=${verdict.generation}` : ''}`
+                + `${verdict.reason ? ` reason=${verdict.reason}` : ''}`,
+            );
+            return verdict;
         }
         if (outcome.kind === 'bad-request') {
             log.log(`🔄 restart ${sessionId}: the machine rejected the request (${outcome.status})`);
