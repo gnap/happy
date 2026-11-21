@@ -2397,7 +2397,12 @@ export async function startDaemon(): Promise<void> {
     for (const route of localRouteConfig) {
       try {
         routeProxies.push(await startLocalProxy({
-          fixedRoute: { relayRoute: route.name, viaRelay: true, label: `route:${route.name}` },
+          fixedRoute: {
+            relayRoute: route.name,
+            viaRelay: true,
+            label: `route:${route.name}`,
+            ...(route.only ? { only: route.only } : {}),
+          },
           port: route.port,
           relay: () => relayClient,
         }));
@@ -2432,6 +2437,7 @@ export async function startDaemon(): Promise<void> {
           // Absent when the profile names no hop: the relay dials the target itself.
           ...(config.socks5 ? { socks5: config.socks5 } : {}),
           viaRelay: config.viaRelay,
+          ...(config.only && config.only.length > 0 ? { only: config.only } : {}),
           ...(config.label ? { label: config.label } : {}),
         });
         if (proxyRoutes.size > MAX_PROXY_ROUTES) {

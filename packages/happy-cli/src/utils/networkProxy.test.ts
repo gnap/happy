@@ -89,6 +89,8 @@ describe('applyNetworkProxyPolicy', () => {
             token: 'abc123',
             socks5: HOP,
             viaRelay: false,
+            // The hop was chosen for the model endpoint; that is the only host it carries.
+            only: ['api.deepseek.com'],
             label: 'session-1',
         });
         expect(notify).toHaveBeenCalledWith('abc123', policy.registration);
@@ -109,9 +111,34 @@ describe('applyNetworkProxyPolicy', () => {
 
         const policy = applyNetworkProxyPolicy({}, { label: 'spawned' });
 
-        expect(policy.registration).toEqual({ token: 'abc123', socks5: HOP, viaRelay: false, label: 'spawned' });
+        // No model endpoint stated, so the route keeps its default: the Anthropic API.
+        expect(policy.registration).toEqual({ token: 'abc123', socks5: HOP, viaRelay: false, only: ['api.anthropic.com'], label: 'spawned' });
         expect(process.env.ALL_PROXY).toBe(LOCAL_URL);
         expect(process.env.HTTPS_PROXY).toBe(LOCAL_URL);
+    });
+
+    it('scopes a registered route to the model endpoint', () => {
+        process.env.HAPPY_LOCAL_PROXY_URL = LOCAL_URL;
+
+        const policy = applyNetworkProxyPolicy(
+            { ALL_PROXY: HOP, ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic' },
+            { label: 'scoped' },
+        );
+
+        // The hop is chosen for the model API. A paper fetch or a search is not its business.
+        expect(policy.registration?.only).toEqual(['api.deepseek.com']);
+    });
+
+    it('honours an explicit scope and keeps the directive away from the agent', () => {
+        process.env.HAPPY_LOCAL_PROXY_URL = LOCAL_URL;
+
+        const policy = applyNetworkProxyPolicy(
+            { ALL_PROXY: HOP, HAPPY_PROXY_ONLY: 'api.deepseek.com,.example.com', ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic' },
+            { label: 'scoped' },
+        );
+
+        expect(policy.registration?.only).toEqual(['api.deepseek.com', '.example.com']);
+        expect(policy.env).toEqual({ ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic' });
     });
 
     it('points the agent at a named route\'s fixed port and registers nothing', () => {
@@ -201,7 +228,7 @@ describe('applyNetworkProxyPolicy', () => {
 
         const policy = applyNetworkProxyPolicy({ ANTHROPIC_MODEL: 'x' }, { viaRelay: true });
 
-        expect(policy.registration).toEqual({ token: 'abc123', viaRelay: true });
+        expect(policy.registration).toEqual({ token: 'abc123', viaRelay: true, only: ['api.deepseek.com'] });
         expect(policy.env).toEqual({ ANTHROPIC_MODEL: 'x' });
         expect(process.env.ALL_PROXY).toBe(LOCAL_URL);
         // With the relay chosen, the API host is not excused from the route.

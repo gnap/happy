@@ -237,6 +237,71 @@ describe('local HTTP proxy', () => {
         }
     });
 
+    it('dials itself the hosts the route does not cover', async () => {
+        // The machine's own way out, standing in for the internet: whatever is sent comes back.
+        const origin = createServer((socket) => socket.pipe(socket));
+        await new Promise<void>((resolve) => origin.listen(0, '127.0.0.1', resolve));
+        const originPort = (origin.address() as AddressInfo).port;
+        let relayDials = 0;
+        const relay = {
+            openEgress: async () => {
+                relayDials++;
+                throw new Error('the route must not be used for this host');
+            },
+        } as unknown as RelayClientHandle;
+        const proxy = await startLocalProxy({
+            fixedRoute: { relayRoute: 'personal', viaRelay: true, only: ['api.test'], label: 'route:personal' },
+            port: 0,
+            relay: () => relay,
+        });
+        const client = await openClient(proxy.port);
+        try {
+            client.write(`CONNECT 127.0.0.1:${originPort} HTTP/1.1\r\n\r\nping`);
+            const response = await readUntil(client, (text) => text.includes('ping'));
+            expect(response.startsWith('HTTP/1.1 200')).toBe(true);
+            // A route chosen for the model API must not carry a paper fetch, a clone, or a search.
+            expect(relayDials).toBe(0);
+        } finally {
+            client.destroy();
+            await proxy.stop();
+            await new Promise<void>((resolve) => origin.close(() => resolve()));
+        }
+    });
+
+    it('still routes the hosts the route does cover', async () => {
+        const origin = createServer((socket) => socket.pipe(socket));
+        await new Promise<void>((resolve) => origin.listen(0, '127.0.0.1', resolve));
+        const originPort = (origin.address() as AddressInfo).port;
+        let relayDials = 0;
+        const relay = {
+            openEgress: async () => {
+                relayDials++;
+                const socket = connect({ host: '127.0.0.1', port: originPort });
+                await new Promise<void>((resolve, reject) => {
+                    socket.once('connect', resolve);
+                    socket.once('error', reject);
+                });
+                return socket;
+            },
+        } as unknown as RelayClientHandle;
+        const proxy = await startLocalProxy({
+            fixedRoute: { relayRoute: 'personal', viaRelay: true, only: ['127.0.0.1'], label: 'route:personal' },
+            port: 0,
+            relay: () => relay,
+        });
+        const client = await openClient(proxy.port);
+        try {
+            client.write('CONNECT 127.0.0.1:443 HTTP/1.1\r\n\r\nping');
+            const response = await readUntil(client, (text) => text.includes('ping'));
+            expect(response.startsWith('HTTP/1.1 200')).toBe(true);
+            expect(relayDials).toBe(1);
+        } finally {
+            client.destroy();
+            await proxy.stop();
+            await new Promise<void>((resolve) => origin.close(() => resolve()));
+        }
+    });
+
     it('fails closed when the relay the route needs is not connected', async () => {
         const proxy = await startLocalProxy({
             getRoute: (token) => token === TOKEN

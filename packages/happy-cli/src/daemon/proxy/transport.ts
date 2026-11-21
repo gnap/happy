@@ -26,11 +26,33 @@ export type ProxyRoute = {
      * the daemon's fixed-port listeners, which are not tied to any session.
      */
     relayRoute?: string;
+    /**
+     * The only destinations this route covers. Everything else is dialled from this machine.
+     *
+     * A route moves one conversation's exit — the model API's — not the whole machine's traffic.
+     * An agent that fetches a paper, clones a repository or searches the web is doing something
+     * the hop was never chosen for; sending that through the hop makes it slower, and can make it
+     * fail where the hop has no route. Entries match a host exactly, or a domain when written
+     * with a leading dot (`.example.com` covers `api.example.com`).
+     */
+    only?: string[];
     /** Session tag for logs, so a stream can be attributed without naming the address. */
     label?: string;
 };
 
 const DIRECT_CONNECT_TIMEOUT_MS = 10_000;
+
+/** Whether `host` is one this route was chosen for. */
+export function routeCovers(route: ProxyRoute, host: string): boolean {
+    if (!route.only || route.only.length === 0) return true;
+    const name = host.trim().toLowerCase();
+    return route.only.some((pattern) => {
+        const wanted = pattern.trim().toLowerCase();
+        if (!wanted) return false;
+        if (wanted.startsWith('.')) return name === wanted.slice(1) || name.endsWith(wanted);
+        return name === wanted;
+    });
+}
 
 export async function openTunnel(
     route: ProxyRoute,
@@ -38,6 +60,10 @@ export async function openTunnel(
     port: number,
     relay: () => RelayClientHandle | null,
 ): Promise<Duplex> {
+    if (!routeCovers(route, host)) {
+        // Not this route's traffic: the machine dials it, through the machine's own network.
+        return connectDirect(host, port);
+    }
     if (route.relayRoute) {
         // The relay owns the whole path to the hop, including the handshake. What arrives here is
         // already the target's stream, which is why nothing below this point runs for it.
