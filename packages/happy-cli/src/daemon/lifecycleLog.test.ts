@@ -37,6 +37,31 @@ describe('LifecycleLog', () => {
         expect(log.record({ op: 'created', tag: 'tag-2', sessionId: 'cmt123' }).sessionId).toBe('cmt123');
     });
 
+    it('records the lineage uid beside the names, and reads it back unchanged', () => {
+        // Additive: the tag and id still key the entry, and a reader that ignores the uid replays
+        // exactly the log it did before.
+        const log = logAt();
+        log.record({ op: 'created', tag: 'tag-1', sessionUid: 'uid-1', sessionId: 'cmt123' });
+        log.record({ op: 'deleted', tag: 'tag-1', sessionUid: 'uid-1', sessionId: 'cmt123' });
+
+        expect(log.read()).toMatchObject([
+            { rev: 1, op: 'created', tag: 'tag-1', sessionUid: 'uid-1', sessionId: 'cmt123' },
+            { rev: 2, op: 'deleted', tag: 'tag-1', sessionUid: 'uid-1', sessionId: 'cmt123' },
+        ]);
+    });
+
+    it('reads an entry written before the uid existed as a fact with no uid', () => {
+        // The compatibility direction that matters: an old line has no field, and absence simply
+        // means a reader keys the entry by the names it does have.
+        const dir = mkdtempSync(join(tmpdir(), 'happy-lifecycle-'));
+        const file = join(dir, 'lifecycle.jsonl');
+        writeFileSync(file, '{"rev":1,"at":1,"op":"created","tag":"tag-1"}\n', 'utf8');
+
+        const [entry] = new LifecycleLog(file).read();
+        expect(entry).toMatchObject({ rev: 1, op: 'created', tag: 'tag-1' });
+        expect(entry).not.toHaveProperty('sessionUid');
+    });
+
     it('records a deletion by session id alone, for a row this machine no longer holds', () => {
         // The App may be deleting a session the daemon's snapshot lost — the catalog was cleaned,
         // or the row was only ever on the server. The delete still has to reach the server, and the

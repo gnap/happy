@@ -367,6 +367,9 @@ describe('relay', () => {
         const sessions = [{
             happySessionId: 's1',
             tag: 't1',
+            // The lineage's public name: small like the projection, and what lets a reader keep a
+            // conversation's row together when the server issues a different id.
+            sessionUid: 'uid-1',
             directory: '/work',
             agent: 'claude',
             startedBy: 'daemon',
@@ -415,6 +418,7 @@ describe('relay', () => {
             sessions: [{
                 happySessionId: 's1',
                 tag: 't1',
+                sessionUid: 'uid-1',
                 isAlive: true,
                 origin: 'server',
                 phase: 'Running',

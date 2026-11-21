@@ -46,6 +46,7 @@ import { decideReconcile, nextReconcileProgress, type ReconcileProgress, type Re
 import { BUILD_VERSION } from '../version';
 import type { ApiMachineClient } from '@/api/apiMachine';
 import { readSessionKey } from '@/api/sessionKeyPersistence';
+import { readSessionUid } from '@/api/sessionUid';
 import { validatePath } from '@/modules/common/pathSecurity';
 import { c as createTar } from 'tar';
 import { run as runRipgrep } from '@/modules/ripgrep/index';
@@ -59,6 +60,24 @@ import { loadLocalRoutes } from './proxy/routes';
 import type { ProxyRoute } from './proxy/transport';
 import { directoryRows, type DirectorySession } from './relay/directory';
 import { buildSessionScopeUnitName, resolveSessionScopeMode, scopeUnitFromProcCgroup, signalSession, spawnHappyCLIInSessionScope } from './linux/sessionScope';
+
+/**
+ * A lineage's public name, by tag, as the CLI minted it.
+ *
+ * The daemon shares the CLI's happy home, so the uid it publishes is read from the same
+ * write-once file the session process uses — no handshake and no wire change to an older
+ * session. Only a hit is cached: a spawn the daemon has scheduled may be published before its
+ * process has minted the uid, and remembering that absence would hide it forever.
+ */
+const sessionUidByTag = new Map<string, string>();
+function sessionUidOfTag(tag: string | undefined): string | undefined {
+  if (!tag) return undefined;
+  const cached = sessionUidByTag.get(tag);
+  if (cached) return cached;
+  const uid = readSessionUid(tag);
+  if (uid) sessionUidByTag.set(tag, uid);
+  return uid ?? undefined;
+}
 
 /** Time to wait for a spawned session to report via /session-started webhook before failing the spawn (Cursor cold start can exceed 30s). */
 const SESSION_WEBHOOK_TIMEOUT_MS = 60_000;
@@ -549,12 +568,17 @@ export async function startDaemon(): Promise<void> {
     };
 
     /** The deletion side of the same catalog: what readers reconcile against, not a second store. */
-    const getTombstones = (): Array<{ sessionId: string; tag?: string; at: number }> =>
-      Object.entries(archivedSessionIds).map(([sessionId, at]) => ({
-        sessionId,
-        ...(sessions[sessionId]?.sessionTag ? { tag: sessions[sessionId].sessionTag } : {}),
-        at,
-      }));
+    const getTombstones = (): Array<{ sessionId: string; tag?: string; sessionUid?: string; at: number }> =>
+      Object.entries(archivedSessionIds).map(([sessionId, at]) => {
+        const tag = sessions[sessionId]?.sessionTag;
+        const uid = sessionUidOfTag(tag);
+        return {
+          sessionId,
+          ...(tag ? { tag } : {}),
+          ...(uid !== undefined ? { sessionUid: uid } : {}),
+          at,
+        };
+      });
 
     /**
      * Fold a *complete* server list into the catalog, and drop imports the server no longer has.
@@ -690,10 +714,12 @@ export async function startDaemon(): Promise<void> {
         stoppedSessions.get(sessionId)?.generation ?? 0,
       );
       const generation = observedGeneration + 1;
+      const uid = sessionUidOfTag(tag);
       lifecycleLog.record({
         op: 'deleted',
         sessionId,
         ...(tag ? { tag } : {}),
+        ...(uid !== undefined ? { sessionUid: uid } : {}),
         lifecycle: 'archived',
         generation,
       });
@@ -963,9 +989,11 @@ export async function startDaemon(): Promise<void> {
           && entry.tag === s.sessionTag
           && entry.sessionId === s.happySessionId);
         if (s.sessionTag && !alreadyWritten) {
+          const uid = sessionUidOfTag(s.sessionTag);
           lifecycleLog.record({
             op: 'created',
             tag: s.sessionTag,
+            ...(uid !== undefined ? { sessionUid: uid } : {}),
             sessionId: s.happySessionId,
             directory: s.directory,
             agent: s.agent,
@@ -2569,9 +2597,13 @@ export async function startDaemon(): Promise<void> {
       // creation they have seen.
       const restartRecord = sessions[sessionId];
       if (restartRecord?.sessionTag) {
+        // The lineage keeps its uid across a restart: it is the same tag and the same session
+        // process file, not a new name for a new conversation.
+        const uid = sessionUidOfTag(restartRecord.sessionTag);
         lifecycleLog.record({
           op: 'created',
           tag: restartRecord.sessionTag,
+          ...(uid !== undefined ? { sessionUid: uid } : {}),
           sessionId,
           ...(restartRecord.directory ? { directory: restartRecord.directory } : {}),
           ...(restartRecord.agent ? { agent: restartRecord.agent } : {}),
@@ -3251,16 +3283,21 @@ export async function startDaemon(): Promise<void> {
           const roster = mergeSessionRoster(summaries, sessions, archivedSessionIds);
           summaries.length = 0;
           summaries.push(...roster.map((summary): LanSessionSummary => {
+            // The lineage's public name rides with every row that has a tag, whichever store the
+            // row came from: a reader that keys a deletion by lineage needs it on the disk-only
+            // rows too, which are exactly the ones an App reads after a reboot.
+            const uid = summary.sessionUid ?? sessionUidOfTag(summary.tag);
+            const named = uid !== undefined ? { ...summary, sessionUid: uid } : summary;
             // The live rows above already carry a phase; a row that came only from disk has no
             // process behind it, so it is projected from the record and whatever restart is in
             // flight. Liveness is never inferred from the store here: `isAlive` stays the overlay's
             // answer, and the status is derived from the same facts.
             if (summary.phase !== undefined) {
-              return summary;
+              return named;
             }
             const restartingSince = restartingSinceOf(summary.happySessionId);
             return {
-              ...summary,
+              ...named,
               ...(restartingSince !== undefined ? { restartingSince } : {}),
               ...statusFor(summary.happySessionId, summary.tag, {
                 registered: false,
@@ -3276,14 +3313,17 @@ export async function startDaemon(): Promise<void> {
           const tracked = new Set(summaries.map(summary => summary.happySessionId));
           for (const [id, at] of restartingStartedAt) {
             if (now - at < RESTARTING_TTL_MS && !tracked.has(id)) {
+              const tag = sessions[id]?.sessionTag;
+              const uid = sessionUidOfTag(tag);
               summaries.push({
                 happySessionId: id,
+                ...(uid !== undefined ? { sessionUid: uid } : {}),
                 directory: '',
                 agent: '',
                 startedBy: 'daemon',
                 isAlive: false,
                 restartingSince: at,
-                ...statusFor(id, sessions[id]?.sessionTag, { restartingSince: at }),
+                ...statusFor(id, tag, { restartingSince: at }),
               });
             }
           }
@@ -3297,8 +3337,10 @@ export async function startDaemon(): Promise<void> {
           for (const spec of pendingSpawns.values()) {
             if (listedTags.has(spec.tag)) continue;
             if (spec.replacesSessionId !== undefined && listedIds.has(spec.replacesSessionId)) continue;
+            const uid = sessionUidOfTag(spec.tag);
             summaries.push({
               tag: spec.tag,
+              ...(uid !== undefined ? { sessionUid: uid } : {}),
               directory: spec.directory,
               agent: spec.agent,
               startedBy: 'daemon',
@@ -3919,11 +3961,13 @@ export async function startDaemon(): Promise<void> {
           specs.get(tag ?? sessionId)?.generation ?? 0,
           specs.get(sessionId)?.generation ?? 0,
         );
+        const uid = sessionUidOfTag(tag);
         lifecycleLog.record({
           op: 'deleted',
           sessionId,
           at,
           ...(tag ? { tag } : {}),
+          ...(uid !== undefined ? { sessionUid: uid } : {}),
           lifecycle: 'archived',
           generation: observedGeneration + 1,
         });
