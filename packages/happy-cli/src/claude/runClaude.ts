@@ -724,6 +724,9 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
 
             const profileChanged = messageProfileId !== currentProfileId;
             if (profileChanged || envChanged || viaRelayChanged) {
+                // What the process already has, so the bump below can ask whether this profile
+                // actually gives it something different.
+                const envBefore = currentClaudeEnvVars;
                 currentProfileId = messageProfileId;
                 currentViaRelay = messageViaRelay ?? currentViaRelay;
                 if (messageProfileId) {
@@ -785,9 +788,12 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                     }
                     if (currentSession) {
                         currentSession.claudeEnvVars = currentClaudeEnvVars;
-                        // The relay choice alone changes nothing the SDK process can see — the
-                        // loopback URL is the same — so it must not respawn the conversation.
-                        if (profileChanged || envChanged) {
+                        // Only an environment the agent can actually see is worth a new process.
+                        // A different profile id that resolves to the same variables — the common
+                        // case for a daemon-spawned session, whose profile was already applied at
+                        // spawn — would otherwise cost the conversation one replacement, and the
+                        // relay choice alone changes nothing the SDK process can see either.
+                        if (profileEnvChanged(envBefore, currentClaudeEnvVars)) {
                             currentSession.claudeEnvVarsGeneration++;
                         }
                     }
@@ -798,7 +804,9 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                     currentClaudeEnvVars = { ...daemonClaudeEnvVars };
                     if (currentSession) {
                         currentSession.claudeEnvVars = currentClaudeEnvVars;
-                        if (profileChanged) {
+                        // Back to the baseline: a replacement is only owed if that differs from
+                        // what the process is running with.
+                        if (profileEnvChanged(envBefore, currentClaudeEnvVars)) {
                             currentSession.claudeEnvVarsGeneration++;
                         }
                     }
