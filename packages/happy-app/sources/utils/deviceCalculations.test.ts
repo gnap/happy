@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { calculateDeviceDimensions, determineDeviceType, calculateHeaderHeight } from './deviceCalculations';
+import { calculateDeviceDimensions, determineDeviceType, calculateHeaderHeight, isLandscapeTablet } from './deviceCalculations';
 
 describe('responsive utilities', () => {
     describe('calculateDeviceDimensions', () => {
@@ -161,6 +161,41 @@ describe('responsive utilities', () => {
             });
 
             expect(result).toBe('tablet'); // Large screens are considered tablets
+        });
+    });
+
+    describe('isLandscapeTablet', () => {
+        it('uses the two-pane layout for an iPad in landscape, whatever its diagonal', () => {
+            // iPad Mini landscape: 8.3" by the diagonal measure, still wide enough side by side.
+            expect(isLandscapeTablet({
+                platform: 'ios',
+                isPad: true,
+                isLandscape: true
+            })).toBe(true);
+        });
+
+        it('keeps an iPad in portrait on the single-column layout', () => {
+            expect(isLandscapeTablet({
+                platform: 'ios',
+                isPad: true,
+                isLandscape: false
+            })).toBe(false);
+        });
+
+        it('does not give a phone in landscape the two-pane layout', () => {
+            expect(isLandscapeTablet({
+                platform: 'ios',
+                isPad: false,
+                isLandscape: true
+            })).toBe(false);
+        });
+
+        it('does not treat an Android landscape window as an iPad layout', () => {
+            expect(isLandscapeTablet({
+                platform: 'android',
+                isPad: true,
+                isLandscape: true
+            })).toBe(false);
         });
     });
 
