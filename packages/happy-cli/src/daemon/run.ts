@@ -2457,8 +2457,18 @@ export async function startDaemon(): Promise<void> {
        * The projection beside the timestamp, when the caller has one. `restartingAt` alone still
        * answers the old question ("is it restarting?"); these say where the row stands and at
        * which generation, so a reader does not have to turn a timestamp back into a phase.
+       *
+       * The observed generation is not the wanted one: at the start of a restart the record still
+       * describes the process being replaced, and a failed attempt never realizes the new want.
+       * Saying the want had been observed would let this optimistic frame outrank the listing
+       * that later reports the failure.
        */
-      status?: { phase: SessionPhase; generation: number },
+      status?: {
+        phase: SessionPhase;
+        generation: number;
+        observedGeneration: number;
+        observedAt: number;
+      },
     ): void => {
       logger.debug(`[DAEMON RUN] ${startedAt === null ? 'Restart finished' : 'Restarting'}: ${sessionId}`);
       const body: UpdateSessionBody = {
@@ -2470,8 +2480,8 @@ export async function startDaemon(): Promise<void> {
           : {
               phase: status.phase,
               generation: status.generation,
-              observedGeneration: status.generation,
-              observedAt: Date.now(),
+              observedGeneration: status.observedGeneration,
+              observedAt: status.observedAt,
             }),
       };
       lanServer?.broadcast('update', {
@@ -2613,9 +2623,16 @@ export async function startDaemon(): Promise<void> {
         announceLifecycle();
       }
       restartingStartedAt.set(sessionId, startedAt);
-      announceRestarting(sessionId, startedAt, { phase: 'Restarting', generation: nextGeneration });
-      // What the closing announcement says. A restart that failed never moved the record, so the
-      // phase it reports is the one the id was in before the attempt — not a new generation.
+      announceRestarting(sessionId, startedAt, {
+        phase: 'Restarting',
+        generation: nextGeneration,
+        // The record still holds the generation of the process being replaced; the new want is
+        // exactly what has not been observed yet.
+        observedGeneration: currentGeneration,
+        observedAt: startedAt,
+      });
+      // A restart that failed never moved the record, so its observation stays at
+      // `currentGeneration`; the want it was accepted at stays at `nextGeneration` either way.
       let succeeded = false;
       // The work runs either way; `mode` only decides whether the caller waits for the outcome
       // or for the acceptance. Starting it before the branch matters: a caller that asked to be
@@ -2670,9 +2687,22 @@ export async function startDaemon(): Promise<void> {
           // Called off once there is an answer, whatever the answer was: the new process is up and
           // has registered, or the restart did not happen. Either way nothing is in flight.
           restartingStartedAt.delete(sessionId);
+          const record = sessions[sessionId];
+          // The same timestamp the listing derives from the record, not the time this frame was
+          // built: a reader orders statements by (generation, observedGeneration, observedAt),
+          // and an announcement stamped "now" would outrank the listing that carries the same
+          // observation, keeping the optimistic frame alive after it stopped being true.
+          const observedAt = succeeded
+            ? record?.lastHeartbeat ?? Date.now()
+            : record?.exitTime ?? record?.updatedAt ?? record?.lastHeartbeat ?? Date.now();
           announceRestarting(sessionId, null, {
             phase: succeeded ? 'Running' : 'Stopped',
-            generation: succeeded ? nextGeneration : currentGeneration,
+            // The want stays where it was accepted. A failed restart does not roll the spec back:
+            // the next listing reports the same generation with the old observation, and the
+            // reconciler is what decides whether to try again.
+            generation: nextGeneration,
+            observedGeneration: succeeded ? nextGeneration : currentGeneration,
+            observedAt,
           });
         }
       })();
