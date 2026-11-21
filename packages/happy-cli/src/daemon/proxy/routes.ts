@@ -21,6 +21,12 @@ export type LocalRoute = {
     name: string;
     /** The port this daemon listens on for this route. */
     port: number;
+    /**
+     * The hosts this route covers. Absent means every host: the listener is then a plain
+     * "everything through here" proxy. Given, everything else is dialled from this machine — which
+     * is what keeps an agent's paper fetches and web searches off a hop chosen for the model API.
+     */
+    only?: string[];
 };
 
 /**
@@ -45,23 +51,36 @@ export function loadLocalRoutes(filePath: string): LocalRoute[] {
     }
     const routes: LocalRoute[] = [];
     const usedPorts = new Set<number>();
-    for (const [rawName, rawPort] of Object.entries(parsed as Record<string, unknown>)) {
+    for (const [rawName, rawSpec] of Object.entries(parsed as Record<string, unknown>)) {
         const name = rawName.trim();
-        const port = Number(rawPort);
         if (!name) {
             logger.warn('[route] ignoring a route with an empty name');
             continue;
         }
+        // Two shapes: `"name": 57315` for everything, or `"name": { "port": 57315, "only": [...] }`
+        // to name the hosts the route is for.
+        const spec = rawSpec && typeof rawSpec === 'object' && !Array.isArray(rawSpec)
+            ? rawSpec as { port?: unknown; only?: unknown }
+            : { port: rawSpec };
+        const port = Number(spec.port);
         if (!Number.isInteger(port) || port < 1 || port > 65535) {
-            logger.warn(`[route] ignoring "${name}": ${JSON.stringify(rawPort)} is not a port`);
+            logger.warn(`[route] ignoring "${name}": ${JSON.stringify(spec.port)} is not a port`);
             continue;
+        }
+        let only: string[] | undefined;
+        if (spec.only !== undefined) {
+            if (!Array.isArray(spec.only) || spec.only.some((host) => typeof host !== 'string' || host.trim().length === 0)) {
+                logger.warn(`[route] ignoring "${name}": "only" must be a list of host names`);
+                continue;
+            }
+            only = spec.only.map((host) => host.trim());
         }
         if (usedPorts.has(port)) {
             logger.warn(`[route] ignoring "${name}": port ${port} is already used by another route`);
             continue;
         }
         usedPorts.add(port);
-        routes.push({ name, port });
+        routes.push({ name, port, ...(only ? { only } : {}) });
     }
     return routes;
 }

@@ -49,6 +49,14 @@ export const ROUTE_ENV = 'HAPPY_PROXY_ROUTE';
  * not the same thing.
  */
 export const DIRECT_ROUTE = 'direct';
+/**
+ * The hosts a route is for, overriding the model endpoint it is derived from.
+ *
+ * A route moves one conversation's exit, not the machine's. By default the model endpoint's host
+ * is the only destination that takes it; a profile that needs more names them here, comma
+ * separated. Everything else is dialled locally.
+ */
+export const ONLY_ENV = 'HAPPY_PROXY_ONLY';
 
 const PROXY_KEYS = [
     'ALL_PROXY', 'all_proxy', 'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy',
@@ -65,6 +73,8 @@ export type ProxyRegistration = {
      */
     socks5?: string;
     viaRelay: boolean;
+    /** The destinations this route covers; absent means all of them. */
+    only?: string[];
     /** A session name for daemon logs; never the address. */
     label?: string;
 };
@@ -164,6 +174,7 @@ export function applyNetworkProxyPolicy(
     }
     if (routeName) {
         delete env[ROUTE_ENV];
+        delete env[ONLY_ENV];
         for (const key of PROXY_KEYS) delete env[key];
         const port = readRoutePort(routeName);
         if (port === null) {
@@ -201,6 +212,10 @@ export function applyNetworkProxyPolicy(
     // replaced by the loopback URL below; leaving a non-socks one in this record would let it
     // override the loopback URL when the record is spread over process.env.
     for (const key of PROXY_KEYS) delete env[key];
+    // The route covers the model endpoint; the rest of the agent's traffic — paper fetches, web
+    // searches, git — is dialled locally. The directive is not something the agent should see.
+    const scope = routeScope(expandedProfile);
+    delete env[ONLY_ENV];
 
     const localUrl = localProxyUrl();
     const token = localUrl ? tokenOf(localUrl) : null;
@@ -225,6 +240,7 @@ export function applyNetworkProxyPolicy(
         // Absent when the profile names no hop: the relay becomes the egress and dials the target.
         ...(socks5 ? { socks5 } : {}),
         viaRelay,
+        only: scope,
         ...(options?.label ? { label: options.label } : {}),
     };
     active = registration;
@@ -342,6 +358,29 @@ function isSocks5(value: string | undefined): value is string {
  * to it is already defined to need a daemon restart. A route that is not in the file is a route
  * this machine does not serve, and the caller fails closed rather than guessing a port.
  */
+/**
+ * The hosts this session's route covers.
+ *
+ * The model endpoint is the one destination a route exists for: it is what a profile chooses a
+ * hop for. `HAPPY_PROXY_ONLY` overrides that when a profile needs more (or something else). The
+ * default is the endpoint's host because a route that swallowed every request would also swallow
+ * the agent's research traffic, at the hop's latency and from the hop's address.
+ */
+function routeScope(profileEnv: Record<string, string>): string[] {
+    const explicit = (profileEnv[ONLY_ENV] ?? process.env[ONLY_ENV] ?? '').trim();
+    if (explicit) {
+        return explicit.split(',').map((host) => host.trim()).filter(Boolean);
+    }
+    const baseUrl = profileEnv.ANTHROPIC_BASE_URL ?? profileEnv.OPENAI_BASE_URL
+        ?? process.env.ANTHROPIC_BASE_URL ?? process.env.OPENAI_BASE_URL
+        ?? 'https://api.anthropic.com';
+    try {
+        return [new URL(baseUrl).hostname];
+    } catch {
+        return ['api.anthropic.com'];
+    }
+}
+
 function readRoutePort(name: string): number | null {
     try {
         const home = process.env.HAPPY_HOME_DIR ?? configuration.happyHomeDir;

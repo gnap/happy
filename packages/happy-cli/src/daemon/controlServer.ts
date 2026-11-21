@@ -47,7 +47,7 @@ export function startDaemonControlServer({
    * tells the daemon where to send its requests. A route without `socks5` means the relay is the
    * egress and dials the targets itself. The daemon never learns the route any other way.
    */
-  onProxyConfig: (token: string, config: { socks5?: string; viaRelay: boolean; label?: string } | null) => void;
+  onProxyConfig: (token: string, config: { socks5?: string; viaRelay: boolean; only?: string[]; label?: string } | null) => void;
 }): Promise<{ port: number; stop: () => Promise<void> }> {
   return new Promise((resolve) => {
     const app = fastify({
@@ -382,6 +382,8 @@ export function startDaemonControlServer({
           token: z.string().min(1),
           socks5: z.string().nullable(),
           viaRelay: z.boolean(),
+          /** The hosts this route covers; absent means every host. */
+          only: z.array(z.string()).optional(),
           /** A session name for logs. Never the address, which is a credential. */
           label: z.string().optional(),
         }),
@@ -390,11 +392,11 @@ export function startDaemonControlServer({
         }
       }
     }, async (request) => {
-      const { token, socks5, viaRelay, label } = request.body;
+      const { token, socks5, viaRelay, only, label } = request.body;
       const clearing = socks5 === null && !viaRelay;
       onProxyConfig(token, clearing
         ? null
-        : { ...(socks5 !== null ? { socks5 } : {}), viaRelay, ...(label ? { label } : {}) });
+        : { ...(socks5 !== null ? { socks5 } : {}), viaRelay, ...(only && only.length > 0 ? { only } : {}), ...(label ? { label } : {}) });
       // The address is a credential: log which way it goes, never what it is or the token.
       const route = clearing ? 'cleared' : socks5 === null ? 'set relay egress' : viaRelay ? 'set via relay' : 'set direct';
       logger.debug(`[CONTROL SERVER] Proxy route ${route}`);

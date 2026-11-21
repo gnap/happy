@@ -178,7 +178,7 @@ export async function spawnDaemonSession(opts: {
  */
 export async function notifyDaemonNetworkProxy(
   token: string,
-  config: { socks5?: string; viaRelay: boolean; label?: string } | null,
+  config: { socks5?: string; viaRelay: boolean; only?: string[]; label?: string } | null,
 ): Promise<{ error?: string } | any> {
   return await daemonPost('/proxy-config', {
     token,
@@ -186,6 +186,7 @@ export async function notifyDaemonNetworkProxy(
     // `null` hop with the relay on is a real route, the relay dialling targets itself.
     socks5: config?.socks5 ?? null,
     viaRelay: config?.viaRelay ?? false,
+    ...(config?.only && config.only.length > 0 ? { only: config.only } : {}),
     ...(config?.label ? { label: config.label } : {}),
   });
 }

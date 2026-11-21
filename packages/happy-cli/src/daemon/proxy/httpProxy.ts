@@ -21,7 +21,7 @@ import { createServer, type Server, type Socket } from 'node:net';
 import type { Duplex } from 'node:stream';
 import { logger } from '@/ui/logger';
 import type { RelayClientHandle } from '@/daemon/relay/relayClient';
-import { openTunnel, type ProxyRoute } from './transport';
+import { openTunnel, routeCovers, type ProxyRoute } from './transport';
 
 const MAX_HEADER_BYTES = 64 * 1024;
 const MAX_TUNNELS = 64;
@@ -196,7 +196,12 @@ export function startLocalProxy(options: {
 
     async function open(route: ProxyRoute, host: string, port: number): Promise<Duplex | null> {
         const label = route.label ?? 'session';
-        const routeName = route.viaRelay ? 'relay' : 'direct';
+        // `local` is the third outcome: the route does not cover this host, so the machine dials
+        // it. Keeping it distinct in the log is what tells a slow paper fetch apart from a broken
+        // route.
+        const routeName = !routeCovers(route, host)
+            ? 'local'
+            : route.viaRelay || route.relayRoute ? 'relay' : 'direct';
         try {
             const tunnel = await openTunnel(route, host, port, options.relay);
             logger.debug(`[proxy] ${label} ${routeName} ${host}:${port} open`);
