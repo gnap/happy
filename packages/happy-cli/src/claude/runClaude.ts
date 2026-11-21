@@ -515,6 +515,14 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                 fromEnv[key] = value;
             }
         }
+        // The profile's own variables, by the names the daemon recorded: the spawn environment
+        // carries them, and the baseline has to include them or the first message reads their
+        // arrival as a change.
+        for (const key of (process.env.HAPPY_PROFILE_ENV_KEYS ?? '').split(',')) {
+            const name = key.trim();
+            const value = name ? process.env[name] : undefined;
+            if (name && value !== undefined) fromEnv[name] = value;
+        }
         return fromEnv;
     })();
     // The baseline a cleared profile returns to, and the record every SDK process inherits. The
