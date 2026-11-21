@@ -27,6 +27,7 @@ function requireChannelFor(operation: ChannelOperation): void {
 import { apiSocket } from './apiSocket';
 import { sync } from './sync';
 import { getSessions, storage } from './storage';
+import type { LanRestartVerdict } from './lan/client';
 import type { MachineMetadata } from './storageTypes';
 import { channelDrivers } from './channels/measure';
 import { operationSupported } from './channels/resolve';
@@ -567,11 +568,7 @@ export async function sessionRipgrep(
  * Kill the session process immediately via daemon RPC.
  */
 // Types for session restart
-interface SessionRestartResponse {
-    success: boolean;
-    newSessionId?: string;
-    error?: string;
-}
+type SessionRestartResponse = LanRestartVerdict;
 
 /**
  * Restart a session, reconnecting to the same server session with the newer CLI version.
@@ -581,10 +578,25 @@ interface SessionRestartResponse {
  * has to be told, and its channel is the one that is up then — and the server is *a channel* that
  * carries the same action by asking the daemon on this App's behalf. There is no chain of
  * substitutions here: a channel that cannot carry it, or that failed, is where the next one starts.
+ *
+ * The ask carries the generation this device observed and asks for acceptance rather than the
+ * finished outcome. A restart outlives a request — the old process has to go, a new one boot and
+ * register — and waiting for all of that is how the same tap, retried after a lost answer, became a
+ * second restart. The machine answers as soon as it has taken responsibility; the row's phase says
+ * the rest. A build that predates those fields ignores them and still waits, so this works against
+ * an older machine exactly as it did before.
  */
-export async function sessionRestart(sessionId: string, machineId: string, options?: { requiresDesktop?: boolean }): Promise<SessionRestartResponse> {
+export async function sessionRestart(
+    sessionId: string,
+    machineId: string,
+    options?: { requiresDesktop?: boolean; generation?: number }
+): Promise<SessionRestartResponse> {
     try {
-        const response = await sync.restartSession(sessionId, machineId, options);
+        const response = await sync.restartSession(sessionId, machineId, {
+            ...options,
+            // The UI's ask: answer once the machine has taken it, not once the process is back.
+            expectAccepted: true,
+        });
         if (!response) {
             // Nothing carried it. Saying that is more use than a substitute attempt: the reasons are
             // per channel, and the caller has nowhere useful to look for them.

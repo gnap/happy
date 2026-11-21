@@ -327,7 +327,15 @@ function SessionInfoContent({ session }: { session: Session }) {
         if (desktop?.required && !desktop.available) {
             throw new HappyError(t('sessionInfo.needsDesktop'), false);
         }
-        const result = await sessionRestart(session.id, session.metadata.machineId, inDesktop ? { requiresDesktop: true } : undefined);
+        // The generation this device saw the session at, so the machine can tell a repeat of this
+        // tap from a new restart: a machine already past it answers that the restart happened
+        // instead of replacing the process a second time. It is the *observed* generation, not the
+        // log's newest want — during a restart the want is one ahead of the process, and sending
+        // that would read as a caller ahead of the machine.
+        const result = await sessionRestart(session.id, session.metadata.machineId, {
+            ...(inDesktop ? { requiresDesktop: true } : {}),
+            ...(runtime?.observedGeneration !== undefined ? { generation: runtime.observedGeneration } : {}),
+        });
         if (!result.success) {
             throw new HappyError(result.error || t('sessionInfo.failedToRestartSession'), false);
         }
