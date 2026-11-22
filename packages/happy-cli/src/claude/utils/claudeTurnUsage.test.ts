@@ -87,6 +87,52 @@ describe('buildClaudeTurnUsagePayload', () => {
         expect(usage?.model).toBe('claude-sonnet-5-5');
     });
 
+    it('picks the opt-in sibling when the provider echoes the bare model name', () => {
+        // Real session shape: the configured model is `deepseek-flash[1m]`, requests are accounted
+        // under both spellings, and assistant messages echo `deepseek-flash`. Matching exactly
+        // would take the bare entry's 200K default while the turn actually ran with 1M.
+        const usage = buildClaudeTurnUsagePayload({
+            num_turns: 300,
+            usage: { input_tokens: 29_000, output_tokens: 1_000 },
+            modelUsage: {
+                'deepseek-flash[1m]': { inputTokens: 93_000_000, contextWindow: 1_000_000 },
+                'deepseek-flash': { inputTokens: 75_600, contextWindow: 200_000 },
+                'glm-5.3-mb': { inputTokens: 635_000, contextWindow: 200_000 },
+            },
+        }, { ...lastInference, model: 'deepseek-flash' });
+
+        expect(usage?.context_window_tokens).toBe(1_000_000);
+        expect(usage?.model).toBe('deepseek-flash[1m]');
+    });
+
+    it('keeps the exact spelling when one model\'s spellings agree on the window', () => {
+        const usage = buildClaudeTurnUsagePayload({
+            num_turns: 2,
+            usage: { input_tokens: 1_000, output_tokens: 100 },
+            modelUsage: {
+                'deepseek-flash[1m]': { inputTokens: 90_000_000, contextWindow: 1_000_000 },
+                'deepseek-flash': { inputTokens: 1_000, contextWindow: 1_000_000 },
+            },
+        }, { ...lastInference, model: 'deepseek-flash' });
+
+        expect(usage?.context_window_tokens).toBe(1_000_000);
+        expect(usage?.model).toBe('deepseek-flash');
+    });
+
+    it('does not fold a different model whose name merely shares a prefix', () => {
+        const usage = buildClaudeTurnUsagePayload({
+            num_turns: 2,
+            usage: { input_tokens: 1_000, output_tokens: 100 },
+            modelUsage: {
+                'deepseek-flash[1m]': { inputTokens: 90_000_000, contextWindow: 1_000_000 },
+                'deepseek-flash-thinking[1m]': { inputTokens: 1_000, contextWindow: 200_000 },
+            },
+        }, { ...lastInference, model: 'deepseek-flash-thinking[1m]' });
+
+        expect(usage?.context_window_tokens).toBe(200_000);
+        expect(usage?.model).toBe('deepseek-flash-thinking[1m]');
+    });
+
     it('passes the per-TTL cache creation breakdown through', () => {
         const usage = buildClaudeTurnUsagePayload({
             num_turns: 2,
