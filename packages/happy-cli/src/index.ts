@@ -718,6 +718,7 @@ import { captureSpawnProxyEnv } from './utils/networkProxy'
           process.exit(1)
         }
         console.log(`A2A message sent to ${sessionId}`)
+        if (result.transport) console.log(`Transport: ${result.transport}`)
         if (result.messageId) console.log(`Message ID: ${result.messageId}`)
         if (result.seq !== undefined) console.log(`Seq: ${result.seq}`)
       } catch (error) {

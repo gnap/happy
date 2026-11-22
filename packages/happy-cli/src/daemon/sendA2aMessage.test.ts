@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   mockAxiosPost: vi.fn(),
   mockEncrypt: vi.fn((key: Uint8Array, _variant: unknown, payload: unknown) => payload),
   mockEncodeBase64: vi.fn(() => 'encoded'),
+  mockSendA2aOverPeerSocket: vi.fn(),
 }));
 
 vi.mock('axios', () => ({
@@ -33,6 +34,10 @@ vi.mock('@/persistence', () => ({
 vi.mock('@/api/encryption', () => ({
   encrypt: mocks.mockEncrypt,
   encodeBase64: mocks.mockEncodeBase64,
+}));
+
+vi.mock('./peerSocket', () => ({
+  sendA2aOverPeerSocket: mocks.mockSendA2aOverPeerSocket,
 }));
 
 vi.mock('@/configuration', () => ({
@@ -64,14 +69,48 @@ describe('sendA2aMessage', () => {
     });
     mocks.mockReadFileSync.mockReturnValue('Y2xpLXNlY3JldA==');
     mocks.mockEncodeBase64.mockReturnValue('encoded');
+    mocks.mockSendA2aOverPeerSocket.mockResolvedValue(false);
   });
 
-  it('uses the Claude session key for Claude sessions', async () => {
+  it('delivers through the session inbox socket when one is available', async () => {
+    mocks.mockSendA2aOverPeerSocket.mockResolvedValue(true);
     mocks.mockReadDaemonState.mockResolvedValue({
-      lastAgentBySessionId: { 'session-claude': 'claude' },
-      lastSessionTagBySessionId: { 'session-claude': 'tag-claude' },
-      lastSessionTagByDirectory: {},
-      lastDirectoryBySessionId: {},
+      sessions: {
+        'session-claude': {
+          sessionId: 'session-claude',
+          directory: '/work',
+          sessionTag: 'tag-claude',
+          agent: 'claude',
+          pid: 123,
+          status: 'running',
+          lastSeq: 0,
+        },
+      },
+    });
+
+    const result = await sendA2aMessage('session-claude', 'hello from a2a');
+
+    expect(result).toEqual({ success: true, transport: 'peer-socket' });
+    expect(mocks.mockSendA2aOverPeerSocket).toHaveBeenCalledWith('session-claude', 'hello from a2a');
+    // The native path carries the text itself; no inbox snapshot and no server POST.
+    expect(mocks.mockWriteFileSync).not.toHaveBeenCalled();
+    expect(mocks.mockAxiosPost).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the server when the socket path cannot deliver', async () => {
+    mocks.mockSendA2aOverPeerSocket.mockRejectedValue(new Error('socket unavailable'));
+    mocks.mockReadDaemonState.mockResolvedValue({
+      sessions: {
+        'session-claude': {
+          sessionId: 'session-claude',
+          directory: '/work',
+          sessionTag: 'tag-claude',
+          agent: 'claude',
+          pid: 123,
+          status: 'running',
+          lastSeq: 0,
+        },
+      },
     });
     mocks.mockExistsSync.mockImplementation((path: string) => path.endsWith('claude-session-key-tag-claude'));
 
@@ -81,6 +120,34 @@ describe('sendA2aMessage', () => {
       success: true,
       messageId: 'msg-1',
       seq: 1,
+      transport: 'server',
+    });
+    expect(mocks.mockAxiosPost).toHaveBeenCalled();
+  });
+
+  it('uses the Claude session key for Claude sessions', async () => {
+    mocks.mockReadDaemonState.mockResolvedValue({
+      sessions: {
+        'session-claude': {
+          sessionId: 'session-claude',
+          directory: '/work',
+          sessionTag: 'tag-claude',
+          agent: 'claude',
+          pid: 123,
+          status: 'running',
+          lastSeq: 0,
+        },
+      },
+    });
+    mocks.mockExistsSync.mockImplementation((path: string) => path.endsWith('claude-session-key-tag-claude'));
+
+    const result = await sendA2aMessage('session-claude', 'hello from a2a');
+
+    expect(result).toEqual({
+      success: true,
+      messageId: 'msg-1',
+      seq: 1,
+      transport: 'server',
     });
     expect(mocks.mockReadFileSync).toHaveBeenCalledWith('/home/test/.happy/claude-session-key-tag-claude', 'utf8');
     expect(mocks.mockAxiosPost).toHaveBeenCalledWith(
@@ -119,10 +186,17 @@ describe('sendA2aMessage', () => {
 
   it('uses the Cursor session key for Cursor sessions', async () => {
     mocks.mockReadDaemonState.mockResolvedValue({
-      lastAgentBySessionId: { 'session-cursor': 'cursor' },
-      lastSessionTagBySessionId: { 'session-cursor': 'tag-cursor' },
-      lastSessionTagByDirectory: {},
-      lastDirectoryBySessionId: {},
+      sessions: {
+        'session-cursor': {
+          sessionId: 'session-cursor',
+          directory: '/work',
+          sessionTag: 'tag-cursor',
+          agent: 'cursor',
+          pid: 456,
+          status: 'running',
+          lastSeq: 0,
+        },
+      },
     });
     mocks.mockExistsSync.mockImplementation((path: string) => path.endsWith('cursor-session-key-tag-cursor'));
 
@@ -132,6 +206,7 @@ describe('sendA2aMessage', () => {
       success: true,
       messageId: 'msg-1',
       seq: 1,
+      transport: 'server',
     });
     expect(mocks.mockReadFileSync).toHaveBeenCalledWith('/home/test/.happy/cursor-session-key-tag-cursor', 'utf8');
   });

@@ -92,6 +92,7 @@ export function startDaemonControlServer({
             success: z.boolean(),
             messageId: z.string().optional(),
             seq: z.number().optional(),
+            transport: z.enum(['peer-socket', 'server']).optional(),
           }),
           400: z.object({
             success: z.literal(false),
@@ -124,6 +125,7 @@ export function startDaemonControlServer({
         success: true,
         messageId: result.messageId,
         seq: result.seq,
+        transport: result.transport,
       };
     });
 

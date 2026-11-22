@@ -33,6 +33,18 @@ describe('directoryRows', () => {
     ]);
   });
 
+  it('carries the lineage uid, so a reader can keep a conversation together across ids', () => {
+    expect(directoryRows([full({ sessionUid: 'uid-1' })])).toEqual([
+      { happySessionId: 'session-1', tag: 'tag-1', sessionUid: 'uid-1', isAlive: true },
+    ]);
+  });
+
+  it('leaves the uid off when the machine has none, unchanged from an older daemon', () => {
+    expect(directoryRows([full()])).toEqual([
+      { happySessionId: 'session-1', tag: 'tag-1', isAlive: true },
+    ]);
+  });
+
   it('keeps a session the server has not named yet, addressed by its tag', () => {
     expect(directoryRows([full({ happySessionId: undefined })])).toEqual([
       { tag: 'tag-1', isAlive: true },

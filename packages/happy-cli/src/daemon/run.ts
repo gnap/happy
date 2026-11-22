@@ -46,6 +46,7 @@ import { decideReconcile, nextReconcileProgress, type ReconcileProgress, type Re
 import { BUILD_VERSION } from '../version';
 import type { ApiMachineClient } from '@/api/apiMachine';
 import { readSessionKey } from '@/api/sessionKeyPersistence';
+import { readSessionUid } from '@/api/sessionUid';
 import { validatePath } from '@/modules/common/pathSecurity';
 import { c as createTar } from 'tar';
 import { run as runRipgrep } from '@/modules/ripgrep/index';
@@ -59,6 +60,24 @@ import { loadLocalRoutes } from './proxy/routes';
 import type { ProxyRoute } from './proxy/transport';
 import { directoryRows, type DirectorySession } from './relay/directory';
 import { buildSessionScopeUnitName, resolveSessionScopeMode, scopeUnitFromProcCgroup, signalSession, spawnHappyCLIInSessionScope } from './linux/sessionScope';
+
+/**
+ * A lineage's public name, by tag, as the CLI minted it.
+ *
+ * The daemon shares the CLI's happy home, so the uid it publishes is read from the same
+ * write-once file the session process uses — no handshake and no wire change to an older
+ * session. Only a hit is cached: a spawn the daemon has scheduled may be published before its
+ * process has minted the uid, and remembering that absence would hide it forever.
+ */
+const sessionUidByTag = new Map<string, string>();
+function sessionUidOfTag(tag: string | undefined): string | undefined {
+  if (!tag) return undefined;
+  const cached = sessionUidByTag.get(tag);
+  if (cached) return cached;
+  const uid = readSessionUid(tag);
+  if (uid) sessionUidByTag.set(tag, uid);
+  return uid ?? undefined;
+}
 
 /** Time to wait for a spawned session to report via /session-started webhook before failing the spawn (Cursor cold start can exceed 30s). */
 const SESSION_WEBHOOK_TIMEOUT_MS = 60_000;
@@ -549,12 +568,17 @@ export async function startDaemon(): Promise<void> {
     };
 
     /** The deletion side of the same catalog: what readers reconcile against, not a second store. */
-    const getTombstones = (): Array<{ sessionId: string; tag?: string; at: number }> =>
-      Object.entries(archivedSessionIds).map(([sessionId, at]) => ({
-        sessionId,
-        ...(sessions[sessionId]?.sessionTag ? { tag: sessions[sessionId].sessionTag } : {}),
-        at,
-      }));
+    const getTombstones = (): Array<{ sessionId: string; tag?: string; sessionUid?: string; at: number }> =>
+      Object.entries(archivedSessionIds).map(([sessionId, at]) => {
+        const tag = sessions[sessionId]?.sessionTag;
+        const uid = sessionUidOfTag(tag);
+        return {
+          sessionId,
+          ...(tag ? { tag } : {}),
+          ...(uid !== undefined ? { sessionUid: uid } : {}),
+          at,
+        };
+      });
 
     /**
      * Fold a *complete* server list into the catalog, and drop imports the server no longer has.
@@ -690,10 +714,12 @@ export async function startDaemon(): Promise<void> {
         stoppedSessions.get(sessionId)?.generation ?? 0,
       );
       const generation = observedGeneration + 1;
+      const uid = sessionUidOfTag(tag);
       lifecycleLog.record({
         op: 'deleted',
         sessionId,
         ...(tag ? { tag } : {}),
+        ...(uid !== undefined ? { sessionUid: uid } : {}),
         lifecycle: 'archived',
         generation,
       });
@@ -963,9 +989,11 @@ export async function startDaemon(): Promise<void> {
           && entry.tag === s.sessionTag
           && entry.sessionId === s.happySessionId);
         if (s.sessionTag && !alreadyWritten) {
+          const uid = sessionUidOfTag(s.sessionTag);
           lifecycleLog.record({
             op: 'created',
             tag: s.sessionTag,
+            ...(uid !== undefined ? { sessionUid: uid } : {}),
             sessionId: s.happySessionId,
             directory: s.directory,
             agent: s.agent,
@@ -2423,8 +2451,18 @@ export async function startDaemon(): Promise<void> {
        * The projection beside the timestamp, when the caller has one. `restartingAt` alone still
        * answers the old question ("is it restarting?"); these say where the row stands and at
        * which generation, so a reader does not have to turn a timestamp back into a phase.
+       *
+       * The observed generation is not the wanted one: at the start of a restart the record still
+       * describes the process being replaced, and a failed attempt never realizes the new want.
+       * Saying the want had been observed would let this optimistic frame outrank the listing
+       * that later reports the failure.
        */
-      status?: { phase: SessionPhase; generation: number },
+      status?: {
+        phase: SessionPhase;
+        generation: number;
+        observedGeneration: number;
+        observedAt: number;
+      },
     ): void => {
       logger.debug(`[DAEMON RUN] ${startedAt === null ? 'Restart finished' : 'Restarting'}: ${sessionId}`);
       const body: UpdateSessionBody = {
@@ -2436,8 +2474,8 @@ export async function startDaemon(): Promise<void> {
           : {
               phase: status.phase,
               generation: status.generation,
-              observedGeneration: status.generation,
-              observedAt: Date.now(),
+              observedGeneration: status.observedGeneration,
+              observedAt: status.observedAt,
             }),
       };
       lanServer?.broadcast('update', {
@@ -2563,9 +2601,13 @@ export async function startDaemon(): Promise<void> {
       // creation they have seen.
       const restartRecord = sessions[sessionId];
       if (restartRecord?.sessionTag) {
+        // The lineage keeps its uid across a restart: it is the same tag and the same session
+        // process file, not a new name for a new conversation.
+        const uid = sessionUidOfTag(restartRecord.sessionTag);
         lifecycleLog.record({
           op: 'created',
           tag: restartRecord.sessionTag,
+          ...(uid !== undefined ? { sessionUid: uid } : {}),
           sessionId,
           ...(restartRecord.directory ? { directory: restartRecord.directory } : {}),
           ...(restartRecord.agent ? { agent: restartRecord.agent } : {}),
@@ -2575,9 +2617,16 @@ export async function startDaemon(): Promise<void> {
         announceLifecycle();
       }
       restartingStartedAt.set(sessionId, startedAt);
-      announceRestarting(sessionId, startedAt, { phase: 'Restarting', generation: nextGeneration });
-      // What the closing announcement says. A restart that failed never moved the record, so the
-      // phase it reports is the one the id was in before the attempt — not a new generation.
+      announceRestarting(sessionId, startedAt, {
+        phase: 'Restarting',
+        generation: nextGeneration,
+        // The record still holds the generation of the process being replaced; the new want is
+        // exactly what has not been observed yet.
+        observedGeneration: currentGeneration,
+        observedAt: startedAt,
+      });
+      // A restart that failed never moved the record, so its observation stays at
+      // `currentGeneration`; the want it was accepted at stays at `nextGeneration` either way.
       let succeeded = false;
       // The work runs either way; `mode` only decides whether the caller waits for the outcome
       // or for the acceptance. Starting it before the branch matters: a caller that asked to be
@@ -2632,9 +2681,22 @@ export async function startDaemon(): Promise<void> {
           // Called off once there is an answer, whatever the answer was: the new process is up and
           // has registered, or the restart did not happen. Either way nothing is in flight.
           restartingStartedAt.delete(sessionId);
+          const record = sessions[sessionId];
+          // The same timestamp the listing derives from the record, not the time this frame was
+          // built: a reader orders statements by (generation, observedGeneration, observedAt),
+          // and an announcement stamped "now" would outrank the listing that carries the same
+          // observation, keeping the optimistic frame alive after it stopped being true.
+          const observedAt = succeeded
+            ? record?.lastHeartbeat ?? Date.now()
+            : record?.exitTime ?? record?.updatedAt ?? record?.lastHeartbeat ?? Date.now();
           announceRestarting(sessionId, null, {
             phase: succeeded ? 'Running' : 'Stopped',
-            generation: succeeded ? nextGeneration : currentGeneration,
+            // The want stays where it was accepted. A failed restart does not roll the spec back:
+            // the next listing reports the same generation with the old observation, and the
+            // reconciler is what decides whether to try again.
+            generation: nextGeneration,
+            observedGeneration: succeeded ? nextGeneration : currentGeneration,
+            observedAt,
           });
         }
       })();
@@ -3245,16 +3307,21 @@ export async function startDaemon(): Promise<void> {
           const roster = mergeSessionRoster(summaries, sessions, archivedSessionIds);
           summaries.length = 0;
           summaries.push(...roster.map((summary): LanSessionSummary => {
+            // The lineage's public name rides with every row that has a tag, whichever store the
+            // row came from: a reader that keys a deletion by lineage needs it on the disk-only
+            // rows too, which are exactly the ones an App reads after a reboot.
+            const uid = summary.sessionUid ?? sessionUidOfTag(summary.tag);
+            const named = uid !== undefined ? { ...summary, sessionUid: uid } : summary;
             // The live rows above already carry a phase; a row that came only from disk has no
             // process behind it, so it is projected from the record and whatever restart is in
             // flight. Liveness is never inferred from the store here: `isAlive` stays the overlay's
             // answer, and the status is derived from the same facts.
             if (summary.phase !== undefined) {
-              return summary;
+              return named;
             }
             const restartingSince = restartingSinceOf(summary.happySessionId);
             return {
-              ...summary,
+              ...named,
               ...(restartingSince !== undefined ? { restartingSince } : {}),
               ...statusFor(summary.happySessionId, summary.tag, {
                 registered: false,
@@ -3270,14 +3337,17 @@ export async function startDaemon(): Promise<void> {
           const tracked = new Set(summaries.map(summary => summary.happySessionId));
           for (const [id, at] of restartingStartedAt) {
             if (now - at < RESTARTING_TTL_MS && !tracked.has(id)) {
+              const tag = sessions[id]?.sessionTag;
+              const uid = sessionUidOfTag(tag);
               summaries.push({
                 happySessionId: id,
+                ...(uid !== undefined ? { sessionUid: uid } : {}),
                 directory: '',
                 agent: '',
                 startedBy: 'daemon',
                 isAlive: false,
                 restartingSince: at,
-                ...statusFor(id, sessions[id]?.sessionTag, { restartingSince: at }),
+                ...statusFor(id, tag, { restartingSince: at }),
               });
             }
           }
@@ -3291,8 +3361,10 @@ export async function startDaemon(): Promise<void> {
           for (const spec of pendingSpawns.values()) {
             if (listedTags.has(spec.tag)) continue;
             if (spec.replacesSessionId !== undefined && listedIds.has(spec.replacesSessionId)) continue;
+            const uid = sessionUidOfTag(spec.tag);
             summaries.push({
               tag: spec.tag,
+              ...(uid !== undefined ? { sessionUid: uid } : {}),
               directory: spec.directory,
               agent: spec.agent,
               startedBy: 'daemon',
@@ -3913,11 +3985,13 @@ export async function startDaemon(): Promise<void> {
           specs.get(tag ?? sessionId)?.generation ?? 0,
           specs.get(sessionId)?.generation ?? 0,
         );
+        const uid = sessionUidOfTag(tag);
         lifecycleLog.record({
           op: 'deleted',
           sessionId,
           at,
           ...(tag ? { tag } : {}),
+          ...(uid !== undefined ? { sessionUid: uid } : {}),
           lifecycle: 'archived',
           generation: observedGeneration + 1,
         });

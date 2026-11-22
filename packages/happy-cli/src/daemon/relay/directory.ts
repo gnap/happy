@@ -32,6 +32,9 @@ export type DirectorySession = Pick<
   LanSessionSummary,
   | 'happySessionId'
   | 'tag'
+  // The lineage's public name, small and stable: a directory reader can follow a session across
+  // the server id changing, and a deletion it records stays a deletion of the same conversation.
+  | 'sessionUid'
   | 'isAlive'
   | 'origin'
   | 'restartingSince'
@@ -63,6 +66,7 @@ export function directoryRows(summaries: readonly LanSessionSummary[]): Director
     rows.push({
       ...(summary.happySessionId === undefined ? {} : { happySessionId: summary.happySessionId }),
       ...(summary.tag === undefined ? {} : { tag: summary.tag }),
+      ...(summary.sessionUid === undefined ? {} : { sessionUid: summary.sessionUid }),
       isAlive: summary.isAlive,
       ...(summary.origin === undefined ? {} : { origin: summary.origin }),
       ...(summary.restartingSince === undefined ? {} : { restartingSince: summary.restartingSince }),

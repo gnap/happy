@@ -122,6 +122,15 @@ type DirectorySession = {
     happySessionId?: string;
     /** The CLI's own tag, for a session the server has not named yet. */
     tag?: string;
+    /**
+     * The lineage's public name, minted by the CLI per tag.
+     *
+     * Relayed as an opaque string, like the phase: it lets an App keep one conversation's row
+     * together across a server id change, and a deletion recorded against it mean the lineage
+     * rather than one id. An older daemon sends none, which is simply a row the reader keys the
+     * older way.
+     */
+    sessionUid?: string;
     isAlive: boolean;
     /** Which machine the row is about: this one, or the daemon's import of the server's record. */
     origin?: 'daemon' | 'server';
@@ -199,10 +208,11 @@ function divergence(entry: unknown): DirectorySession['divergence'] {
 
 function directorySession(entry: unknown): DirectorySession | null {
     if (!entry || typeof entry !== 'object') return null;
-    const session = entry as { happySessionId?: unknown; tag?: unknown; isAlive?: unknown; origin?: unknown; restartingSince?: unknown; phase?: unknown; generation?: unknown; observedGeneration?: unknown; observedAt?: unknown; reason?: unknown; desiredLifecycle?: unknown; divergence?: unknown };
+    const session = entry as { happySessionId?: unknown; tag?: unknown; sessionUid?: unknown; isAlive?: unknown; origin?: unknown; restartingSince?: unknown; phase?: unknown; generation?: unknown; observedGeneration?: unknown; observedAt?: unknown; reason?: unknown; desiredLifecycle?: unknown; divergence?: unknown };
     const row: DirectorySession = { isAlive: session.isAlive === true };
     if (typeof session.happySessionId === 'string') row.happySessionId = session.happySessionId;
     if (typeof session.tag === 'string') row.tag = session.tag;
+    if (typeof session.sessionUid === 'string') row.sessionUid = session.sessionUid;
     if (row.happySessionId === undefined && row.tag === undefined) return null;
     if (session.origin === 'daemon' || session.origin === 'server') row.origin = session.origin;
     if (typeof session.restartingSince === 'number') row.restartingSince = session.restartingSince;

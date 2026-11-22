@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { configuration, serverHttpsAgent } from '@/configuration';
 import { encrypt, encodeBase64 } from '@/api/encryption';
 import { readCredentials, readDaemonState } from '@/persistence';
+import { sendA2aOverPeerSocket } from './peerSocket';
 
 type SendA2AOptions = {
   title?: string;
@@ -64,7 +65,28 @@ function buildA2ATriggerText(title: string | undefined, text: string): string {
   return `${heading} 1. ${summaryTitle}: ${summary}`;
 }
 
-export async function sendA2aMessage(sessionId: string, text: string, options: SendA2AOptions = {}): Promise<{ success: boolean; error?: string; messageId?: string; seq?: number }> {
+/**
+ * Send an A2A message to a session: native peer socket when this machine has one, server
+ * injection otherwise.
+ *
+ * The two paths differ in more than transport. The socket makes the text a peer turn in the
+ * live Claude process, which is what another Claude session would have produced; the server
+ * path is the older mechanism that writes an inbox snapshot and asks the CLI to open a turn.
+ * The fallback stays because cloud sessions, non-Claude agents, sandboxed sessions, and Claude
+ * versions without an inbox socket still need a way to receive A2A.
+ */
+export async function sendA2aMessage(sessionId: string, text: string, options: SendA2AOptions = {}): Promise<{ success: boolean; error?: string; messageId?: string; seq?: number; transport?: 'peer-socket' | 'server' }> {
+  // A live Claude session on this machine has a peer inbox. Delivering there is the native path:
+  // the text becomes a peer turn in that session and everything else (streaming, permissions,
+  // history) is the session's own. It also needs no credentials and no server round-trip.
+  try {
+    if (await sendA2aOverPeerSocket(sessionId, text)) {
+      return { success: true, transport: 'peer-socket' };
+    }
+  } catch {
+    // The socket path is best-effort. Falling through keeps every target reachable.
+  }
+
   const credentials = await readCredentials();
   if (!credentials) {
     return { success: false, error: 'No CLI credentials found' };
@@ -141,5 +163,6 @@ export async function sendA2aMessage(sessionId: string, text: string, options: S
     success: true,
     messageId: message?.id,
     seq: message?.seq,
+    transport: 'server',
   };
 }
