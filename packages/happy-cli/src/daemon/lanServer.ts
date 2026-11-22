@@ -74,6 +74,20 @@ export type LanSessionSummary = {
    * all — there would be no way for a reader to ask for it.
    */
   tag?: string;
+  /**
+   * The lineage's public name: an opaque, write-once id the CLI mints per tag and the App stores
+   * beside the server's id.
+   *
+   * The tag is this machine's private name and is never published; the uid is the name a reader
+   * may keep. It does not change when the server issues a new session id, so a reader can follow
+   * one conversation across that — and a deletion recorded against it stays a deletion of the
+   * same lineage.
+   *
+   * Absent when this machine has never minted one for the tag (a spawn that has not started its
+   * process yet, or a session from a CLI that predates the uid). A reader that sees no uid simply
+   * keys the row the way it did before.
+   */
+  sessionUid?: string;
   directory: string;
   agent: string;
   startedBy: string;

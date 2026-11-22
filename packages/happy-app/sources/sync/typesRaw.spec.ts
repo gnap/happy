@@ -1652,6 +1652,28 @@ describe('Zod Transform - WOLOG Content Normalization', () => {
             expect(normalized).toBeNull();
         });
 
+        it('renders a peer message even when the send flag is off, and marks its origin', () => {
+            const normalized = normalizeRawMessage('db-peer-message-1', null, 1, {
+                role: 'session',
+                content: {
+                    id: 'env-peer-message-1',
+                    time: 1,
+                    role: 'user',
+                    origin: 'peer',
+                    peerFrom: 'happy-cli',
+                    ev: { t: 'text', text: 'run the tests' }
+                },
+                meta: { sentFrom: 'cli' }
+            } as any);
+
+            expect(normalized).toBeTruthy();
+            expect(normalized?.role).toBe('user');
+            if (normalized && normalized.role === 'user') {
+                expect(normalized.content).toEqual({ type: 'text', text: 'run the tests' });
+                expect(normalized.meta).toMatchObject({ origin: 'peer', peerFrom: 'happy-cli' });
+            }
+        });
+
         it('uses modern user session envelopes for user content when send flag is enabled', () => {
             process.env.ENABLE_SESSION_PROTOCOL_SEND = 'true';
 

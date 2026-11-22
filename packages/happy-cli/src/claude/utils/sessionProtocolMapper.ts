@@ -58,6 +58,61 @@ function pickProviderSubagent(message: RawJSONLines): string | undefined {
     return undefined;
 }
 
+/**
+ * A message another Claude session delivered over its inbox socket.
+ *
+ * Claude Code stores these as synthetic user turns (`origin.kind === 'peer'`) that carry a fixed
+ * framing paragraph. The framing is addressed to the model, not to the person reading the App, so
+ * the mapped envelope keeps the sender and drops the wrapper.
+ */
+function peerOriginOf(message: RawJSONLines): { from?: string } | null {
+    const raw = message as {
+        origin?: { kind?: unknown; from?: unknown };
+        message?: { origin?: { kind?: unknown; from?: unknown } };
+    };
+    const origin = raw.origin ?? raw.message?.origin;
+    if (!origin || origin.kind !== 'peer') {
+        return null;
+    }
+    return { from: typeof origin.from === 'string' && origin.from.length > 0 ? origin.from : undefined };
+}
+
+const PEER_MESSAGE_PREFIX = 'Another Claude session sent a message:';
+const PEER_SAFETY_MARKER = 'This came from another Claude session';
+
+function peerVisibleText(content: string): string {
+    let text = content;
+    if (text.startsWith(PEER_MESSAGE_PREFIX)) {
+        text = text.slice(PEER_MESSAGE_PREFIX.length);
+        if (text.startsWith('\n')) {
+            text = text.slice(1);
+        }
+    }
+    const safety = text.indexOf(PEER_SAFETY_MARKER);
+    if (safety >= 0) {
+        text = text.slice(0, safety);
+    }
+    return text.trim();
+}
+
+function emitPeerUserMessage(
+    peer: { from?: string },
+    state: ClaudeSessionProtocolState,
+    envelopes: SessionEnvelope[],
+    text: string,
+): void {
+    if (!text) {
+        return;
+    }
+    closeTurn(state, 'completed', envelopes);
+    envelopes.push(createEnvelope('user', { t: 'text', text }, {
+        meta: {
+            origin: 'peer',
+            ...(peer.from ? { peerFrom: peer.from } : {}),
+        },
+    }));
+}
+
 function getUuidToProviderSubagent(state: ClaudeSessionProtocolState): Map<string, string> {
     if (!state.uuidToProviderSubagent) {
         state.uuidToProviderSubagent = new Map<string, string>();
@@ -857,8 +912,13 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
 
     if (message.type === 'user') {
         const taskCallId = subagent ? getTaskCallBySubagent(state).get(subagent) : undefined;
+        const peer = peerOriginOf(message);
         if (typeof message.message.content === 'string') {
-            if (message.isSidechain) {
+            if (peer) {
+                // A peer message is a user turn that the App did not type. It is synthetic, so it
+                // has to be handled before the meta/synthetic suppression below to stay visible.
+                emitPeerUserMessage(peer, state, envelopes, peerVisibleText(message.message.content));
+            } else if (message.isSidechain) {
                 // Don't emit the sub-agent prompt as a visible text bubble in the
                 // main conversation.  The prompt is internal metadata for the
                 // delegation — the user shouldn't see it as a standalone message.
@@ -898,6 +958,21 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
 
         const blocks = Array.isArray(message.message.content) ? message.message.content : [];
         if (blocks.length === 0) {
+            return {
+                currentTurnId: state.currentTurnId,
+                envelopes,
+            };
+        }
+
+        if (peer) {
+            // Peer text can arrive as content blocks too; keep it visible while dropping any
+            // non-text blocks the peer protocol does not carry to the App.
+            const text = blocks
+                .filter((block): block is { type: 'text'; text: string } =>
+                    block.type === 'text' && typeof (block as { text?: unknown }).text === 'string')
+                .map((block) => block.text)
+                .join('\n');
+            emitPeerUserMessage(peer, state, envelopes, peerVisibleText(text));
             return {
                 currentTurnId: state.currentTurnId,
                 envelopes,

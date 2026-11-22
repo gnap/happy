@@ -316,6 +316,7 @@ export const zhHant: TranslationStructure = {
 
     session: {
         inputPlaceholder: '輸入訊息...',
+        peerMessage: '來自另一個 Claude 工作階段',
         encrypting: '正在建立連線…',
         backgroundTasks: '後台任務',
         activityScheduled: '定時任務',

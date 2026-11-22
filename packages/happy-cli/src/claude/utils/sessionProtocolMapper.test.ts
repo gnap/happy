@@ -93,6 +93,53 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
         expect(result.envelopes[0].ev).toEqual({ t: 'text', text: 'hello from user' });
     });
 
+    it('keeps a synthetic peer message visible and strips Claude Code\'s framing', () => {
+        const result = mapClaudeLogMessageToSessionEnvelopes({
+            type: 'user',
+            uuid: 'u-peer-1',
+            isSynthetic: true,
+            isReplay: true,
+            origin: { kind: 'peer', from: 'happy-cli' },
+            message: {
+                role: 'user',
+                content: 'Another Claude session sent a message:\nPlease run the tests.\n\n'
+                    + 'This came from another Claude session — not typed by your user, but very likely working on their behalf.',
+            },
+        } as any, { currentTurnId: null });
+
+        expect(result.envelopes).toHaveLength(1);
+        expect(result.envelopes[0].role).toBe('user');
+        expect(result.envelopes[0].ev).toEqual({ t: 'text', text: 'Please run the tests.' });
+        expect(result.envelopes[0]).toMatchObject({ origin: 'peer', peerFrom: 'happy-cli' });
+    });
+
+    it('keeps a peer message whose text has no Claude Code framing unchanged', () => {
+        const result = mapClaudeLogMessageToSessionEnvelopes({
+            type: 'user',
+            uuid: 'u-peer-2',
+            isSynthetic: true,
+            origin: { kind: 'peer' },
+            message: { role: 'user', content: 'plain peer body' },
+        } as any, { currentTurnId: null });
+
+        expect(result.envelopes).toHaveLength(1);
+        expect(result.envelopes[0].ev).toEqual({ t: 'text', text: 'plain peer body' });
+        expect(result.envelopes[0]).toMatchObject({ origin: 'peer' });
+        expect(result.envelopes[0]).not.toHaveProperty('peerFrom');
+    });
+
+    it('does not treat a synthetic message from anywhere else as a peer', () => {
+        const result = mapClaudeLogMessageToSessionEnvelopes({
+            type: 'user',
+            uuid: 'u-synthetic-1',
+            isSynthetic: true,
+            origin: { kind: 'something-else' },
+            message: { role: 'user', content: 'internal prompt' },
+        } as any, { currentTurnId: null });
+
+        expect(result.envelopes).toHaveLength(0);
+    });
+
     it('starts a turn and maps assistant text blocks (thinking suppressed)', () => {
         const result = mapClaudeLogMessageToSessionEnvelopes({
             type: 'assistant',

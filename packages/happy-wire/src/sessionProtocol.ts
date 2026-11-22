@@ -202,6 +202,16 @@ export const sessionEnvelopeSchema = z
      * the same call repeats the same input/cache numbers.
      */
     usage: sessionInferenceUsageSchema.optional(),
+    /**
+     * Why a user-role envelope exists, when it was not typed by the person using the App.
+     * `'peer'` marks a message another Claude session delivered into this one; `'auto-continuation'`
+     * marks a cron/loop wakeup. Absent means an ordinary user turn.
+     */
+    origin: z.string().optional(),
+    /** Sender identity for `origin: 'peer'`, as Claude Code recorded it. */
+    peerFrom: z.string().optional(),
+    /** Cron id for `origin: 'auto-continuation'`. */
+    cronId: z.string().optional(),
     ev: sessionEventSchema,
   })
   .superRefine((envelope, ctx) => {

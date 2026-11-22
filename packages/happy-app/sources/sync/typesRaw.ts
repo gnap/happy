@@ -268,6 +268,10 @@ const sessionEnvelopeSchema = z.object({
      * main-thread inference; turn-end later carries the authoritative rollup.
      */
     usage: sessionUsagePayloadSchema.optional(),
+    /** Why a user envelope exists when the App's user did not type it. See happy-wire. */
+    origin: z.string().optional(),
+    /** Sender identity for `origin: 'peer'`. */
+    peerFrom: z.string().optional(),
     ev: sessionEventSchema,
 }).passthrough().superRefine((envelope, ctx) => {
     if (envelope.ev.t === 'service' && envelope.role !== 'agent') {
@@ -909,9 +913,19 @@ function normalizeSessionEnvelopeContent(
 
     if (envelope.ev.t === 'text') {
         if (envelope.role === 'user') {
-            if (!isSessionProtocolSendEnabled()) {
+            // Peer messages are produced by the CLI, never echoed from an App send, so they are
+            // visible even when the session-protocol send flag is off.
+            const isPeer = envelope.origin === 'peer';
+            if (!isPeer && !isSessionProtocolSendEnabled()) {
                 return null;
             }
+            const userMeta = isPeer
+                ? {
+                    ...(meta ?? {}),
+                    origin: 'peer' as const,
+                    ...(envelope.peerFrom ? { peerFrom: envelope.peerFrom } : {}),
+                }
+                : meta;
             return {
                 id: messageId,
                 localId,
@@ -922,7 +936,7 @@ function normalizeSessionEnvelopeContent(
                     type: 'text',
                     text: envelope.ev.text
                 },
-                meta
+                meta: userMeta
             } satisfies NormalizedMessage;
         }
 

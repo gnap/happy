@@ -53,6 +53,15 @@ export type LifecycleCreatedEntry = {
     op: 'created';
     /** The CLI's own name for the session, which exists before the server has issued anything. */
     tag: string;
+    /**
+     * The lineage's public name for the tag.
+     *
+     * Additive: readers key entries by the tag or the session id and ignore this, but a reader
+     * that keeps a deletion of its own can record it against the lineage instead of one server id.
+     * Absent on entries written before the uid existed, and for a spawn whose process has not
+     * minted one yet.
+     */
+    sessionUid?: string;
     /** The server's session id, once there is one. */
     sessionId?: string;
     directory?: string;
@@ -92,6 +101,8 @@ export type LifecycleDeletedEntry = {
     at: number;
     op: 'deleted';
     tag?: string;
+    /** The lineage's public name, when the tag that produced this deletion is known. */
+    sessionUid?: string;
     sessionId?: string;
     directory?: string;
     agent?: string;
@@ -126,9 +137,9 @@ export type LifecycleEntry = LifecycleSessionEntry | LifecycleReachableEntry;
  * App delete a session this machine's snapshot no longer holds.
  */
 export type LifecycleFactInput =
-    | { op: 'created'; tag: string; sessionId?: string; directory?: string; agent?: string; lifecycle?: 'running'; generation?: number; at?: number }
-    | { op: 'deleted'; tag: string; sessionId?: string; directory?: string; agent?: string; lifecycle?: 'archived'; generation?: number; at?: number }
-    | { op: 'deleted'; tag?: string; sessionId: string; directory?: string; agent?: string; lifecycle?: 'archived'; generation?: number; at?: number };
+    | { op: 'created'; tag: string; sessionUid?: string; sessionId?: string; directory?: string; agent?: string; lifecycle?: 'running'; generation?: number; at?: number }
+    | { op: 'deleted'; tag: string; sessionUid?: string; sessionId?: string; directory?: string; agent?: string; lifecycle?: 'archived'; generation?: number; at?: number }
+    | { op: 'deleted'; tag?: string; sessionUid?: string; sessionId: string; directory?: string; agent?: string; lifecycle?: 'archived'; generation?: number; at?: number };
 
 const asEntry = (line: string): LifecycleEntry | null => {
     try {

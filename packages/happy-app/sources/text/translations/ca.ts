@@ -315,6 +315,7 @@ export const ca: TranslationStructure = {
 
     session: {
         inputPlaceholder: 'Escriu un missatge...',
+        peerMessage: "D'una altra sessió de Claude",
         encrypting: 'establint connexió…',
         backgroundTasks: 'Tasques en segon pla',
         activityScheduled: 'Programat',

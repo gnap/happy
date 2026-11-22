@@ -372,6 +372,24 @@ export function saveDeletedSessions(deletions: Record<string, number>) {
 }
 
 /**
+ * Deletions remembered against a lineage rather than one server id.
+ *
+ * A server id is the name a deletion is usually recorded under, but it is not the only one a row
+ * can come back with: a session that is resumed under a new id is the same conversation, and the
+ * person's deletion of it still holds. The uid is the name that survives that, so it is kept
+ * beside the id map — not instead of it, because a machine that predates the uid publishes none.
+ *
+ * Absent for every install that has never seen a uid, which is simply an empty map.
+ */
+export function loadDeletedSessionUids(): Record<string, number> {
+    return loadSessionMap<number>('session-deletion-uids', 'deleted session uids');
+}
+
+export function saveDeletedSessionUids(deletions: Record<string, number>) {
+    saveSessionMap('session-deletion-uids', deletions);
+}
+
+/**
  * A deletion this device has asked for but the owning machine has not recorded yet.
  *
  * `deletedSessions` above is the *result*: the row is gone and stays gone. This is the intent

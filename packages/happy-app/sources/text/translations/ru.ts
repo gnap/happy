@@ -439,6 +439,7 @@ export const ru: TranslationStructure = {
 
     session: {
         inputPlaceholder: 'Введите сообщение...',
+        peerMessage: 'От другой сессии Claude',
         encrypting: 'установка соединения…',
         backgroundTasks: 'Фоновые задачи',
         activityScheduled: 'Запланировано',
