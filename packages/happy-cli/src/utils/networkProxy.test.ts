@@ -57,6 +57,18 @@ describe('profileEnvChanged', () => {
         expect(profileEnvChanged(applied, message)).toBe(false);
     });
 
+    it('ignores the routing directives the policy consumes', () => {
+        // A profile that names a route repeats that name on every message; the applied environment
+        // has it stripped. Counting it as a change replaced the live process at every turn.
+        const applied = { CLAUDE_CODE_OAUTH_TOKEN: 't', TZ: 'America/Los_Angeles' };
+        const message = {
+            ...applied,
+            HAPPY_PROXY_ROUTE: 'Luo Yang Anthropic',
+            HAPPY_PROXY_ONLY: 'api.deepseek.com',
+        };
+        expect(profileEnvChanged(applied, message)).toBe(false);
+    });
+
     it('still notices a value or key the agent can see', () => {
         expect(profileEnvChanged({ A: '1' }, { A: '2' })).toBe(true);
         expect(profileEnvChanged({ A: '1' }, { A: '1', B: '2' })).toBe(true);
@@ -177,6 +189,21 @@ describe('applyNetworkProxyPolicy', () => {
         expect(process.env.HTTPS_PROXY).toBeUndefined();
         expect(process.env.HTTP_PROXY).toBeUndefined();
         expect(notify).not.toHaveBeenCalled();
+    });
+
+    it('reads a route entry written in the scoped form', () => {
+        const home = mkdtempSync(join(tmpdir(), 'happy-route-'));
+        writeFileSync(join(home, 'proxy-routes.json'), JSON.stringify({
+            personal: { port: 57999, only: ['api.test'] },
+        }));
+        process.env.HAPPY_HOME_DIR = home;
+
+        const policy = applyNetworkProxyPolicy({ HAPPY_PROXY_ROUTE: 'personal' });
+
+        // The session and the daemon must understand the same file, or the listener runs while the
+        // agent is told the route does not exist.
+        expect(policy.registration).toBeNull();
+        expect(process.env.ALL_PROXY).toBe('http://127.0.0.1:57999');
     });
 
     it('refuses a named route this machine does not serve', () => {

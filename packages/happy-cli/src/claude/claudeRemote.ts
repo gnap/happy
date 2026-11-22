@@ -33,12 +33,36 @@ function sessionKeyOf(opts: ClaudeSessionOpts): string {
     return opts.processKey ?? opts.sessionId ?? opts.path;
 }
 
+/**
+ * The args that decide which process this is — with the flags that are only used once removed.
+ *
+ * `--resume` and `--continue` are consumed after the first spawn: the session they pointed at is
+ * open, and a later spawn deliberately does not name it again. Counting them here made the live
+ * process look different from what the next turn needs, so every session replaced its process
+ * once, for a flag that had already done its job.
+ */
+export function stableArgs(args: string[] | undefined): string[] {
+    if (!args) return [];
+    const kept: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+        const arg = args[i];
+        if (arg === '--continue') continue;
+        if (arg === '--resume') {
+            const next = args[i + 1];
+            if (next !== undefined && !next.startsWith('-')) i++;
+            continue;
+        }
+        kept.push(arg);
+    }
+    return kept;
+}
+
 /** What a process is spawned with, so a change to any of it means a new process rather than a reuse. */
 function spawnKeyOf(opts: ClaudeSessionOpts): string {
     return JSON.stringify([
         sessionKeyOf(opts),
         opts.path,
-        opts.claudeArgs ?? [],
+        stableArgs(opts.claudeArgs),
         opts.claudeEnvVarsGeneration,
     ]);
 }

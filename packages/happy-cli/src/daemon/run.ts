@@ -1169,6 +1169,12 @@ export async function startDaemon(): Promise<void> {
         extraEnv = expandEnvironmentVariables(extraEnv, process.env);
         logger.debug(`[DAEMON RUN] After variable expansion: ${Object.keys(extraEnv).join(', ')}`);
 
+        // Which of this environment came from the profile, by name only. The session needs it to
+        // know what its spawn-time baseline is: without it the baseline looks like just the
+        // provider variables, the first message "discovers" the rest, and the conversation pays a
+        // process replacement for values the process already had.
+        extraEnv.HAPPY_PROFILE_ENV_KEYS = Object.keys(profileEnv).join(',');
+
         // One loopback proxy URL per session process, minted even when no profile names a hop
         // yet: a profile can switch to one on a later message, and the process must already know
         // where its proxy is by then. The token is the only thing that ties a request back to

@@ -21,9 +21,9 @@
  * removed and nothing is put in their place. An agent that fell back to dialling the hop directly
  * would be sending traffic from the wrong address, which is exactly what the profile chose against.
  */
-import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { logger } from '@/ui/logger';
+import { loadLocalRoutes } from '@/daemon/proxy/routes';
 import { notifyDaemonNetworkProxy } from '@/daemon/controlClient';
 import { expandEnvironmentVariables } from '@/utils/expandEnvVars';
 import { configuration } from '@/configuration';
@@ -293,6 +293,21 @@ export function stripNetworkProxyKeys(env: Record<string, string>): Record<strin
 }
 
 /**
+ * Removes the directives the policy consumes before the agent ever sees them.
+ *
+ * `HAPPY_PROXY_ROUTE` and `HAPPY_PROXY_ONLY` are instructions to this process, not settings for
+ * the agent: the policy strips them on the way in. Comparing them would make every message that
+ * repeats the profile look like a change, and the launcher would replace the live process at the
+ * start of every turn.
+ */
+function withoutPolicyKeys(env: Record<string, string>): Record<string, string> {
+    const copy = { ...env };
+    delete copy[ROUTE_ENV];
+    delete copy[ONLY_ENV];
+    return copy;
+}
+
+/**
  * Whether a profile's environment changed in a way the agent process can see.
  *
  * Proxy keys are excluded on purpose. They never reach the agent — the policy replaces them with
@@ -301,8 +316,8 @@ export function stripNetworkProxyKeys(env: Record<string, string>): Record<strin
  * applied environment has it stripped, and the comparison kept respawning the agent every turn.
  */
 export function profileEnvChanged(current: Record<string, string>, next: Record<string, string>): boolean {
-    const left = stripNetworkProxyKeys(current);
-    const right = stripNetworkProxyKeys(next);
+    const left = withoutPolicyKeys(stripNetworkProxyKeys(current));
+    const right = withoutPolicyKeys(stripNetworkProxyKeys(next));
     const leftKeys = Object.keys(left).filter((key) => left[key] !== undefined).sort();
     const rightKeys = Object.keys(right).filter((key) => right[key] !== undefined).sort();
     if (leftKeys.length !== rightKeys.length) return true;
@@ -382,14 +397,11 @@ function routeScope(profileEnv: Record<string, string>): string[] {
 }
 
 function readRoutePort(name: string): number | null {
-    try {
-        const home = process.env.HAPPY_HOME_DIR ?? configuration.happyHomeDir;
-        const parsed = JSON.parse(readFileSync(join(home, 'proxy-routes.json'), 'utf8')) as Record<string, unknown>;
-        const port = Number(parsed[name]);
-        return Number.isInteger(port) && port > 0 && port < 65536 ? port : null;
-    } catch {
-        return null;
-    }
+    const home = process.env.HAPPY_HOME_DIR ?? configuration.happyHomeDir;
+    // The daemon's own loader, so the session and the listener understand the same file: a bare
+    // port, or the object form that also names the hosts the route covers.
+    const route = loadLocalRoutes(join(home, 'proxy-routes.json')).find((entry) => entry.name === name);
+    return route ? route.port : null;
 }
 
 function localProxyUrl(): string | null {

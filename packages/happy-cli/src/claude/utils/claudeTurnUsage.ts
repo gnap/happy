@@ -52,6 +52,19 @@ export interface ClaudeLastInferenceUsage {
     };
 }
 
+/**
+ * A model name without its `[...]` opt-in suffix.
+ *
+ * Claude Code spells an opt-in model both ways — the configured `deepseek-flash[1m]` and the bare
+ * `deepseek-flash` — and the provider echoes only the bare name in assistant messages. The two
+ * spellings are separate `modelUsage` entries with different windows (1M for the opt-in one, the
+ * catalog's 200K default for the bare one), so an exact match on the echoed name can land on the
+ * wrong sibling.
+ */
+function modelBaseName(name: string): string {
+    return name.replace(/\[[^\]]*\]$/, '');
+}
+
 function pickPrimaryModel(
     modelUsage: SDKResultMessage['modelUsage'],
     preferred?: string,
@@ -60,9 +73,22 @@ function pickPrimaryModel(
     const entries = Object.entries(modelUsage);
     if (entries.length === 0) return null;
     // The model that actually produced the last inference is the one whose contextWindow applies.
+    // Resolve it by base name, not by exact spelling: the assistant message names the bare model,
+    // so matching exactly would pick the sibling without the opt-in and report its 200K default
+    // even though the turn ran on `[1m]`. Among one model's spellings the largest window is the
+    // one the session declared; an exact match still wins a tie.
     if (preferred) {
-        const exact = entries.find(([name]) => name === preferred);
-        if (exact) return { name: exact[0], entry: exact[1] };
+        const base = modelBaseName(preferred);
+        const siblings = entries.filter(([name]) => modelBaseName(name) === base);
+        if (siblings.length > 0) {
+            const [name, entry] = siblings.reduce((best, current) => {
+                const bestWindow = best[1].contextWindow ?? 0;
+                const currentWindow = current[1].contextWindow ?? 0;
+                if (currentWindow !== bestWindow) return currentWindow > bestWindow ? current : best;
+                return best[0] === preferred || current[0] !== preferred ? best : current;
+            });
+            return { name, entry };
+        }
     }
     // Otherwise (e.g. an operator-chosen proxy model code that doesn't match the provider's
     // model name) fall back to the model with the most prompt tokens — that's the one whose
