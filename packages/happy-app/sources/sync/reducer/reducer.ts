@@ -266,6 +266,24 @@ export type ReducerResult = {
     hasReadyEvent?: boolean;
 };
 
+/**
+ * The tool input a completed permission describes.
+ *
+ * A completed AskUserQuestion no longer repeats its form in `arguments`: the permission response
+ * — the answer — already carries `{ questions, answers }` in `updatedInput`, and both copies used
+ * to travel in every agentState push. Readers that still need the form get it from there.
+ */
+function completedPermissionInput(completed: { arguments?: unknown; updatedInput?: unknown }): unknown {
+    if (completed.arguments !== undefined && completed.arguments !== null) {
+        return completed.arguments;
+    }
+    const updated = completed.updatedInput;
+    if (updated && typeof updated === 'object' && Array.isArray((updated as Record<string, unknown>).questions)) {
+        return { questions: (updated as Record<string, unknown>).questions };
+    }
+    return undefined;
+}
+
 export function reducer(state: ReducerState, messages: NormalizedMessage[], agentState?: AgentState | null): ReducerResult {
     if (ENABLE_LOGGING) {
         console.log(`[REDUCER] Called with ${messages.length} messages, agentState: ${agentState ? 'YES' : 'NO'}`);
@@ -681,7 +699,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         // Update stored permission
                         state.permissions.set(permId, {
                             tool: completed.tool,
-                            arguments: completed.arguments,
+                            arguments: completedPermissionInput(completed),
                             createdAt: completed.createdAt || Date.now(),
                             completedAt: completed.completedAt || undefined,
                             status: completed.status,
@@ -704,7 +722,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         // Store permission for when tool arrives in Phase 2
                         state.permissions.set(permId, {
                             tool: completed.tool,
-                            arguments: completed.arguments,
+                            arguments: completedPermissionInput(completed),
                             createdAt: completed.createdAt || Date.now(),
                             completedAt: completed.completedAt || undefined,
                             status: completed.status,
@@ -724,7 +742,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                     let toolCall: ToolCall = {
                         name: completed.tool,
                         state: completed.status === 'approved' ? 'completed' : 'error',
-                        input: completed.arguments,
+                        input: completedPermissionInput(completed),
                         createdAt: completed.createdAt || Date.now(),
                         startedAt: null,
                         completedAt: completed.completedAt || Date.now(),
@@ -759,7 +777,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                     // Store permission details
                     state.permissions.set(permId, {
                         tool: completed.tool,
-                        arguments: completed.arguments,
+                        arguments: completedPermissionInput(completed),
                         createdAt: completed.createdAt || Date.now(),
                         completedAt: completed.completedAt || undefined,
                         status: completed.status,

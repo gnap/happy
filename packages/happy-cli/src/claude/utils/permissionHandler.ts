@@ -36,6 +36,26 @@ interface PendingRequest {
     input: unknown;
 }
 
+/**
+ * A finished AskUserQuestion already carries its form in the answer.
+ *
+ * The permission response (`updatedInput`) is `{ questions, answers }`, so a completed entry that
+ * also repeats the full form in `arguments` stores every answered question twice — and agentState
+ * is pushed whole on every update. The form is kept when there is no answer to read it from
+ * (canceled/denied): there it is the only record of what was asked.
+ */
+function dropRepeatedQuestionForm<T extends { tool: string; arguments?: unknown; updatedInput?: unknown }>(entry: T): T {
+    if (entry.tool !== 'AskUserQuestion' && entry.tool !== 'ask_user_question') {
+        return entry;
+    }
+    const updated = entry.updatedInput;
+    if (!updated || typeof updated !== 'object' || !Array.isArray((updated as Record<string, unknown>).questions)) {
+        return entry;
+    }
+    const { arguments: _form, ...rest } = entry;
+    return rest as T;
+}
+
 export class PermissionHandler {
     private toolCalls: { id: string, name: string, input: any, used: boolean }[] = [];
     private responses = new Map<string, PermissionResponse>();
@@ -125,13 +145,13 @@ export class PermissionHandler {
                 const request = requests[id];
                 if (!request) continue;
                 delete requests[id];
-                completed[id] = {
+                completed[id] = dropRepeatedQuestionForm({
                     ...request,
                     completedAt: Date.now(),
                     status: 'approved' as const,
                     reason: 'Auto-approved by permission mode change',
                     mode,
-                };
+                });
             }
             return {
                 ...currentState,
@@ -492,12 +512,12 @@ export class PermissionHandler {
                         reason: 'Session switched to local mode',
                     }),
                 );
-                completedEntries.push([id, {
+                completedEntries.push([id, dropRepeatedQuestionForm({
                     ...request,
                     completedAt: Date.now(),
                     status: 'canceled' as const,
                     reason: 'Session switched to local mode',
-                }]);
+                })]);
             }
 
             return {
@@ -549,7 +569,7 @@ export class PermissionHandler {
                 if (!request) return currentState;
                 let r = { ...currentState.requests };
                 delete r[id];
-                const entries = Object.entries({ ...currentState.completedRequests, [id]: {
+                const entries = Object.entries({ ...currentState.completedRequests, [id]: dropRepeatedQuestionForm({
                     ...request,
                     completedAt: Date.now(),
                     status: message.approved ? 'approved' as const : 'denied' as const,
@@ -557,7 +577,7 @@ export class PermissionHandler {
                     mode: message.mode,
                     allowTools: message.allowTools,
                     updatedInput: message.updatedInput,
-                } }).slice(-20);
+                }) }).slice(-20);
                 return {
                     ...currentState,
                     requests: r,

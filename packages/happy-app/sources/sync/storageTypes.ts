@@ -99,7 +99,8 @@ export const AgentStateSchema = z.object({
     })).nullish(),
     completedRequests: z.record(z.string(), z.object({
         tool: z.string(),
-        arguments: z.any(),
+        /** A completed AskUserQuestion carries its questions in `updatedInput` instead. */
+        arguments: z.any().optional(),
         createdAt: z.number().nullish(),
         completedAt: z.number().nullish(),
         status: z.enum(['canceled', 'denied', 'approved']),
