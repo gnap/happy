@@ -408,7 +408,7 @@ export type LanSessionList = {
      * Sessions the daemon has archived. A reader applies these as deletions; the server's own
      * copy may lag until the daemon's replay reaches it.
      */
-    tombstones?: Array<{ sessionId: string; tag?: string; at: number }>;
+    tombstones?: Array<{ sessionId: string; tag?: string; sessionUid?: string; at: number }>;
 };
 
 export async function fetchSessions(baseUrl: string, token: string): Promise<LanSessionList> {
@@ -426,12 +426,13 @@ export async function fetchSessions(baseUrl: string, token: string): Promise<Lan
         ...(typeof body.revision === 'number' ? { revision: body.revision } : {}),
         ...(Array.isArray(body.tombstones)
             ? {
-                tombstones: (body.tombstones as Array<{ sessionId?: unknown; tag?: unknown; at?: unknown }>)
-                    .filter((tombstone): tombstone is { sessionId: string; tag?: string; at: number } =>
+                tombstones: (body.tombstones as Array<{ sessionId?: unknown; tag?: unknown; sessionUid?: unknown; at?: unknown }>)
+                    .filter((tombstone): tombstone is { sessionId: string; tag?: string; sessionUid?: string; at: number } =>
                         typeof tombstone?.sessionId === 'string' && typeof tombstone.at === 'number')
                     .map((tombstone) => ({
                         sessionId: tombstone.sessionId,
                         ...(typeof tombstone.tag === 'string' ? { tag: tombstone.tag } : {}),
+                        ...(typeof tombstone.sessionUid === 'string' ? { sessionUid: tombstone.sessionUid } : {}),
                         at: tombstone.at,
                     })),
             }
@@ -483,8 +484,92 @@ export async function fetchHistory(
     return (await response.json()) as LanHistory;
 }
 
-/** What a daemon says about a restart it was asked to perform. */
-export type LanRestartVerdict = { success: boolean; newSessionId?: string; error?: string };
+/**
+ * What a daemon says about a restart it was asked to perform.
+ *
+ * `success` and `error` keep the meaning every build has answered with. The rest is additive and
+ * present when the request asked for it (`expect: 'accepted'` or a `generation`): the machine's
+ * acceptance, the point the work has reached, and the generation it holds after this request. A
+ * caller that does not read them loses nothing; a caller that does can tell "the machine took it"
+ * from "the machine did it", and a repeat from a new restart.
+ */
+export type LanRestartVerdict = {
+    success: boolean;
+    newSessionId?: string;
+    error?: string;
+    message?: string;
+    /** Whether the machine has taken responsibility for the restart. It need not be finished. */
+    accepted?: boolean;
+    /** `scheduled` while accepted, then `running` / `failed` / `refused` once resolved. */
+    stage?: string;
+    /** The session the restart applies to. Named so a caller need not assume it is the same id. */
+    ref?: string;
+    /** The generation the machine holds for the session after answering this request. */
+    generation?: number;
+    /** The phase the machine reported with the answer. */
+    phase?: string;
+    /** Why the answer is what it is: `in-flight`, `already-applied`, `generation-ahead`, … */
+    reason?: string;
+};
+
+/**
+ * What a caller is asking a restart to do beyond restarting.
+ *
+ * Defined once because two roads carry it — the machine's LAN route and the server's RPC to the
+ * same daemon handler — and an option that means "a repeat is not a second restart" must not be
+ * lost on one of them.
+ */
+export type RestartAsk = {
+    /**
+     * Move the session between the daemon's domain and the user's desktop session.
+     *
+     * Sent in the body rather than the headers because it changes what the machine should do,
+     * not who is asking. Omitted when unchanged: a restart with no mode keeps the session's own.
+     */
+    requiresDesktop?: boolean;
+    /**
+     * The generation this device observed when it decided to ask.
+     *
+     * This is the *observed* generation — the revision the listed phase reflects — not the log's
+     * newest want. During a restart the want is already one ahead of the process, and sending the
+     * want would read to the machine as a caller ahead of it and be refused. Sent as observed, a
+     * machine that has moved past it answers "already applied" instead of killing the process
+     * twice, and a machine in the middle answers "in flight".
+     *
+     * Omitted when this device holds no runtime row (an older daemon): the machine then falls
+     * back to its time window, which is exactly the behavior those builds always had.
+     */
+    generation?: number;
+    /**
+     * Ask for the machine's acceptance rather than the finished outcome.
+     *
+     * A restart outlives a request: the old process has to go, a new one boot, authenticate and
+     * register. Waiting for that is what made the answer a guess on a socket that reconnects
+     * sooner; the row's phase carries the rest. A build that predates this option ignores it and
+     * waits, so the request still works — it simply answers later.
+     */
+    expectAccepted?: boolean;
+};
+
+/**
+ * The body a restart request carries, or null when it has nothing to say.
+ *
+ * The daemon rejects a POST that declares JSON with an empty body before the route runs, so
+ * "nothing to ask" must be no body at all rather than `{}`.
+ */
+export function restartAskBody(
+    ask: RestartAsk | undefined
+): { requiresDesktop?: boolean; generation?: number; expect?: 'accepted' } | null {
+    if (ask === undefined) {
+        return null;
+    }
+    const body: { requiresDesktop?: boolean; generation?: number; expect?: 'accepted' } = {
+        ...(ask.requiresDesktop !== undefined ? { requiresDesktop: ask.requiresDesktop } : {}),
+        ...(ask.generation !== undefined ? { generation: ask.generation } : {}),
+        ...(ask.expectAccepted ? { expect: 'accepted' as const } : {}),
+    };
+    return Object.keys(body).length > 0 ? body : null;
+}
 
 /**
  * Asks a daemon to restart a session, on the daemon's own API.
@@ -506,22 +591,16 @@ export async function restartSessionAt(
     sessionId: string,
     /** The account's proof of this request, when this device can make one. */
     proof?: Record<string, string>,
-    /**
-     * Move the session between the daemon's domain and the user's desktop session.
-     *
-     * Sent in the body rather than the headers because it changes what the machine should do,
-     * not who is asking. Omitted when unchanged: a restart with no mode keeps the session's own.
-     */
-    requiresDesktop?: boolean
+    ask?: RestartAsk
 ): Promise<LanRestartVerdict | null> {
-    const hasBody = requiresDesktop !== undefined;
+    const body = restartAskBody(ask);
     const response = await request(`${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/restart`, {
         method: 'POST',
         token,
         // A body is only sent when there is something to say: a POST declaring `application/json`
         // with nothing in it is rejected by the daemon's body parser before the route runs.
-        headers: { ...(proof ?? {}), ...(hasBody ? { 'content-type': 'application/json' } : {}) },
-        ...(hasBody ? { body: JSON.stringify({ requiresDesktop }) } : {}),
+        headers: { ...(proof ?? {}), ...(body !== null ? { 'content-type': 'application/json' } : {}) },
+        ...(body !== null ? { body: JSON.stringify(body) } : {}),
         // A restart kills a process and starts another. It is not slow, but it is not a read
         // either, and the shortest timeout in this file is for questions that are one round trip.
         timeoutMs: historyTimeoutFor(baseUrl),

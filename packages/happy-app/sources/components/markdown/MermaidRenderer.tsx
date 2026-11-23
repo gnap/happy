@@ -112,9 +112,7 @@ export const MermaidRenderer = React.memo((props: {
     // iOS/Android: WebView with CDN mermaid
     // Use require() with try-catch — dynamic import() fails silently on iOS
     let WebViewComp: any = null;
-    if (Platform.OS !== 'web') {
-        try { WebViewComp = require('react-native-webview').WebView; } catch { /* unsupported */ }
-    }
+    try { WebViewComp = require('react-native-webview').WebView; } catch { /* unsupported */ }
 
     const html = `
         <!DOCTYPE html>

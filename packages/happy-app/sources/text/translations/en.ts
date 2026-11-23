@@ -99,9 +99,15 @@ export const en: TranslationStructure = {
         lastSeen: ({ time }: { time: string }) => `last seen ${time}`,
         permissionRequired: 'permission required',
         restarting: 'Restarting…',
+        deleting: 'Deleting…',
         activeNow: 'Active now',
         unknown: 'unknown',
         creating: 'Creating…',
+        archiving: 'Archiving…',
+        applying: 'Applying…',
+        couldNotStart: 'Could not start',
+        couldNotArchive: 'Could not archive',
+        couldNotApply: 'Could not apply the change',
     },
 
     time: {
@@ -324,6 +330,7 @@ export const en: TranslationStructure = {
 
     session: {
         inputPlaceholder: 'Type a message ...',
+        peerMessage: 'From another Claude session',
         encrypting: 'handshaking…',
         backgroundTasks: 'Background tasks',
         activityScheduled: 'Scheduled',
@@ -400,6 +407,9 @@ export const en: TranslationStructure = {
         channelWhyNotOnNetwork: 'Machine not seen on this network',
         channelWhyNoKey: 'No key for this machine on this device',
         channelWhyUnknown: 'Waiting for session details',
+        machineStatus: 'Machine Status',
+        machineStatusDetail: ({ generation, observed }: { generation: number; observed: number }) =>
+            `Revision ${generation} · observed ${observed}`,
         created: 'Created',
         lastUpdated: 'Last Updated',
         sequence: 'Sequence',

@@ -14,6 +14,8 @@ import { useRouter } from 'expo-router';
 import { PermissionFooter } from './PermissionFooter';
 import { parseToolUseError } from '@/utils/toolErrorParser';
 import { formatMCPTitle } from './views/MCPToolView';
+import { askUserQuestionAnswers } from './askUserQuestionResult';
+import { toolErrorMessage } from './toolErrorText';
 import { t } from '@/text';
 
 interface ToolViewProps {
@@ -23,6 +25,7 @@ interface ToolViewProps {
     onPress?: () => void;
     sessionId?: string;
     messageId?: string;
+    compact?: boolean;
 }
 
 export const ToolView = ((props: ToolViewProps) => {
@@ -125,6 +128,13 @@ export const ToolView = ((props: ToolViewProps) => {
         isToolUseError = true;
         console.log('isToolUseError', tool.result);
     }
+
+    // A question that was answered has its answer in `result.answers`, and its own view already
+    // shows it. If the card later reads as canceled/error (a restart racing the answer), the
+    // result object must not also be shown as a failure line — `String(object)` is the
+    // "[object Object]" that tells the reader nothing.
+    const answeredQuestion = tool.name === 'AskUserQuestion' && askUserQuestionAnswers(tool.result) !== null;
+    const errorText = tool.state === 'error' ? toolErrorMessage(tool.result) : null;
 
     // Check permission status first for denied/canceled states
     if (tool.permission && (tool.permission.status === 'denied' || tool.permission.status === 'canceled')) {
@@ -235,22 +245,22 @@ export const ToolView = ((props: ToolViewProps) => {
                     return (
                         <View style={styles.content}>
                             <SpecificToolView tool={tool} metadata={props.metadata} messages={props.messages ?? []} sessionId={sessionId} compact />
-                            {tool.state === 'error' && tool.result &&
+                            {errorText && !answeredQuestion &&
                                 !(tool.permission && (tool.permission.status === 'denied' || tool.permission.status === 'canceled')) &&
                                 !hideDefaultError && (
-                                    <ToolError message={String(tool.result)} />
+                                    <ToolError message={errorText} />
                                 )}
                         </View>
                     );
                 }
 
                 // Show error state if present (but not for denied/canceled permissions and not when hideDefaultError is true)
-                if (tool.state === 'error' && tool.result &&
+                if (errorText &&
                     !(tool.permission && (tool.permission.status === 'denied' || tool.permission.status === 'canceled')) &&
                     !isToolUseError) {
                     return (
                         <View style={styles.content}>
-                            <ToolError message={String(tool.result)} />
+                            <ToolError message={errorText} />
                         </View>
                     );
                 }

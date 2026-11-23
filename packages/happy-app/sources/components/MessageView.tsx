@@ -144,6 +144,9 @@ function UserTextBlock(props: {
           </Pressable>
         )}
         <View style={[styles.userMessageBubble, isSending && styles.userMessageBubbleSending, (isAcked || isDelivered) && styles.userMessageBubbleAcked]}>
+          {props.message.meta?.origin === 'peer' && (
+            <Text style={styles.peerMessageLabel}>{t('session.peerMessage')}</Text>
+          )}
           {props.message.files && props.message.files.length > 0 && (
             <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginBottom: 4 }}>
               {props.message.files.map((file, i) => (
@@ -321,6 +324,13 @@ const styles = StyleSheet.create((theme) => ({
     paddingVertical: 4,
     borderRadius: 12,
     flexShrink: 1,
+  },
+  peerMessageLabel: {
+    color: theme.colors.agentEventText,
+    fontSize: 11,
+    fontWeight: '600',
+    marginTop: 2,
+    marginBottom: 2,
   },
   userMessageBubbleSending: {
     opacity: 0.55,

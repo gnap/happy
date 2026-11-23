@@ -67,7 +67,7 @@ export const ShimmerView = React.memo<ShimmerViewProps>(({
             
             {/* Shimmer overlay */}
             <MaskedView
-                style={StyleSheet.absoluteFillObject}
+                style={styles.absoluteFill}
                 maskElement={
                     <View style={styles.maskContainer}>
                         {children}
@@ -75,7 +75,7 @@ export const ShimmerView = React.memo<ShimmerViewProps>(({
                 }
             >
                 {/* Base background */}
-                <View style={[StyleSheet.absoluteFillObject, styles.background]} />
+                <View style={[styles.absoluteFill, styles.background]} />
 
                 {/* Animated shimmer */}
                 <AnimatedLinearGradient
@@ -83,7 +83,7 @@ export const ShimmerView = React.memo<ShimmerViewProps>(({
                     start={{ x: 0, y: 0 }}
                     end={{ x: 1, y: 0 }}
                     style={[
-                        StyleSheet.absoluteFillObject,
+                        styles.absoluteFill,
                         animatedStyle,
                     ]}
                 />
@@ -93,6 +93,17 @@ export const ShimmerView = React.memo<ShimmerViewProps>(({
 });
 
 const styles = StyleSheet.create({
+    /**
+     * RN 0.86 dropped `StyleSheet.absoluteFillObject` from its types; this is the same object.
+     * A local style keeps the component independent of that API's presence in the native types.
+     */
+    absoluteFill: {
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+    },
     maskContainer: {
         flex: 1,
         backgroundColor: 'transparent',

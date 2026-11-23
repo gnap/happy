@@ -3,7 +3,8 @@ import { z } from 'zod';
 // Shared message metadata schema
 export const MessageMetaSchema = z.object({
     sentFrom: z.string().optional(), // Source identifier
-    origin: z.enum(['app', 'a2a']).optional(), // Where the message came from
+    origin: z.enum(['app', 'a2a', 'peer']).optional(), // Where the message came from; 'peer' = another Claude session
+    peerFrom: z.string().optional(), // Sender identity for an origin='peer' message
     permissionMode: z.string().optional(), // Permission mode key for this message
     sandboxIsolation: z.string().optional(), // Sandbox isolation level ('off' | 'strict' | 'workspace' | 'custom')
     model: z.string().nullable().optional(), // Model name for this message (null = reset)

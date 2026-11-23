@@ -87,7 +87,7 @@ export const SvgRenderer = React.memo((props: {
                     scrollEnabled={false}
                     showsVerticalScrollIndicator={false}
                     pointerEvents="none"
-                    onMessage={(event) => {
+                    onMessage={(event: { nativeEvent: { data: string } }) => {
                         try {
                             const data = JSON.parse(event.nativeEvent.data);
                             if (data.type === 'dimensions' && typeof data.height === 'number') {

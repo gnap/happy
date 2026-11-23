@@ -1,11 +1,11 @@
 import { Dimensions, Platform } from 'react-native';
 import { useWindowDimensions } from 'react-native';
 import { useMemo } from 'react';
-import { calculateDeviceDimensions, determineDeviceType, calculateHeaderHeight } from './deviceCalculations';
+import { calculateDeviceDimensions, determineDeviceType, calculateHeaderHeight, isLandscapeTablet } from './deviceCalculations';
 import { isRunningOnMac } from './platform';
 
 // Re-export calculation functions for use in other components
-export { calculateDeviceDimensions, determineDeviceType, calculateHeaderHeight };
+export { calculateDeviceDimensions, determineDeviceType, calculateHeaderHeight, isLandscapeTablet };
 
 // Get header height based on platform, device type, and orientation (wrapper for backward compatibility)
 export function getHeaderHeight(isLandscape: boolean, deviceType: 'phone' | 'tablet'): number {
@@ -40,8 +40,18 @@ export function getDeviceType(): 'phone' | 'tablet' {
 // Hook to get device type (reactive to dimension changes)
 export function useDeviceType(): 'phone' | 'tablet' {
     const { width, height } = useWindowDimensions();
-    
+
     return useMemo(() => {
+        // @ts-ignore - isPad is not in the type definitions but exists at runtime on iOS
+        const isPad = Platform.OS === 'ios' ? Platform.isPad : false;
+
+        // A tablet held sideways gets the two-pane layout regardless of its diagonal. Every
+        // tablet-derived decision (sidebar, selected rows, inbox header, chrome) follows from
+        // this one answer, so orientation has to be resolved here rather than at each consumer.
+        if (isLandscapeTablet({ platform: Platform.OS, isPad, isLandscape: width > height })) {
+            return 'tablet';
+        }
+
         const dimensions = calculateDeviceDimensions({
             widthPoints: width,
             heightPoints: height,
@@ -51,8 +61,7 @@ export function useDeviceType(): 'phone' | 'tablet' {
         return determineDeviceType({
             diagonalInches: dimensions.diagonalInches,
             platform: Platform.OS,
-            // @ts-ignore - isPad is not in the type definitions but exists at runtime on iOS
-            isPad: Platform.OS === 'ios' ? Platform.isPad : false
+            isPad
         });
     }, [width, height]);
 }

@@ -16,6 +16,7 @@ import type { DaemonConnectionState } from '@/sync/lan/daemonConnections';
 import type { DaemonRoute } from '@/sync/lan/types';
 import type { SessionChannel } from '@/sync/lan/types';
 import type { ChannelDriver, ChannelLinkState, ChannelOperation , ChannelEndpoint } from './types';
+import { ownerReportsPresent } from '@/utils/sessionRestart';
 
 /**
  * The slice of the store the drivers read.
@@ -28,7 +29,7 @@ export type ChannelState = {
     sessions: Record<string, { active: boolean; activeAt: number }>;
     machines: Record<string, { active?: boolean } | undefined>;
     daemonSockets: Record<string, DaemonConnectionState>;
-    daemonSessionList: Record<string, { isAlive: boolean; via: string; at: number; origin?: 'daemon' | 'server' }>;
+    daemonSessionList: Record<string, { isAlive: boolean; via: string; at: number; origin?: 'daemon' | 'server'; restartingSince?: number }>;
     lanSightings: Record<string, { baseUrl?: string; machineId?: string } | undefined>;
     /** Where machines published themselves on this network, for when discovery cannot find them. */
     lanEndpoints: Record<string, { baseUrls?: string[]; at?: number } | undefined>;
@@ -39,7 +40,7 @@ export type ChannelState = {
      */
     candidateHealth: Record<string, CandidateHealth>;
     relayEndpoints: Record<string, { baseUrl?: string; source?: string } | undefined>;
-    relayDirectory: Record<string, { at: number; sessions: { happySessionId?: string; tag?: string; isAlive: boolean; origin?: 'daemon' | 'server' }[] }>;
+    relayDirectory: Record<string, { at: number; sessions: { happySessionId?: string; tag?: string; isAlive: boolean; origin?: 'daemon' | 'server'; restartingSince?: number }[] }>;
     relayHubConnected: boolean;
 };
 
@@ -274,7 +275,7 @@ function lanDriver(state: ChannelState): ChannelDriver {
         // what it is running. What it cannot do is start one, or act inside one — those are the
         // server's, and the daemon's API is built that way.
         supports: (operation) => DAEMON_OPERATIONS.has(operation),
-        session: (sessionId, machineId) => {
+        session: (sessionId, machineId, now) => {
             const answered = state.daemonSessionList[sessionId];
             // An imported server-only row is in this machine's catalog because the daemon knows
             // the account's sessions, not because this machine runs it. Its `isAlive: false` says
@@ -282,7 +283,9 @@ function lanDriver(state: ChannelState): ChannelDriver {
             if (answered?.via === 'lan' && answered.origin !== 'server') {
                 // The machine's own summary of its sessions, so its "not alive" is the fact rather
                 // than this channel's view of it. The socket below is an inference and is not.
-                return { reaching: answered.isAlive, fromOwner: true, seenAt: answered.at };
+                // A restart is the one "not alive" that is not the session being gone: the row
+                // says so itself, and `restartingSince` is that statement.
+                return { reaching: ownerReportsPresent(answered, now), fromOwner: true, seenAt: answered.at };
             }
             if (machineId && heldSocket(state, machineId, 'lan')) {
                 return { reaching: true };
@@ -394,10 +397,10 @@ function relayDriver(state: ChannelState): ChannelDriver {
             const answered = (!streamRetrying && carried) || candidates.some((candidate) => answeredAt(state, candidate));
             return { reachable: answered, alive: answered };
         },
-        session: (sessionId, machineId) => {
+        session: (sessionId, machineId, now) => {
             const answered = state.daemonSessionList[sessionId];
             if (answered?.via === 'relay' && answered.origin !== 'server') {
-                return { reaching: answered.isAlive, fromOwner: true, seenAt: answered.at };
+                return { reaching: ownerReportsPresent(answered, now), fromOwner: true, seenAt: answered.at };
             }
             const entry = machineId ? state.relayDirectory[machineId] : undefined;
             const published = entry?.sessions.find((session) => session.happySessionId === sessionId);
@@ -405,7 +408,7 @@ function relayDriver(state: ChannelState): ChannelDriver {
                 // The relay republishes the machine's own summary verbatim, so this is the same
                 // answer from the same party, carried rather than inferred. An imported row is the
                 // machine's catalog, not its process, and says nothing about the owner.
-                return { reaching: published.isAlive, fromOwner: true, seenAt: entry.at };
+                return { reaching: ownerReportsPresent(published, now), fromOwner: true, seenAt: entry.at };
             }
             if (machineId && heldSocket(state, machineId, 'relay')) {
                 return { reaching: true };

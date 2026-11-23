@@ -85,9 +85,15 @@ export const zhHant: TranslationStructure = {
         lastSeen: ({ time }: { time: string }) => `最後活躍時間 ${time}`,
         permissionRequired: '需要權限',
         restarting: '重啟中…',
+        deleting: '正在刪除…',
         activeNow: '目前活躍',
         unknown: '未知',
         creating: '建立中…',
+        archiving: '正在封存…',
+        applying: '正在套用…',
+        couldNotStart: '無法啟動',
+        couldNotArchive: '無法封存',
+        couldNotApply: '無法套用變更',
     },
 
     time: {
@@ -310,6 +316,7 @@ export const zhHant: TranslationStructure = {
 
     session: {
         inputPlaceholder: '輸入訊息...',
+        peerMessage: '來自另一個 Claude 工作階段',
         encrypting: '正在建立連線…',
         backgroundTasks: '後台任務',
         activityScheduled: '定時任務',
@@ -386,6 +393,9 @@ export const zhHant: TranslationStructure = {
         channelWhyNotOnNetwork: '目前網路中未發現該機器',
         channelWhyNoKey: '此裝置上沒有該機器的金鑰',
         channelWhyUnknown: '正在等待工作階段資訊',
+        machineStatus: '機器狀態',
+        machineStatusDetail: ({ generation, observed }: { generation: number; observed: number }) =>
+            `版本 ${generation} · 已確認 ${observed}`,
         created: '建立時間',
         lastUpdated: '最後更新',
         sequence: '序列',

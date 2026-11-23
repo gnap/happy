@@ -1,10 +1,11 @@
 import * as React from 'react';
 import { Session } from '@/sync/storageTypes';
-import { useResolvedPermissionIds, useSessionOnline } from '@/sync/storage';
+import { useResolvedPermissionIds, useSessionDeletePending, useSessionOnline, useSessionRuntimeEntry } from '@/sync/storage';
 import { sessionIsRestarting } from '@/utils/sessionRestart';
+import { sessionRuntimeDisplay, type SessionRuntimeDisplay } from '@/utils/sessionRuntimeStatus';
 import { t } from '@/text';
 
-export type SessionState = 'disconnected' | 'restarting' | 'thinking' | 'waiting' | 'permission_required';
+export type SessionState = 'disconnected' | 'deleting' | 'restarting' | 'applying' | 'blocked' | 'thinking' | 'waiting' | 'permission_required';
 
 export interface SessionStatus {
     state: SessionState;
@@ -40,6 +41,15 @@ export function useSessionStatus(session: Session): SessionStatus {
     // window in which this row would otherwise keep saying "permission required" after the user
     // has answered. Where the log has not been loaded the set is empty and this reads as before.
     const resolvedPermissions = useResolvedPermissionIds(session.id);
+    // A deletion the person asked for that the owning machine has not recorded yet. Asked before
+    // every other state: the row is on its way out, and "thinking" or "last seen" about a session
+    // whose deletion is still owed describes something the person has already left behind.
+    const deletePending = useSessionDeletePending(session.id);
+    // What the owning machine says it is doing with this session's lifecycle: a restart or an
+    // archive on its way, or one it gave up on. The machine is the only party that knows a want
+    // it accepted has not been realized — the session's own socket can stay up through a restart,
+    // and an archived session has no socket at all to ask.
+    const runtimeDisplay = sessionRuntimeDisplay(useSessionRuntimeEntry(session.id));
     const requests = session.agentState?.requests;
     const hasPermissions = requests
         ? Object.keys(requests).some(id => !resolvedPermissions.has(id))
@@ -48,6 +58,21 @@ export function useSessionStatus(session: Session): SessionStatus {
     const vibingMessage = React.useMemo(() => {
         return vibingMessages[Math.floor(Math.random() * vibingMessages.length)].toLowerCase() + '…';
     }, [isOnline, hasPermissions, session.thinking]);
+
+    if (deletePending) {
+        return {
+            state: 'deleting',
+            isConnected: isOnline,
+            // Alive in the sense that matters here: the person has decided, and the row must not
+            // dim into the grey of a stopped session while that decision is being delivered.
+            isLive: true,
+            statusText: t('status.deleting'),
+            shouldShowStatus: true,
+            statusColor: '#FF3B30',
+            statusDotColor: '#FF3B30',
+            isPulsing: true
+        };
+    }
 
     /**
      * A restart in flight, which the machine announces as a change to this session's state and
@@ -71,6 +96,29 @@ export function useSessionStatus(session: Session): SessionStatus {
             statusColor: '#007AFF',
             statusDotColor: '#007AFF',
             isPulsing: true
+        };
+    }
+
+    /**
+     * A want the machine accepted and has not realized.
+     *
+     * Drawn before the connectivity answer because it is a stronger statement about the same
+     * session: a restart makes the session unreadable for a moment, and an archive is *supposed*
+     * to end its connection, so neither should read as "last seen". A blocked want is drawn even
+     * when nothing is reaching the session, but not as alive: the machine is not working on it
+     * any more, and dimming it is what says so.
+     */
+    if (runtimeDisplay !== undefined) {
+        const blocked = runtimeDisplay.kind === 'blocked';
+        return {
+            state: blocked ? 'blocked' : 'applying',
+            isConnected: isOnline,
+            isLive: blocked ? isOnline : true,
+            statusText: sessionRuntimeStatusText(runtimeDisplay),
+            shouldShowStatus: true,
+            statusColor: blocked ? '#FF3B30' : '#007AFF',
+            statusDotColor: blocked ? '#FF3B30' : '#007AFF',
+            isPulsing: !blocked
         };
     }
 
@@ -122,6 +170,25 @@ export function useSessionStatus(session: Session): SessionStatus {
         statusColor: '#34C759',
         statusDotColor: '#34C759'
     };
+}
+
+/**
+ * The words a machine's runtime statement is drawn with, for the row and the details page alike.
+ *
+ * A blocked want names what failed rather than saying "stuck": "could not start" tells the reader
+ * which action to retry, where "reconciliation blocked" would only tell them the daemon has a
+ * vocabulary. A newer machine may name a lifecycle this build does not know, and the general
+ * wording is the honest answer there — never "start" or "archive" guessed from a word we lack.
+ */
+export function sessionRuntimeStatusText(display: SessionRuntimeDisplay): string {
+    if (display.kind === 'blocked') {
+        if (display.desired === 'archived') return t('status.couldNotArchive');
+        if (display.desired === 'running') return t('status.couldNotStart');
+        return t('status.couldNotApply');
+    }
+    if (display.desired === 'archived') return t('status.archiving');
+    if (display.desired === 'running') return t('status.restarting');
+    return t('status.applying');
 }
 
 /**

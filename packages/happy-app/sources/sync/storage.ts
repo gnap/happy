@@ -7,10 +7,11 @@ import { bump } from './metrics';
 import { Message } from "./typesMessage";
 import { collapseDuplicateMessages, mergePageIntoWindow } from "./messageIdentity";
 import { NormalizedMessage } from "./typesRaw";
-import type { DaemonRoute, LanSighting, RelayEndpoint, SessionChannel } from './lan/types';
-import { daemonSessionListSignature, daemonSessionRows, dropDeletedDaemonSessionRows, keepPendingDaemonSessionRows, mergeSessionRuntime, type DaemonSessionEntry, type DaemonSessionReport, type SessionRuntimeEntry } from './daemonSessionList';
+import type { DaemonRoute, LanSighting, RelayEndpoint, SessionChannel, SessionDivergence } from './lan/types';
+import { daemonSessionListSignature, daemonSessionRows, dropDeletedDaemonSessionRows, isStaleSessionRuntimeStatement, keepPendingDaemonSessionRows, mergeSessionRuntime, type DaemonSessionEntry, type DaemonSessionReport, type SessionRuntimeEntry, type SessionRuntimeReport } from './daemonSessionList';
 
 export type { DaemonSessionEntry } from './daemonSessionList';
+
 import type { RelayDirectoryEntry } from './lan/relayDirectory';
 import { advanceLanEndpoint, advanceRelayEndpoint, parseLanEndpoints, parseRelayEndpoint } from './lan/relay';
 import type { DaemonConnectionState } from './lan/daemonConnections';
@@ -26,12 +27,24 @@ import { KeyedStore, shallowEqual, useAllKeyedValues, useKeyedSelector, useKeyed
 
 export { channelLinks, type ChannelLink } from './channelLinks';
 export type { ChannelLinkState } from './channels/types';
+
+/** Whether two runtime divergences say the same thing. A repeated push must not redraw the row. */
+function sameDivergence(a: SessionDivergence | undefined, b: SessionDivergence | undefined): boolean {
+    if (a === b) return true;
+    if (a === undefined || b === undefined) return false;
+    return a.desired === b.desired
+        && a.generation === b.generation
+        && a.reason === b.reason
+        && a.since === b.since
+        && a.attempts === b.attempts
+        && a.blocked === b.blocked;
+}
 import { applySettings, Settings } from "./settings";
 import { LocalSettings, applyLocalSettings } from "./localSettings";
 import { Purchases, customerInfoToPurchases } from "./purchases";
 import { Profile } from "./profile";
 import { UserProfile, RelationshipUpdatedEvent } from "./friendTypes";
-import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionMaxModes, saveSessionMaxModes, loadSessionProfileIds, saveSessionProfileIds, loadSessionSandboxIsolations, saveSessionSandboxIsolations, loadRelayEndpoints, saveRelayEndpoints, loadDeletedSessions, saveDeletedSessions } from "./persistence";
+import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionMaxModes, saveSessionMaxModes, loadSessionProfileIds, saveSessionProfileIds, loadSessionSandboxIsolations, saveSessionSandboxIsolations, loadRelayEndpoints, saveRelayEndpoints, loadDeletedSessions, saveDeletedSessions, loadDeletedSessionUids, saveDeletedSessionUids, loadPendingSessionDeletes, savePendingSessionDeletes, type PendingSessionDelete } from "./persistence";
 import type { PermissionModeKey } from '@/components/PermissionModeSelector';
 import type { CustomerInfo } from './revenueCat/types';
 import React from "react";
@@ -234,7 +247,7 @@ interface StorageState {
      */
     sessionRuntime: Record<string, SessionRuntimeEntry>;
     /** Merge what machines said; null forgets everything (sign-out, or a machine being removed). */
-    applySessionRuntime: (entries: (Partial<Omit<SessionRuntimeEntry, 'at'>> & { sessionId: string })[] | null) => void;
+    applySessionRuntime: (entries: SessionRuntimeReport[] | null) => void;
     /**
      * Sessions this device has deleted, by id.
      *
@@ -244,6 +257,33 @@ interface StorageState {
      * putting back a row that has only been *offered* to deletion so far.
      */
     deletedSessions: Record<string, number>;
+    /**
+     * The same deletions, by lineage uid.
+     *
+     * A server id is not the only name a deleted row can return under: a resumed conversation can
+     * be issued a new one, and the person's deletion is of the conversation. A row carrying a
+     * tombstoned uid is dropped wherever it appears, whatever id it arrives with. Empty on every
+     * install that has never seen a uid from a machine.
+     */
+    deletedSessionUids: Record<string, number>;
+    /** Records that a lineage was deleted, so a row with that uid cannot come back under a new id. */
+    rememberDeletedSessionUid: (uid: string, at: number) => void;
+    /**
+     * Deletions this device has asked for, waiting for the machine that owns each session.
+     *
+     * The intent is written before the first attempt and survives a restart: an owner that is
+     * offline is late, not gone, so the row keeps its place and says it is deleting. It leaves this
+     * map only when the machine records the deletion (then `deletedSessions` takes over), when the
+     * machine declines, or when its build predates the archive route and the server's old delete is
+     * the only road left.
+     */
+    pendingSessionDeletes: Record<string, PendingSessionDelete>;
+    /** Records the person's delete before any channel is asked, so a crash cannot lose it. */
+    queueSessionDelete: (sessionId: string, machineId: string) => void;
+    /** Records the outcome of an attempt that did not land, and when to try again. */
+    noteSessionDeleteAttempt: (sessionId: string, nextAttemptAt: number, lastError: string) => void;
+    /** Forgets an intent: it was recorded, declined, or handed to the legacy road. */
+    clearSessionDelete: (sessionId: string) => void;
     /** What each machine last said it was running, asked over a channel it answered on. */
     daemonVersions: Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }>;
     /** Replace the daemons' view. Pass null to clear it (the server answered). */
@@ -969,6 +1009,8 @@ export const storage = create<StorageState>()((set, get) => {
         daemonSessionList: {},
         sessionRuntime: {},
         deletedSessions: loadDeletedSessions(),
+        deletedSessionUids: loadDeletedSessionUids(),
+        pendingSessionDeletes: loadPendingSessionDeletes(),
         daemonVersions: {},
         channelOverride: {},
         artifacts: {},  // Initialize artifacts
@@ -1104,7 +1146,12 @@ export const storage = create<StorageState>()((set, get) => {
             // the deletion while it reaches them — a machine's catalog keeps listing a row until
             // its own delete is written, and the server keeps serving one until that deletion is
             // replayed to it — and re-adding the row here would undo what the person asked for.
-            const sessions = offered.filter((session) => state.deletedSessions[session.id] === undefined);
+            const sessions = offered.filter((session) => {
+                if (state.deletedSessions[session.id] !== undefined) return false;
+                // The same conversation under a name the server issued after the delete.
+                const uid = session.sessionUid ?? session.metadata?.sessionUid;
+                return uid === undefined || state.deletedSessionUids[uid] === undefined;
+            });
             // A delta that says nothing new must cost nothing: this runs for every list refresh
             // and used to be reached every two seconds by the activity heartbeat. Compare the
             // fields the merge below can change before touching MMKV, the list, or the store.
@@ -2086,7 +2133,7 @@ export const storage = create<StorageState>()((set, get) => {
             // this account holds it a listing that has not replayed it yet is stale; drawing that
             // row is what makes a delete look like it did nothing. Same rule as the session list
             // applies above, enforced where channel-derived rows enter the store.
-            const listed = dropDeletedDaemonSessionRows(sessions, state.deletedSessions);
+            const listed = dropDeletedDaemonSessionRows(sessions, state.deletedSessions, state.deletedSessionUids);
             // The same fact the daemon pushes, arriving the other way: a device that reads a
             // listing instead of holding a socket has to be told, and a restarting session is
             // listed with no live process — which is why the field travels with the listing at all.
@@ -2111,7 +2158,8 @@ export const storage = create<StorageState>()((set, get) => {
             }
             // A deleted session has no status in any channel; a late projection for one is stale.
             const offered = entries.filter((entry) => state.deletedSessions[entry.sessionId] === undefined);
-            const next = mergeSessionRuntime(state.sessionRuntime, offered, Date.now());
+            const at = Date.now();
+            const next = mergeSessionRuntime(state.sessionRuntime, offered, at);
             // A push that repeats what the row already says must not redraw it.
             const same = offered.every((entry) => {
                 const before = state.sessionRuntime[entry.sessionId];
@@ -2121,9 +2169,33 @@ export const storage = create<StorageState>()((set, get) => {
                     && before.generation === after.generation
                     && before.observedGeneration === after.observedGeneration
                     && before.observedAt === after.observedAt
-                    && before.reason === after.reason;
+                    && before.reason === after.reason
+                    && before.desiredLifecycle === after.desiredLifecycle
+                    && sameDivergence(before.divergence, after.divergence);
             });
-            if (same) return state;
+            if (same) {
+                // The fields did not move, but a want still outstanding was just restated: its
+                // arrival time is what lets a reader age the statement out, so it has to move
+                // even when nothing a row draws has changed. Only rows still carrying a want are
+                // touched — a settled projection has nothing to age, and refreshing it would
+                // redraw every running session on every listing. A statement older than the
+                // stored one is not a restatement: letting it move the age would keep a want the
+                // machine has already moved past alive for as long as some stale channel repeats
+                // it.
+                const restated = offered.some((entry) => entry.divergence !== null
+                    && !isStaleSessionRuntimeStatement(state.sessionRuntime[entry.sessionId], entry)
+                    && next[entry.sessionId]?.divergence !== undefined);
+                if (!restated) return state;
+                const refreshed = { ...state.sessionRuntime };
+                for (const entry of offered) {
+                    if (isStaleSessionRuntimeStatement(state.sessionRuntime[entry.sessionId], entry)) continue;
+                    const current = refreshed[entry.sessionId];
+                    if (current?.divergence !== undefined) {
+                        refreshed[entry.sessionId] = { ...current, at };
+                    }
+                }
+                return { ...state, sessionRuntime: refreshed };
+            }
             return { ...state, sessionRuntime: next };
         }),
         setSessionChannelOverride: (sessionId: string, channel: SessionChannel | null) => set((state) => {
@@ -2183,7 +2255,51 @@ export const storage = create<StorageState>()((set, get) => {
         deleteSessionMessages: (sessionId: string) => {
             sessionMessagesLive.delete(sessionId);
         },
+        queueSessionDelete: (sessionId: string, machineId: string) => set((state) => {
+            const existing = state.pendingSessionDeletes[sessionId];
+            const now = Date.now();
+            // A second ask keeps the attempt count — the ladder is about the machine, not about how
+            // many times the person tapped — but makes the next attempt now, because a tap is a
+            // better moment to try than whichever timer was pending.
+            const intent: PendingSessionDelete = existing
+                ? { ...existing, machineId, nextAttemptAt: Math.min(existing.nextAttemptAt, now) }
+                : { sessionId, machineId, at: now, attempts: 0, nextAttemptAt: now };
+            const pendingSessionDeletes = { ...state.pendingSessionDeletes, [sessionId]: intent };
+            savePendingSessionDeletes(pendingSessionDeletes);
+            return { ...state, pendingSessionDeletes };
+        }),
+        noteSessionDeleteAttempt: (sessionId: string, nextAttemptAt: number, lastError: string) => set((state) => {
+            const existing = state.pendingSessionDeletes[sessionId];
+            if (!existing) {
+                return state;
+            }
+            const pendingSessionDeletes = {
+                ...state.pendingSessionDeletes,
+                [sessionId]: { ...existing, attempts: existing.attempts + 1, nextAttemptAt, lastError },
+            };
+            savePendingSessionDeletes(pendingSessionDeletes);
+            return { ...state, pendingSessionDeletes };
+        }),
+        clearSessionDelete: (sessionId: string) => set((state) => {
+            if (state.pendingSessionDeletes[sessionId] === undefined) {
+                return state;
+            }
+            const { [sessionId]: _forgotten, ...pendingSessionDeletes } = state.pendingSessionDeletes;
+            savePendingSessionDeletes(pendingSessionDeletes);
+            return { ...state, pendingSessionDeletes };
+        }),
+        rememberDeletedSessionUid: (uid: string, at: number) => set((state) => {
+            if (state.deletedSessionUids[uid] !== undefined) {
+                return state;
+            }
+            const deletedSessionUids = { ...state.deletedSessionUids, [uid]: at };
+            saveDeletedSessionUids(deletedSessionUids);
+            return { ...state, deletedSessionUids };
+        }),
         deleteSession: (sessionId: string) => set((state) => {
+            // The row is about to leave the store, so its lineage name is read first: a deletion
+            // of a conversation must not depend on which server id it happened to be wearing.
+            const removed = sessionLive.get(sessionId);
             // Remove session from the keyed store; the derived subscription rebuilds the list.
             sessionLive.delete(sessionId);
 
@@ -2196,6 +2312,16 @@ export const storage = create<StorageState>()((set, get) => {
                 : (() => {
                     const next = { ...state.deletedSessions, [sessionId]: Date.now() };
                     saveDeletedSessions(next);
+                    return next;
+                })();
+            // And the lineage, when the row had said which one it is, so an id the server issues
+            // later cannot bring the conversation back.
+            const uid = removed?.sessionUid ?? removed?.metadata?.sessionUid;
+            const deletedSessionUids = uid === undefined || state.deletedSessionUids[uid] !== undefined
+                ? state.deletedSessionUids
+                : (() => {
+                    const next = { ...state.deletedSessionUids, [uid]: Date.now() };
+                    saveDeletedSessionUids(next);
                     return next;
                 })();
 
@@ -2225,6 +2351,7 @@ export const storage = create<StorageState>()((set, get) => {
             return {
                 ...state,
                 deletedSessions,
+                deletedSessionUids,
             };
         }),
         // Outbox (send status tracking)
@@ -2599,6 +2726,29 @@ export function useSession(id: string): Session | null {
 /** One field of a session, re-rendering only when that field changes. */
 export function useSessionMachineId(sessionId: string): string | undefined {
     return useKeyedSelector(sessionLive, sessionId, (session) => session?.metadata?.machineId);
+}
+
+/**
+ * Whether this session is waiting for its machine to record a deletion.
+ *
+ * A boolean, not the intent: a row draws only that the deletion is still owed, and re-rendering it
+ * for each attempt's bookkeeping would make the backoff visible as churn.
+ */
+export function useSessionDeletePending(sessionId: string): boolean {
+    return storage((state) => state.pendingSessionDeletes[sessionId] !== undefined);
+}
+
+/**
+ * What the machine last said about this session's runtime, if it said anything.
+ *
+ * Kept out of the session row on purpose: it arrives on the machine's own schedule, is not part
+ * of the session's persisted state, and most rows never draw it. The statement is selected with
+ * `useShallow` so a listing that replaces the entry object without changing what it says does not
+ * wake the row — only a field a reader could act on (or the arrival time of an outstanding want)
+ * does.
+ */
+export function useSessionRuntimeEntry(sessionId: string): SessionRuntimeEntry | undefined {
+    return storage(useShallow((state) => state.sessionRuntime[sessionId]));
 }
 
 /**

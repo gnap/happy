@@ -51,6 +51,23 @@ export function determineDeviceType(params: {
     return diagonalInches >= tabletThresholdInches ? 'tablet' : 'phone';
 }
 
+/**
+ * Whether a tablet held sideways has the room for the two-pane layout.
+ *
+ * Orientation is the layout question, while the diagonal only answers "which device is this" —
+ * and on iPad it is computed with the phone's points-per-inch, so most iPads fall under the 9"
+ * line and never qualify. A tablet in landscape has the width for the session list beside the
+ * conversation; a phone in landscape is wide but not roomy, so it keeps the single column.
+ */
+export function isLandscapeTablet(params: {
+    platform: string;
+    isPad?: boolean;
+    isLandscape: boolean;
+}): boolean {
+    const { platform, isPad, isLandscape } = params;
+    return platform === 'ios' && isPad === true && isLandscape;
+}
+
 // Calculate header height based on platform, device info, and orientation
 export function calculateHeaderHeight(params: {
     platform: string;

@@ -84,6 +84,10 @@ export const toolFullViewRegistry: Record<string, ToolViewComponent> = {
     Write: WriteViewFull,
     MultiEdit: MultiEditViewFull,
     CodexDiff: CodexDiffView,
+    // The answer is the content: on the message page there is no card header to carry it, and the
+    // generic body would render the structured result as raw JSON (or, when the card reads as an
+    // error, as "[object Object]").
+    AskUserQuestion: AskUserQuestionView,
     // Gemini
     edit: GeminiEditView,
     execute: GeminiExecuteView,

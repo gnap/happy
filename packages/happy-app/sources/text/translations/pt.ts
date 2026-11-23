@@ -84,9 +84,15 @@ export const pt: TranslationStructure = {
         lastSeen: ({ time }: { time: string }) => `visto por último ${time}`,
         permissionRequired: 'permissão necessária',
         restarting: 'Reiniciando…',
+        deleting: 'Excluindo…',
         activeNow: 'Ativo agora',
         unknown: 'desconhecido',
         creating: 'Criando…',
+        archiving: 'Arquivando…',
+        applying: 'Aplicando…',
+        couldNotStart: 'Não foi possível iniciar',
+        couldNotArchive: 'Não foi possível arquivar',
+        couldNotApply: 'Não foi possível aplicar a alteração',
     },
 
     time: {
@@ -309,6 +315,7 @@ export const pt: TranslationStructure = {
 
     session: {
         inputPlaceholder: 'Digite uma mensagem ...',
+        peerMessage: 'De outra sessão do Claude',
         encrypting: 'estabelecendo conexão…',
         backgroundTasks: 'Tarefas em segundo plano',
         activityScheduled: 'Agendado',
@@ -385,6 +392,9 @@ export const pt: TranslationStructure = {
         channelWhyNotOnNetwork: 'Máquina não vista nesta rede',
         channelWhyNoKey: 'Sem chave desta máquina neste dispositivo',
         channelWhyUnknown: 'Aguardando dados da sessão',
+        machineStatus: 'Estado da máquina',
+        machineStatusDetail: ({ generation, observed }: { generation: number; observed: number }) =>
+            `Revisão ${generation} · observada ${observed}`,
         created: 'Criado',
         lastUpdated: 'Última atualização',
         sequence: 'Sequência',

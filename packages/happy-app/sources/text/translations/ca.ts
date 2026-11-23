@@ -84,9 +84,15 @@ export const ca: TranslationStructure = {
         lastSeen: ({ time }: { time: string }) => `vist per última vegada ${time}`,
         permissionRequired: 'permís requerit',
         restarting: 'Reiniciant…',
+        deleting: 'Eliminant…',
         activeNow: 'Actiu ara',
         unknown: 'desconegut',
         creating: 'Creant…',
+        archiving: 'Arxivant…',
+        applying: 'Aplicant…',
+        couldNotStart: "No s'ha pogut iniciar",
+        couldNotArchive: "No s'ha pogut arxivar",
+        couldNotApply: "No s'ha pogut aplicar el canvi",
     },
 
     time: {
@@ -309,6 +315,7 @@ export const ca: TranslationStructure = {
 
     session: {
         inputPlaceholder: 'Escriu un missatge...',
+        peerMessage: "D'una altra sessió de Claude",
         encrypting: 'establint connexió…',
         backgroundTasks: 'Tasques en segon pla',
         activityScheduled: 'Programat',
@@ -385,6 +392,9 @@ export const ca: TranslationStructure = {
         channelWhyNotOnNetwork: 'La màquina no es veu en aquesta xarxa',
         channelWhyNoKey: "No hi ha clau d'aquesta màquina en aquest dispositiu",
         channelWhyUnknown: 'Esperant les dades de la sessió',
+        machineStatus: 'Estat de la màquina',
+        machineStatusDetail: ({ generation, observed }: { generation: number; observed: number }) =>
+            `Revisió ${generation} · observada ${observed}`,
         created: 'Creat',
         lastUpdated: 'Última actualització',
         sequence: 'Seqüència',

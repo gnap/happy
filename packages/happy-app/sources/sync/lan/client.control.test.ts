@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 // other LAN tests use.
 vi.mock('@/encryption/hmac_sha256', () => ({ hmac_sha256: vi.fn(async () => new Uint8Array(32)) }));
 
-const { archiveSessionAt, restartSessionAt, sessionControlAt } = await import('./client');
+const { archiveSessionAt, restartAskBody, restartSessionAt, sessionControlAt } = await import('./client');
 
 const base = 'http://10.0.0.2:55673';
 
@@ -75,7 +75,33 @@ describe('archiveSessionAt', () => {
     });
 });
 
-describe('restartSessionAt', () => {    it('returns null only for the 404 of nothing to restart', async () => {
+describe('restartAskBody', () => {
+    it('says nothing when there is nothing to ask', () => {
+        // No body at all: a POST declaring JSON with an empty one is rejected before the route.
+        expect(restartAskBody(undefined)).toBeNull();
+        expect(restartAskBody({})).toBeNull();
+    });
+
+    it('carries the observed generation without asking for acceptance', () => {
+        // Older behavior: the machine still waits for the outcome. The generation alone is enough
+        // for it to tell a repeat from a new restart.
+        expect(restartAskBody({ generation: 7 })).toEqual({ generation: 7 });
+    });
+
+    it('keeps the desktop mode when it is false', () => {
+        // `false` is a move *out* of the desktop session, not "unset"; dropping it would leave the
+        // session where the caller asked to take it from.
+        expect(restartAskBody({ requiresDesktop: false })).toEqual({ requiresDesktop: false });
+    });
+
+    it('carries all three when the caller asks for all of them', () => {
+        expect(restartAskBody({ requiresDesktop: true, generation: 4, expectAccepted: true }))
+            .toEqual({ requiresDesktop: true, generation: 4, expect: 'accepted' });
+    });
+});
+
+describe('restartSessionAt', () => {
+    it('returns null only for the 404 of nothing to restart', async () => {
         stub({ status: 404 });
         expect(await restartSessionAt(base, 't1', 'sess-1')).toBeNull();
     });
@@ -89,5 +115,23 @@ describe('restartSessionAt', () => {    it('returns null only for the 404 of not
     it('returns the verdict the daemon gave, including when the answer is no', async () => {
         stub({ status: 200, body: { success: false, error: 'no desktop to move it to' } });
         expect(await restartSessionAt(base, 't1', 'sess-1')).toEqual({ success: false, error: 'no desktop to move it to' });
+    });
+
+    it('asks with the generation and the acceptance, and reads the structured answer back', async () => {
+        // The two fields travel together and the answer's whole shape survives: the caller needs
+        // the accepted generation to know which ask a later repeat is a repeat of.
+        const calls = stub({ status: 200, body: { success: true, accepted: true, stage: 'scheduled', generation: 8, phase: 'Restarting' } });
+        expect(await restartSessionAt(base, 't1', 'sess-1', undefined, { generation: 7, expectAccepted: true }))
+            .toEqual({ success: true, accepted: true, stage: 'scheduled', generation: 8, phase: 'Restarting' });
+        expect(calls[0].init.headers['content-type']).toBe('application/json');
+        expect(JSON.parse(calls[0].init.body)).toEqual({ generation: 7, expect: 'accepted' });
+    });
+
+    it('sends no body and no JSON content type when it has nothing to say', async () => {
+        // The common legacy ask must stay byte-for-byte what older daemons already accept.
+        const calls = stub({ status: 200, body: { success: true } });
+        await restartSessionAt(base, 't1', 'sess-1');
+        expect(calls[0].init.body).toBeUndefined();
+        expect(calls[0].init.headers['content-type']).toBeUndefined();
     });
 });

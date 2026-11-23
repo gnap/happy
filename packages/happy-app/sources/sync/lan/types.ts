@@ -71,6 +71,22 @@ export type PublishedLanEndpoints = {
     at: number;
 };
 
+/**
+ * A want the machine has accepted and has not realized yet.
+ *
+ * `blocked` is the point at which the machine stopped retrying: the row is not still working, it
+ * is stuck, and the user is the only party that can resolve it. `desired` and `reason` are plain
+ * strings because a newer machine may name a state this build has not heard of.
+ */
+export type SessionDivergence = {
+    desired: string;
+    generation: number;
+    reason: string;
+    since: number;
+    attempts?: number;
+    blocked?: boolean;
+};
+
 export type LanSessionSummary = {
     /**
      * The server's id for the session, absent until the session has registered.
@@ -81,6 +97,14 @@ export type LanSessionSummary = {
     happySessionId?: string;
     /** The CLI's own tag, set before the server issues an id, and kept after. */
     tag?: string;
+    /**
+     * The lineage's public name, minted by the CLI per tag.
+     *
+     * Stable across a server id change, so a reader can keep one conversation's state together
+     * when the id moves. Absent for a machine that has no uid for the row (an older CLI, or a
+     * spawn whose process has not started yet), in which case the row is keyed the older way.
+     */
+    sessionUid?: string;
     /**
      * The session's metadata, ciphertext and revision. Mirrored by the daemon from the session's
      * own `update-session`, so it is the same record the server holds.
@@ -123,6 +147,10 @@ export type LanSessionSummary = {
     observedGeneration?: number;
     observedAt?: number;
     reason?: string;
+    /** The lifecycle the machine's log wants, when it has a spec for the row. */
+    desiredLifecycle?: string;
+    /** A want the machine has accepted and not realized yet, with its retry state. */
+    divergence?: SessionDivergence;
 };
 
 /**

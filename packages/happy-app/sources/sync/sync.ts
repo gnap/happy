@@ -28,6 +28,7 @@ import type { MessageMeta } from './typesMessageMeta';
 import { applySettings, Settings, settingsDefaults, settingsParse, SUPPORTED_SCHEMA_VERSION } from './settings';
 import { Profile, profileParse } from './profile';
 import { loadPendingSettings, savePendingSettings, loadWrappedMachineKeys, saveWrappedMachineKeys, loadLanWindows, saveLanWindows, type PersistedLanWindow } from './persistence';
+import { decideSessionDelete, dueSessionDeletes, nextDeleteDueAt } from './sessionDeleteQueue';
 import { initializeTracking, tracking } from '@/track';
 import { parseToken } from '@/utils/parseToken';
 import { RevenueCat, LogLevel, PaywallResult } from './revenueCat';
@@ -41,7 +42,7 @@ import { AsyncLock } from '@/utils/lock';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { Message } from './typesMessage';
 import { EncryptionCache } from './encryption/encryptionCache';
-import { fetchIdentity, LanRequestError, archiveSessionAt, restartSessionAt, sessionControlAt, type LanRestartVerdict } from './lan/client';
+import { fetchIdentity, LanRequestError, archiveSessionAt, restartAskBody, restartSessionAt, sessionControlAt, type LanRestartVerdict, type RestartAsk } from './lan/client';
 import { accountProofHeaders } from '@/auth/accountProof';
 import { getLanCredential } from './lan/credentials';
 import { readSessionOverLan, listSessionsOverLan, toNormalizedMessages, type LanConnection, type LanSessionRead } from './lan/sessionChannel';
@@ -56,7 +57,7 @@ import { channelDrivers as buildChannelDrivers, relayOriginFrom } from './channe
 import { channelAvailability } from './channels/resolve';
 import { candidateInputsFor, orderedCandidates } from './channels/candidates';
 import { attemptFromStatus, carryOperation, type CarryOutcome, type HealthRecorder } from './channels/execute';
-import { dropDeletedDaemonSessionRows } from './daemonSessionList';
+import { dropDeletedDaemonSessionRows, preferDaemonSessionAnswer } from './daemonSessionList';
 import { fetchToolContent, fetchSessionListing, fetchSessionDiff, fetchPreviewGrant, previewUrlFor, type SessionListing } from './lan/client';
 import { downloadSessionFileFromDaemon, downloadSessionFolderFromDaemon } from './lan/fileDownload';
 import { getGitStatusFiles as getGitStatusFilesViaRpc, parseGitStatusFiles, type GitStatusFiles } from './gitStatusFiles';
@@ -175,8 +176,28 @@ export type SessionArchiveResult =
     | { kind: 'archived' }
     /** A machine answered and said no — with its words, when it sent any. */
     | { kind: 'refused'; status?: number; body?: string }
-    /** No machine channel could take it: the server is the remaining road. */
+    /**
+     * A machine answered and has no archive route: a build from before deletions lived on the
+     * machine. The server's delete is the road this request took before, and the one that still
+     * works against such a build.
+     */
+    | { kind: 'unsupported' }
+    /** No machine channel could take it right now: the machine is offline, not gone. */
     | { kind: 'unavailable' };
+
+/** What a channel says about the archive it was asked to carry. */
+type ArchiveMachineVerdict =
+    | { applied: true }
+    | { applied: false; message?: string };
+
+/** The daemon's answer to the server-carried `killSession`, before it is read as a verdict. */
+type MachineKillVerdict = {
+    success?: boolean;
+    applied?: boolean;
+    reason?: string;
+    message?: string;
+    generation?: number;
+};
 
 class Sync {
     private static readonly BACKGROUND_SEND_TIMEOUT_MS = 30_000;
@@ -589,8 +610,23 @@ class Sync {
     private backgroundSendTimeout: ReturnType<typeof setTimeout> | null = null;
     private backgroundSendNotificationId: string | null = null;
     private backgroundSendStartedAt: number | null = null;
-    private backgroundTaskId: number | null = null;
+    private backgroundTaskId: string | null = null;
     private sessionsRefreshInterval: ReturnType<typeof setInterval> | null = null;
+    /**
+     * The timer for the next deletion whose machine was unreachable. The intents themselves are
+     * the durable queue; this pointer only exists so the App is not dependent on some other event
+     * to come back to them.
+     */
+    private deleteRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    private deleteFlushInFlight = false;
+    /**
+     * A wake arrived while a flush was running. Kept rather than dropped: the wake usually *is*
+     * new reach (a machine or the server socket came back), and the flush that is running cannot
+     * see it — its candidates were chosen before the transition.
+     */
+    private deleteFlushAgain = false;
+    /** The intents with an archive request in flight, so one is never asked twice at once. */
+    private deletesInFlight = new Set<string>();
     revenueCatInitialized = false;
 
     // Generic locking mechanism
@@ -660,6 +696,10 @@ class Sync {
                 // network change hides: the listener was suspended, and a move between two WiFi
                 // networks never produced a transition for it to report anyway.
                 void this.detectNetworkMove();
+                // Timers do not run while the process is suspended, so a deletion due during the
+                // background must not wait for the next ladder step to be noticed. Coming forward
+                // is also a moment the machine may have become reachable, ladder or not.
+                void this.flushPendingSessionDeletes(true);
                 // In-flight fetches cannot be trusted across a real suspension, and the timers that
                 // would have retried them are about to restart against locks they still hold.
                 const suspendedFor = this.backgroundedAt === null ? 0 : Date.now() - this.backgroundedAt;
@@ -1028,6 +1068,8 @@ class Sync {
         this.serverID = parseToken(credentials.token);
         this.logAccountSigningKey();
         await this.#init();
+        // Deletions asked for on a previous run are due now if their machine has come back.
+        this.scheduleDeleteFlush();
 
         // Await settings sync to have fresh settings
         await this.settingsSync.awaitQueue();
@@ -1048,6 +1090,8 @@ class Sync {
         this.serverID = parseToken(credentials.token);
         this.logAccountSigningKey();
         await this.#init();
+        // Deletions asked for on a previous run are due now if their machine has come back.
+        this.scheduleDeleteFlush();
     }
 
     /**
@@ -1123,6 +1167,18 @@ class Sync {
                     // hidden ones read on open. Invalidating every message sync here made one
                     // setting change into a read of every session at once.
                     this.readScheduler.markStale();
+                }
+                // A machine channel coming live is the moment a deletion that was waiting for that
+                // machine can be delivered. Only the transition matters: a write to any other
+                // socket field is not new reach.
+                if (state.daemonSockets !== previous.daemonSockets) {
+                    const cameLive = Object.entries(state.daemonSockets).some(
+                        ([id, connection]) => connection.phase === 'live'
+                            && previous.daemonSockets[id]?.phase !== 'live',
+                    );
+                    if (cameLive) {
+                        void this.flushPendingSessionDeletes(true);
+                    }
                 }
             });
             this.reconcileDaemonSockets();
@@ -1563,7 +1619,7 @@ class Sync {
             try {
                 const { beginBackgroundTask } = await import('./iosBackgroundTask');
                 const result = await beginBackgroundTask('Send pending messages');
-                if (result.success) {
+                if (result.success && result.taskId) {
                     this.backgroundTaskId = result.taskId;
                     log.log(`📨 Background task started (id=${result.taskId})`);
                 }
@@ -4377,6 +4433,12 @@ class Sync {
         // Subscribe to connection state changes
         this.reconnectedCleanup = apiSocket.onReconnected(() => {
             log.log('🔌 Socket reconnected');
+            // The server is a channel, but this socket coming back is not evidence the *machine*
+            // is up: the RPC is only deliverable while the machine holds its own connection, and
+            // that is its own signal. So this only covers the ladder steps that elapsed while the
+            // socket was down; forcing here would turn the socket's documented flapping into a
+            // retry storm against a machine that is still asleep.
+            void this.flushPendingSessionDeletes();
             // Only a gap long enough to have missed events is worth refetching everything. The
             // server socket can flap every few seconds (observed on a device), and invalidating
             // the session list, the machine list and four side syncs on each flap kept the JS
@@ -4705,7 +4767,10 @@ class Sync {
                 // The projection beside the timestamp is runtime state, not persisted session
                 // state: it goes to the in-memory store below, where the next listing and the
                 // next push meet, and a server refresh cannot freeze it into the cache.
-                if (updateData.body.phase !== undefined || updateData.body.generation !== undefined) {
+                if (updateData.body.phase !== undefined
+                    || updateData.body.generation !== undefined
+                    || updateData.body.divergence !== undefined
+                    || updateData.body.desiredLifecycle !== undefined) {
                     storage.getState().applySessionRuntime([{
                         sessionId: updateData.body.id,
                         phase: updateData.body.phase ?? undefined,
@@ -4713,6 +4778,12 @@ class Sync {
                         observedGeneration: updateData.body.observedGeneration ?? undefined,
                         observedAt: updateData.body.observedAt ?? undefined,
                         reason: updateData.body.reason ?? undefined,
+                        desiredLifecycle: updateData.body.desiredLifecycle ?? undefined,
+                        // `null` is the machine saying the want has been realized; absent means this
+                        // update says nothing about it, which must not clear a stored verdict.
+                        ...(updateData.body.divergence !== undefined
+                            ? { divergence: updateData.body.divergence ?? null }
+                            : {}),
                     }]);
                 }
 
@@ -5805,20 +5876,58 @@ class Sync {
      * server agrees. So the machine is asked first, even when the row was born on the server: that
      * is what makes "deleted" a fact rather than a screen that is no longer showing something.
      *
-     * Only silence — or a machine that does not have the session — sends this to the server, where
-     * deletes came from before. A refusal is about this device and a bad request is about the
-     * request: the server would be the same account by another road, so neither is re-asked there.
+     * The server is one of the channels, not a substitute for the machine: when no LAN or relay
+     * address answers, the daemon is asked over its server socket (`killSession`, which stops the
+     * process and records the same tombstone). The deletion stays the machine's transaction in
+     * every case — the server only carries the request.
+     *
+     * `unavailable` — no channel answered — means the machine is offline, and the caller keeps the
+     * intent for later. `unsupported` is different: a machine answered and does not have the route,
+     * so it is an older build and the server's delete is the road that still works for it. A
+     * refusal is about this device and a bad request is about the request: neither is re-asked.
      */
-    async archiveSession(sessionId: string): Promise<SessionArchiveResult> {
-        const outcome = await this.carrySessionAction<boolean>(sessionId, {
+    async archiveSession(sessionId: string, machineId?: string): Promise<SessionArchiveResult> {
+        // The owner is normally on the row. A queued deletion keeps it even after the row has left
+        // the local list — the intent is what still knows whose transaction this is.
+        const owner = machineId ?? getSession(sessionId)?.metadata?.machineId;
+        if (!owner) {
+            return { kind: 'unavailable' };
+        }
+        const outcome = await this.carrySessionAction<ArchiveMachineVerdict>(sessionId, {
+            machineId: owner,
             operation: 'archive',
             path: `/lan/sessions/${encodeURIComponent(sessionId)}/archive`,
             proof: { operation: 'archive', target: sessionId },
-            run: (baseUrl, token, proof) => archiveSessionAt(baseUrl, token, sessionId, proof ?? undefined).then((ok) => (ok ? true : null)),
+            run: (baseUrl, token, proof) => archiveSessionAt(baseUrl, token, sessionId, proof ?? undefined)
+                .then((ok) => (ok ? { applied: true as const } : null)),
+            // The same action over the server's socket to the machine. The daemon's `killSession`
+            // stops a running process as well as writing the tombstone, which is what the LAN route
+            // does too — so this is the machine being asked, not the server standing in for it.
+            // An answer that did not apply the deletion is a refusal here, not a reason to delete
+            // the server's row: the machine has spoken about this session.
+            onServer: async () => {
+                const verdict = await apiSocket.machineRPC<MachineKillVerdict | undefined, { sessionId: string }>(
+                    owner,
+                    'killSession',
+                    { sessionId },
+                );
+                if (!verdict || verdict.success === false || verdict.applied === false) {
+                    return { applied: false as const, message: verdict?.reason ?? verdict?.message };
+                }
+                return { applied: true as const };
+            },
         });
         if (outcome.kind === 'done') {
+            if (!outcome.value.applied) {
+                log.log(`🗑️ archive ${sessionId}: the machine declined`);
+                return { kind: 'refused', body: outcome.value.message };
+            }
             log.log(`🗑️ archive ${sessionId}: recorded by the machine`);
             return { kind: 'archived' };
+        }
+        if (outcome.kind === 'absent') {
+            log.log(`🗑️ archive ${sessionId}: the machine has no archive route`);
+            return { kind: 'unsupported' };
         }
         if (outcome.kind === 'refused' && outcome.reason === 'no-endpoint') {
             return { kind: 'refused', status: outcome.status, body: outcome.body };
@@ -5827,6 +5936,175 @@ class Sync {
             return { kind: 'refused', status: outcome.status, body: outcome.body };
         }
         return { kind: 'unavailable' };
+    }
+
+    /**
+     * Deletes a session as the person asked, keeping the request until the owning machine records it.
+     *
+     * A row that names a machine belongs to that machine. If it is asleep, the server must not
+     * stand in: the server's delete would remove the account's row while the machine kept running
+     * (and kept replaying) a session nobody meant to keep. So the intent is written first, the row
+     * keeps its place as `deleting`, and the attempt ladder runs until the machine answers. The
+     * server remains the road for rows that name no machine at all, and for a machine whose build
+     * predates the archive route.
+     */
+    async sessionDelete(sessionId: string): Promise<{ success: boolean; message?: string }> {
+        const machineId = getSession(sessionId)?.metadata?.machineId
+            ?? storage.getState().pendingSessionDeletes[sessionId]?.machineId;
+        if (!machineId) {
+            return this.deleteSessionOnServer(sessionId);
+        }
+        storage.getState().queueSessionDelete(sessionId, machineId);
+        return this.attemptSessionDelete(sessionId);
+    }
+
+    /**
+     * One attempt at a queued deletion, and what it does to the intent.
+     *
+     * The intent leaves the queue only for an answer: recorded, declined, or a build without the
+     * route. Silence keeps it and moves its `nextAttemptAt` out along the ladder. Success is
+     * returned for the silent case because the request has been accepted — it is the *machine*
+     * that has not been reached, and the row says so.
+     */
+    private async attemptSessionDelete(sessionId: string): Promise<{ success: boolean; message?: string }> {
+        const intent = storage.getState().pendingSessionDeletes[sessionId];
+        if (!intent || this.deletesInFlight.has(sessionId)) {
+            return { success: true };
+        }
+        this.deletesInFlight.add(sessionId);
+        try {
+            const outcome = await this.archiveSession(sessionId, intent.machineId);
+            const decision = decideSessionDelete(outcome, intent.attempts, Date.now());
+            if (decision.kind === 'archived') {
+                storage.getState().clearSessionDelete(sessionId);
+                // The machine's log is the durable record; this device's tombstone is what keeps a
+                // stale server or daemon listing from putting the row back before the replay lands.
+                storage.getState().deleteSession(sessionId);
+                return { success: true };
+            }
+            if (decision.kind === 'legacy-server') {
+                storage.getState().clearSessionDelete(sessionId);
+                return await this.deleteSessionOnServer(sessionId);
+            }
+            if (decision.kind === 'refused') {
+                storage.getState().clearSessionDelete(sessionId);
+                return { success: false, message: decision.message };
+            }
+            storage.getState().noteSessionDeleteAttempt(sessionId, decision.nextAttemptAt, decision.lastError);
+            return { success: true };
+        } finally {
+            this.deletesInFlight.delete(sessionId);
+            this.scheduleDeleteFlush();
+        }
+    }
+
+    /**
+     * Retries the deletions whose machine was not reachable, nearest due first.
+     *
+     * Woken by the timer below, by a machine or server channel coming live, and by the App
+     * returning to the foreground. The timer honours the ladder; a wake does not, because it
+     * usually *is* the reach the ladder was waiting for — holding the intent back for another
+     * fifteen minutes after the machine has just answered would make the wake pointless.
+     *
+     * A flush already running is not started twice: the same intent must not be in flight over
+     * two channels at once. But a wake that arrived meanwhile is remembered and runs once the
+     * current pass ends, since its candidates were chosen before that reach existed.
+     */
+    async flushPendingSessionDeletes(force = false): Promise<void> {
+        if (this.deleteFlushInFlight) {
+            this.deleteFlushAgain = this.deleteFlushAgain || force;
+            return;
+        }
+        this.deleteFlushInFlight = true;
+        try {
+            let forced = force;
+            do {
+                this.deleteFlushAgain = false;
+                const intents = storage.getState().pendingSessionDeletes;
+                const pending = Object.values(intents).sort((a, b) => a.nextAttemptAt - b.nextAttemptAt);
+                const candidates = forced ? pending : dueSessionDeletes(intents, Date.now());
+                for (const intent of candidates) {
+                    if (storage.getState().pendingSessionDeletes[intent.sessionId] === undefined) {
+                        continue;
+                    }
+                    await this.attemptSessionDelete(intent.sessionId);
+                }
+                // A wake that arrived during this pass is a force in its own right: it names
+                // reach that the candidates above were chosen without.
+                forced = this.deleteFlushAgain;
+            } while (forced);
+        } finally {
+            this.deleteFlushInFlight = false;
+            this.scheduleDeleteFlush();
+        }
+    }
+
+    /** Arms one timer for the earliest waiting intent; there is never more than one. */
+    private scheduleDeleteFlush(): void {
+        if (this.deleteRetryTimer !== null) {
+            clearTimeout(this.deleteRetryTimer);
+            this.deleteRetryTimer = null;
+        }
+        // An intent with a request in flight is not a candidate: its `nextAttemptAt` is in the
+        // past until the answer lands, and arming a timer for it would spin this scheduler. The
+        // attempt itself re-arms when it finishes.
+        const waiting = nextDeleteDueAt(
+            Object.fromEntries(
+                Object.entries(storage.getState().pendingSessionDeletes)
+                    .filter(([sessionId]) => !this.deletesInFlight.has(sessionId)),
+            ),
+        );
+        if (waiting === null) {
+            return;
+        }
+        this.deleteRetryTimer = setTimeout(() => {
+            this.deleteRetryTimer = null;
+            void this.flushPendingSessionDeletes();
+        }, Math.max(0, waiting - Date.now()));
+    }
+
+    /**
+     * The server's delete: how every deletion worked before a machine could record one.
+     *
+     * Reached only for a row with no machine owner, or for a machine whose build answered that it
+     * has no archive route. The local cleanup on an ambiguous answer is deliberate and predates
+     * this path: the person asked for the row to be gone, and a server that cannot confirm a delete
+     * must not leave a row on screen that no other party will remove either.
+     */
+    private async deleteSessionOnServer(sessionId: string): Promise<{ success: boolean; message?: string }> {
+        try {
+            const response = await apiSocket.request(`/v1/sessions/${sessionId}`, {
+                method: 'DELETE'
+            });
+
+            if (response.ok) {
+                return { success: true };
+            }
+
+            // Session already deleted on another device — silently remove from local state.
+            if (response.status === 404) {
+                storage.getState().deleteSession(sessionId);
+                return { success: true };
+            }
+
+            // For other server errors, still clean up locally — the user explicitly asked to
+            // delete and the session may already be gone. Only block on 403 (forbidden).
+            if (response.status !== 403) {
+                storage.getState().deleteSession(sessionId);
+                return { success: true };
+            }
+
+            const error = await response.text();
+            return {
+                success: false,
+                message: error || 'Failed to delete session'
+            };
+        } catch (_error) {
+            // Network error — server unreachable. Clean up locally anyway since the session is
+            // likely already gone from the server (deleted from another device).
+            storage.getState().deleteSession(sessionId);
+            return { success: true };
+        }
     }
 
     /** Whether this session's CLI publishes its working tree in metadata. */
@@ -5896,6 +6174,11 @@ class Sync {
         action: {
             operation: ChannelOperation;
             path: string;
+            /**
+             * The machine to ask, when the caller knows it without the row — a queued deletion
+             * outlives the local session, and the intent is where its owner is remembered.
+             */
+            machineId?: string;
             /** The account's proof names this, not the path: a path changes with the route. */
             proof?: { operation: string; target: string };
             run: (baseUrl: string, token: string, proof: Record<string, string> | undefined) => Promise<T | null>;
@@ -5908,7 +6191,7 @@ class Sync {
             onServer?: () => Promise<T | null>;
         },
     ): Promise<CarryOutcome<T>> {
-        const machineId = getSession(sessionId)?.metadata?.machineId;
+        const machineId = action.machineId ?? getSession(sessionId)?.metadata?.machineId;
         if (!machineId) {
             return { kind: 'refused', reason: 'unsupported', channel: null };
         }
@@ -6126,17 +6409,18 @@ class Sync {
     }
 
     /**
-     * Replays what each machine says it has started and archived, from where this App left off.
+     * Asks a machine to replace a session's process, over whichever channel carries it.
      *
-     * The App learns about a session here before the server knows it exists, which is the point:
-     * the machine has it, so the App can be shown it, and the server catching up is a separate
-     * progress. Asked on occasions rather than on a timer — a machine's own socket coming live, and
-     * the hint it sends when its log moves — because the log changes a handful of times a day and a
-     * poll would be all cost.
+     * The ask can say more than "restart". A generation makes a repeat land on the restart that
+     * has already happened instead of killing a second process, and `expectAccepted` narrows the
+     * wait from the finished outcome to the machine taking responsibility — a restart outlives any
+     * request, and the row's phase carries the rest. Both travel on the LAN route and on the
+     * server's RPC to the same daemon handler, because the machine is the one that decides.
      *
-     * Never fatal: an address that has moved is a reason to try again on the next occasion.
+     * A channel that was asked and did not answer is reported as success: the work may well be
+     * under way, and the next listing is what says so. `null` is kept for "no channel offered it".
      */
-    async restartSession(sessionId: string, machineId: string, options?: { requiresDesktop?: boolean }): Promise<{ success: boolean; newSessionId?: string; error?: string } | null> {
+    async restartSession(sessionId: string, machineId: string, options?: RestartAsk): Promise<LanRestartVerdict | null> {
         const machineKey = this.getMachineKey(machineId);
         if (!machineKey) {
             return null;
@@ -6149,18 +6433,27 @@ class Sync {
             operation: 'restart',
             path: `/lan/sessions/${encodeURIComponent(sessionId)}/restart`,
             proof: { operation: 'restart', target: sessionId },
-            run: (baseUrl, token, proof) => restartSessionAt(baseUrl, token, sessionId, proof ?? undefined, options?.requiresDesktop),
+            run: (baseUrl, token, proof) => restartSessionAt(baseUrl, token, sessionId, proof ?? undefined, options),
             // The server carries the same action by asking the daemon on this App's behalf. It is a
-            // channel like the others: tried when its turn comes, and skipped when it cannot.
-            onServer: () => apiSocket.machineRPC<LanRestartVerdict, { sessionId: string; requiresDesktop?: boolean }>(
-                machineId, 'restartSession', options?.requiresDesktop === undefined
-                    ? { sessionId }
-                    : { sessionId, requiresDesktop: options.requiresDesktop },
+            // channel like the others: tried when its turn comes, and skipped when it cannot. The
+            // daemon reads the same fields from this path as from its own route, so the ask is
+            // built once rather than described twice and allowed to drift.
+            onServer: () => apiSocket.machineRPC<
+                LanRestartVerdict,
+                { sessionId: string; requiresDesktop?: boolean; generation?: number; expect?: 'accepted' }
+            >(
+                machineId, 'restartSession', { sessionId, ...(restartAskBody(options) ?? {}) },
             ),
         });
         if (outcome.kind === 'done') {
-            log.log(`🔄 restart ${sessionId}: ${outcome.value.success ? 'accepted' : outcome.value.error ?? 'refused'}`);
-            return outcome.value;
+            const verdict = outcome.value;
+            log.log(
+                `🔄 restart ${sessionId}: ${verdict.success ? 'accepted' : verdict.error ?? 'refused'}`
+                + `${verdict.stage ? ` stage=${verdict.stage}` : ''}`
+                + `${verdict.generation !== undefined ? ` generation=${verdict.generation}` : ''}`
+                + `${verdict.reason ? ` reason=${verdict.reason}` : ''}`,
+            );
+            return verdict;
         }
         if (outcome.kind === 'bad-request') {
             log.log(`🔄 restart ${sessionId}: the machine rejected the request (${outcome.status})`);
@@ -6248,10 +6541,11 @@ class Sync {
             for (const summary of answer.sessions) {
                 const key = summary.happySessionId ?? summary.tag;
                 if (!key) continue;
-                const previous = byKey.get(key);
-                if (!previous || (summary.origin !== 'server' && previous.summary.origin === 'server')) {
-                    byKey.set(key, { summary, machineId: answer.machineId, via: answer.via });
-                }
+                byKey.set(key, preferDaemonSessionAnswer(byKey.get(key), {
+                    summary,
+                    machineId: answer.machineId,
+                    via: answer.via,
+                }));
             }
         }
         const sessions = [...byKey.values()].map(({ summary, machineId, via }) => ({ ...summary, via, machineId }));
@@ -6266,12 +6560,14 @@ class Sync {
         const runtime = dropDeletedDaemonSessionRows(
             [...byKey.values()].map(({ summary }) => summary),
             storage.getState().deletedSessions,
+            storage.getState().deletedSessionUids,
         ).flatMap((summary) => {
             const sessionId = summary.happySessionId;
             if (!sessionId) return [];
             if (summary.phase === undefined && summary.generation === undefined
                 && summary.observedGeneration === undefined && summary.observedAt === undefined
-                && summary.reason === undefined) {
+                && summary.reason === undefined && summary.desiredLifecycle === undefined
+                && summary.divergence === undefined) {
                 return [];
             }
             return [{
@@ -6281,6 +6577,11 @@ class Sync {
                 observedGeneration: summary.observedGeneration,
                 observedAt: summary.observedAt,
                 reason: summary.reason,
+                desiredLifecycle: summary.desiredLifecycle,
+                // A listing is a complete statement about the row: the want is either outstanding
+                // in it or it is not, so a divergence it does not carry is one the facts caught up
+                // with — the explicit `null` is what clears it.
+                divergence: summary.divergence ?? null,
             }];
         });
         if (runtime.length > 0) {
@@ -6301,8 +6602,11 @@ class Sync {
             // webhook names it and a later listing carries the id.
             const id = summary.happySessionId;
             if (!id) continue;
-            catalogIds.add(id);
             const existing = knownSessions[id];
+            const uid = summary.sessionUid ?? existing?.sessionUid;
+            // A deletion of the lineage is a deletion of this row, whatever id it arrives under.
+            if (uid !== undefined && storage.getState().deletedSessionUids[uid] !== undefined) continue;
+            catalogIds.add(id);
             let metadata = existing?.metadata ?? null;
             let metadataVersion = existing?.metadataVersion ?? 0;
             let agentState = existing?.agentState ?? null;
@@ -6374,6 +6678,10 @@ class Sync {
                 thinkingAt: existing?.thinkingAt ?? 0,
                 presence: active ? 'online' : at,
                 origin: owner ? 'daemon' : 'server',
+                // The machine's name for the lineage, when it publishes one. Absent from an older
+                // daemon, and from a spawn that has not minted it yet; keeping the held value on
+                // absence is the same rule the metadata lift follows.
+                ...(uid !== undefined ? { sessionUid: uid } : {}),
                 ...(summary.restartingSince !== undefined ? { restartingAt: summary.restartingSince } : {}),
             } as Session);
         }
@@ -6384,11 +6692,44 @@ class Sync {
         // The deletion log, applied as state: the server's copy may lag until the daemon's replay
         // reaches it, so a tombstone is the local reason the row is gone now.
         const tombstoned = new Set<string>();
+        // A tombstone names the server id it was recorded under, but the row can be back under a
+        // different one — a conversation resumed after the id changed. The uid is what says the two
+        // ids are the same deletion, so rows are also looked up by it. Built once per poll: the
+        // machine's archived set only grows, and one pass over the sessions is cheaper than one
+        // pass per tombstone.
+        let byUid: Map<string, { id: string }> | null = null;
+        const sessionsByUid = () => {
+            if (byUid === null) {
+                byUid = new Map();
+                for (const session of Object.values(getSessions())) {
+                    const uid = session.sessionUid ?? session.metadata?.sessionUid;
+                    if (uid !== undefined && !byUid.has(uid)) {
+                        byUid.set(uid, session);
+                    }
+                }
+            }
+            return byUid;
+        };
         for (const answer of answers) {
             for (const tombstone of answer.tombstones ?? []) {
+                // Recorded even when no row is held right now: the point is that a later listing
+                // cannot bring the lineage back, not only that today's copy goes away.
+                if (tombstone.sessionUid !== undefined) {
+                    storage.getState().rememberDeletedSessionUid(tombstone.sessionUid, tombstone.at);
+                }
+                const matches = new Set<string>();
                 if (getSession(tombstone.sessionId)) {
-                    storage.getState().deleteSession(tombstone.sessionId);
-                    tombstoned.add(tombstone.sessionId);
+                    matches.add(tombstone.sessionId);
+                }
+                if (tombstone.sessionUid !== undefined) {
+                    const byName = sessionsByUid().get(tombstone.sessionUid);
+                    if (byName !== undefined) {
+                        matches.add(byName.id);
+                    }
+                }
+                for (const id of matches) {
+                    storage.getState().deleteSession(id);
+                    tombstoned.add(id);
                 }
             }
         }

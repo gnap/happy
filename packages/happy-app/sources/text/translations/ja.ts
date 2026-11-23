@@ -125,9 +125,15 @@ export const ja: TranslationStructure = {
         lastSeen: ({ time }: { time: string }) => `最終アクセス: ${time}`,
         permissionRequired: '権限が必要です',
         restarting: '再起動中…',
+        deleting: '削除中…',
         activeNow: 'アクティブ',
         unknown: '不明',
         creating: '作成中…',
+        archiving: 'アーカイブ中…',
+        applying: '適用中…',
+        couldNotStart: '起動できませんでした',
+        couldNotArchive: 'アーカイブできませんでした',
+        couldNotApply: '変更を適用できませんでした',
     },
 
     time: {
@@ -350,6 +356,7 @@ export const ja: TranslationStructure = {
 
     session: {
         inputPlaceholder: 'メッセージを入力...',
+        peerMessage: '別の Claude セッションから',
         encrypting: '接続を確立中…',
         backgroundTasks: 'バックグラウンドタスク',
         activityScheduled: 'スケジュール',
@@ -426,6 +433,9 @@ export const ja: TranslationStructure = {
         channelWhyNotOnNetwork: 'このネットワークでマシンが見つかりません',
         channelWhyNoKey: 'このデバイスにこのマシンの鍵がありません',
         channelWhyUnknown: 'セッション情報を待っています',
+        machineStatus: 'マシンの状態',
+        machineStatusDetail: ({ generation, observed }: { generation: number; observed: number }) =>
+            `リビジョン ${generation} · 確認済み ${observed}`,
         created: '作成日時',
         lastUpdated: '最終更新',
         sequence: 'シーケンス',

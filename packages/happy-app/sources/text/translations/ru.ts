@@ -344,6 +344,9 @@ export const ru: TranslationStructure = {
         channelWhyNotOnNetwork: 'Машина не найдена в этой сети',
         channelWhyNoKey: 'На этом устройстве нет ключа для машины',
         channelWhyUnknown: 'Ожидание данных сессии',
+        machineStatus: 'Состояние машины',
+        machineStatusDetail: ({ generation, observed }: { generation: number; observed: number }) =>
+            `Ревизия ${generation} · применено ${observed}`,
         created: 'Создано',
         lastUpdated: 'Последнее обновление',
         sequence: 'Последовательность',
@@ -416,9 +419,15 @@ export const ru: TranslationStructure = {
         lastSeen: ({ time }: { time: string }) => `в сети ${time}`,
         permissionRequired: 'требуется разрешение',
         restarting: 'Перезапуск…',
+        deleting: 'Удаление…',
         activeNow: 'Активен сейчас',
         unknown: 'неизвестно',
         creating: 'Создание…',
+        archiving: 'Архивация…',
+        applying: 'Применение…',
+        couldNotStart: 'Не удалось запустить',
+        couldNotArchive: 'Не удалось архивировать',
+        couldNotApply: 'Не удалось применить изменение',
     },
 
     time: {
@@ -430,6 +439,7 @@ export const ru: TranslationStructure = {
 
     session: {
         inputPlaceholder: 'Введите сообщение...',
+        peerMessage: 'От другой сессии Claude',
         encrypting: 'установка соединения…',
         backgroundTasks: 'Фоновые задачи',
         activityScheduled: 'Запланировано',

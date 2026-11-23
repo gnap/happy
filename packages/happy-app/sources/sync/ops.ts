@@ -27,6 +27,7 @@ function requireChannelFor(operation: ChannelOperation): void {
 import { apiSocket } from './apiSocket';
 import { sync } from './sync';
 import { getSessions, storage } from './storage';
+import type { LanRestartVerdict } from './lan/client';
 import type { MachineMetadata } from './storageTypes';
 import { channelDrivers } from './channels/measure';
 import { operationSupported } from './channels/resolve';
@@ -567,11 +568,7 @@ export async function sessionRipgrep(
  * Kill the session process immediately via daemon RPC.
  */
 // Types for session restart
-interface SessionRestartResponse {
-    success: boolean;
-    newSessionId?: string;
-    error?: string;
-}
+type SessionRestartResponse = LanRestartVerdict;
 
 /**
  * Restart a session, reconnecting to the same server session with the newer CLI version.
@@ -581,10 +578,25 @@ interface SessionRestartResponse {
  * has to be told, and its channel is the one that is up then — and the server is *a channel* that
  * carries the same action by asking the daemon on this App's behalf. There is no chain of
  * substitutions here: a channel that cannot carry it, or that failed, is where the next one starts.
+ *
+ * The ask carries the generation this device observed and asks for acceptance rather than the
+ * finished outcome. A restart outlives a request — the old process has to go, a new one boot and
+ * register — and waiting for all of that is how the same tap, retried after a lost answer, became a
+ * second restart. The machine answers as soon as it has taken responsibility; the row's phase says
+ * the rest. A build that predates those fields ignores them and still waits, so this works against
+ * an older machine exactly as it did before.
  */
-export async function sessionRestart(sessionId: string, machineId: string, options?: { requiresDesktop?: boolean }): Promise<SessionRestartResponse> {
+export async function sessionRestart(
+    sessionId: string,
+    machineId: string,
+    options?: { requiresDesktop?: boolean; generation?: number }
+): Promise<SessionRestartResponse> {
     try {
-        const response = await sync.restartSession(sessionId, machineId, options);
+        const response = await sync.restartSession(sessionId, machineId, {
+            ...options,
+            // The UI's ask: answer once the machine has taken it, not once the process is back.
+            expectAccepted: true,
+        });
         if (!response) {
             // Nothing carried it. Saying that is more use than a substitute attempt: the reasons are
             // per channel, and the caller has nowhere useful to look for them.
@@ -662,64 +674,13 @@ export async function getToolCallFullContent(
 /**
  * Permanently delete a session.
  *
- * Where a machine that owns the session can be reached, the deletion is asked of *it*: it records
- * the removal in its own log and replays it to the server on its own cursor, which is what makes
- * the session stay deleted after this App has forgotten it. The server's delete remains for the
- * sessions no machine channel can take — a machine that is gone, or a build without the route —
- * and for the row the machine has never heard of.
+ * The policy lives in `sync.sessionDelete` because the retry ladder and the channels are already
+ * there: a machine-owned row is asked of its machine and the intent is kept until the machine
+ * records it, while the server's delete remains only for rows with no machine owner and for
+ * machines whose build predates the archive route.
  */
 export async function sessionDelete(sessionId: string): Promise<{ success: boolean; message?: string }> {
-    try {
-        const outcome = await sync.archiveSession(sessionId);
-        if (outcome.kind === 'archived') {
-            // The machine has the durable answer; the App drops the row now rather than waiting for
-            // the server to hear about it, which is minutes away when the server channel is down.
-            storage.getState().deleteSession(sessionId);
-            return { success: true };
-        }
-        if (outcome.kind === 'refused') {
-            // The machine answered and said no. Asking the server would be the same account by
-            // another road, and would report the machine's answer as if no one had given one.
-            return {
-                success: false,
-                message: outcome.body || 'The machine refused to delete this session'
-            };
-        }
-
-        // No machine channel answered, or the machine does not have this session: the server's
-        // delete is the remaining road.
-        const response = await apiSocket.request(`/v1/sessions/${sessionId}`, {
-            method: 'DELETE'
-        });
-
-        if (response.ok) {
-            return { success: true };
-        }
-
-        // Session already deleted on another device — silently remove from local state.
-        if (response.status === 404) {
-            storage.getState().deleteSession(sessionId);
-            return { success: true };
-        }
-
-        // For other server errors, still clean up locally — the user explicitly asked
-        // to delete and the session may already be gone. Only block on 403 (forbidden).
-        if (response.status !== 403) {
-            storage.getState().deleteSession(sessionId);
-            return { success: true };
-        }
-
-        const error = await response.text();
-        return {
-            success: false,
-            message: error || 'Failed to delete session'
-        };
-    } catch (_error) {
-        // Network error — server unreachable. Clean up locally anyway since the
-        // session is likely already gone from the server (deleted from another device).
-        storage.getState().deleteSession(sessionId);
-        return { success: true };
-    }
+    return sync.sessionDelete(sessionId);
 }
 
 // Export types for external use
