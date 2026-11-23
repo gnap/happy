@@ -5,6 +5,7 @@ import { ToolViewProps } from './_all';
 import { ToolSectionView } from '../ToolSectionView';
 import { sessionAllow } from '@/sync/ops';
 import { sync } from '@/sync/sync';
+import { askUserQuestionAnswers, answerLabels } from '../askUserQuestionResult';
 import { t } from '@/text';
 import { Ionicons } from '@expo/vector-icons';
 
@@ -178,27 +179,24 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
     // When tool.result arrives after mount (e.g. from synced message stream),
     // restore selections so the submitted view shows the answer.
     React.useEffect(() => {
-        if (tool.state === 'completed' || tool.state === 'error') {
-            const result = tool.result as Record<string, unknown> | undefined;
-            const answers = result?.answers as Record<string, string> | undefined;
-            if (answers && questions) {
-                const map = new Map<number, Set<number>>();
-                questions.forEach((q, qIndex) => {
-                    const answer = answers[q.question];
-                    if (answer) {
-                        const labels = answer.split(', ').map(s => s.trim());
-                        const indices = new Set<number>();
-                        labels.forEach(label => {
-                            const optIdx = q.options.findIndex(o => o.label === label);
-                            if (optIdx >= 0) indices.add(optIdx);
-                        });
-                        if (indices.size > 0) map.set(qIndex, indices);
-                    }
-                });
-                if (map.size > 0) setSelections(map);
-            }
+        const answers = askUserQuestionAnswers(tool.result);
+        if (!answers || !questions) {
+            return;
         }
-    }, [tool.result, tool.state, questions]);
+        const map = new Map<number, Set<number>>();
+        questions.forEach((q, qIndex) => {
+            const labels = answerLabels(answers[q.question]);
+            const indices = new Set<number>();
+            labels.forEach(label => {
+                const optIdx = Array.isArray(q.options)
+                    ? q.options.findIndex(o => o.label === label)
+                    : -1;
+                if (optIdx >= 0) indices.add(optIdx);
+            });
+            if (indices.size > 0) map.set(qIndex, indices);
+        });
+        if (map.size > 0) setSelections(map);
+    }, [tool.result, questions]);
 
     if (!questions || !Array.isArray(questions) || questions.length === 0) {
         return null;
@@ -210,14 +208,8 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
     // 2. It wasn't already submitted locally
     // 3. Either has a permission id (CLI flow) or the tool is still running
     //    (Cursor / agent-state flow where permission may not be set).
-    const hasAnswers = tool.result && typeof tool.result === 'object' && !!(tool.result as any).answers;
+    const hasAnswers = askUserQuestionAnswers(tool.result) !== null;
     const canInteract = !isSubmitted && !hasAnswers && (!!tool.permission?.id || tool.state === 'running');
-
-    // Diagnostic: log when form is non-interactive
-    if (!canInteract && !isSubmitted) {
-        const resultType = typeof tool.result;
-        console.warn(`[AskUserQuestion] form non-interactive: tool.state=${tool.state}, perm.id=${tool.permission?.id}, perm.status=${tool.permission?.status}, isSubmitted=${isSubmitted}, hasAnswers=${hasAnswers}, resultType=${resultType}`);
-    }
 
     // Check if all questions have at least one selection
     const allQuestionsAnswered = questions.every((_, qIndex) => {
@@ -265,7 +257,7 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
         const answers: Record<string, string> = {};
         questions.forEach((q, qIndex) => {
             const selected = selections.get(qIndex);
-            const selectedLabels = (selected && selected.size > 0)
+            const selectedLabels = (selected && selected.size > 0 && Array.isArray(q.options))
                 ? Array.from(selected)
                     .map(optIndex => q.options[optIndex]?.label)
                     .filter(Boolean)
@@ -299,20 +291,26 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
         }
     }, [sessionId, questions, selections, allQuestionsAnswered, isSubmitting, tool.permission?.id]);
 
-    // Show submitted state only when there are actual answers
-    // (hasAnswers is defined above in the canInteract block)
-    if (isSubmitted || (tool.state === 'completed' && hasAnswers)) {
+    // Show submitted state whenever there are actual answers, whichever state the card ended
+    // up in — an answered question that later read as canceled/error still has an answer.
+    if (isSubmitted || hasAnswers) {
+        // The stored answer is the authority when it arrived with the result; the local
+        // selections only know about options that were still in the input.
+        const storedAnswers = askUserQuestionAnswers(tool.result);
         return (
             <ToolSectionView>
                 <View style={styles.submittedContainer}>
                     {questions.map((q, qIndex) => {
                         const selected = selections.get(qIndex);
-                        const selectedLabels = selected
+                        const fromSelections = selected && Array.isArray(q.options)
                             ? Array.from(selected)
                                 .map(optIndex => q.options[optIndex]?.label)
-                                .filter(Boolean)
-                                .join(', ')
-                            : '-';
+                                .filter((label): label is string => typeof label === 'string' && label.length > 0)
+                            : [];
+                        const labels = fromSelections.length > 0
+                            ? fromSelections
+                            : answerLabels(storedAnswers?.[q.question]);
+                        const selectedLabels = labels.length > 0 ? labels.join(', ') : '-';
                         return (
                             <View key={qIndex} style={styles.submittedItem}>
                                 <Text style={styles.submittedHeader}>{q.header}:</Text>
