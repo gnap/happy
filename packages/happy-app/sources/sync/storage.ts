@@ -6,6 +6,7 @@ import { createReducer, reducer, ReducerState } from "./reducer/reducer";
 import { bump } from './metrics';
 import { Message } from "./typesMessage";
 import { collapseDuplicateMessages, mergePageIntoWindow } from "./messageIdentity";
+import { visibleWindow } from "./reducer/standIns";
 import { NormalizedMessage } from "./typesRaw";
 import type { DaemonRoute, LanSighting, RelayEndpoint, SessionChannel, SessionDivergence } from './lan/types';
 import { daemonSessionListSignature, daemonSessionRows, dropDeletedDaemonSessionRows, isStaleSessionRuntimeStatement, keepPendingDaemonSessionRows, mergeSessionRuntime, type DaemonSessionEntry, type DaemonSessionReport, type SessionRuntimeEntry, type SessionRuntimeReport } from './daemonSessionList';
@@ -1342,12 +1343,13 @@ export const storage = create<StorageState>()((set, get) => {
                         mergedMessagesMap[message.id] = message;
                     });
 
-                    const messagesArray = Object.values(mergedMessagesMap)
-                        .sort((a, b) => b.createdAt - a.createdAt);
+                    const visible = visibleWindow(
+                        Object.values(mergedMessagesMap).sort((a, b) => b.createdAt - a.createdAt)
+                    );
 
                     sessionMessagesLive.set(session.id, {
-                        messages: messagesArray,
-                        messagesMap: mergedMessagesMap,
+                        messages: visible.messages,
+                        messagesMap: visible.messagesMap,
                         reducerState: existingSessionMessages.reducerState,
                         isLoaded: existingSessionMessages.isLoaded,
                         oldestSeq: existingSessionMessages.oldestSeq,
@@ -1428,9 +1430,10 @@ export const storage = create<StorageState>()((set, get) => {
                     mergedMessagesMap[message.id] = message;
                 });
 
-                // Convert to array and sort by createdAt
-                const messagesArray = Object.values(mergedMessagesMap)
-                    .sort((a, b) => b.createdAt - a.createdAt);
+                // Convert to array and sort by createdAt, dropping stand-ins the window excludes
+                const visible = visibleWindow(
+                    Object.values(mergedMessagesMap).sort((a, b) => b.createdAt - a.createdAt)
+                );
 
                 // Update session with todos and latestUsage
                 // IMPORTANT: We extract latestUsage from the mutable reducerState and copy it to the Session object
@@ -1451,8 +1454,8 @@ export const storage = create<StorageState>()((set, get) => {
 
                 sessionMessagesLive.set(sessionId, {
                     ...existingSession,
-                    messages: messagesArray,
-                    messagesMap: mergedMessagesMap,
+                    messages: visible.messages,
+                    messagesMap: visible.messagesMap,
                     reducerState: existingSession.reducerState, // Explicitly include the mutated reducer state
                     isLoaded: true
                 });
@@ -1476,26 +1479,23 @@ export const storage = create<StorageState>()((set, get) => {
                 const reducerState = createReducer();
 
                 // Process AgentState if it exists
-                let messages: Message[] = [];
-                let messagesMap: Record<string, Message> = {};
-
+                const messagesMap: Record<string, Message> = {};
                 if (agentState) {
                     // Process AgentState through reducer to get initial permission messages
                     const reducerResult = reducer(reducerState, [], agentState);
-                    const processedMessages = reducerResult.messages;
-
-                    processedMessages.forEach(message => {
+                    for (const message of reducerResult.messages) {
                         messagesMap[message.id] = message;
-                    });
-
-                    messages = Object.values(messagesMap)
-                        .sort((a, b) => b.createdAt - a.createdAt);
+                    }
                 }
+
+                const visible = visibleWindow(
+                    Object.values(messagesMap).sort((a, b) => b.createdAt - a.createdAt)
+                );
 
                 sessionMessagesLive.set(sessionId, {
                     reducerState,
-                    messages,
-                    messagesMap,
+                    messages: visible.messages,
+                    messagesMap: visible.messagesMap,
                     isLoaded: true,
                     oldestSeq: 0,
                     newestSeq: 0,
@@ -1532,17 +1532,15 @@ export const storage = create<StorageState>()((set, get) => {
             // two entries (the queued `out` copy and the server's `in` echo) and a window merged
             // from two sources can hold both. Collapsing here is what keeps the list showing one
             // bubble per message, whatever write order produced the window.
-            const sorted = collapseDuplicateMessages([...messages].sort((a, b) => b.createdAt - a.createdAt));
-            const messagesMap: Record<string, Message> = {};
-            for (const msg of sorted) {
-                messagesMap[msg.id] = msg;
-            }
+            const visible = visibleWindow(
+                collapseDuplicateMessages([...messages].sort((a, b) => b.createdAt - a.createdAt))
+            );
             const totalSeq = sessionLive.get(sessionId)?.seq ?? 0;
             const cachedBitmap = computeBitmap(oldestSeq, lastSeq, totalSeq);
 
             sessionMessagesLive.set(sessionId, {
-                messages: sorted,
-                messagesMap,
+                messages: visible.messages,
+                messagesMap: visible.messagesMap,
                 reducerState,
                 isLoaded: true,
                 oldestSeq,
@@ -1621,17 +1619,15 @@ export const storage = create<StorageState>()((set, get) => {
                 messagesMap[msg.id] = msg;
             }
             // One message per bubble, however many wire entries produced it (see above).
-            const sorted = collapseDuplicateMessages(Object.values(messagesMap).sort((a, b) => b.createdAt - a.createdAt));
-            const cleanedMap: Record<string, Message> = {};
-            for (const msg of sorted) {
-                cleanedMap[msg.id] = msg;
-            }
+            const visible = visibleWindow(
+                collapseDuplicateMessages(Object.values(messagesMap).sort((a, b) => b.createdAt - a.createdAt))
+            );
             const totalSeq = session?.seq ?? 0;
             const cachedBitmap = computeBitmap(oldestSeq, newestSeq, totalSeq);
 
             sessionMessagesLive.set(sessionId, {
-                messages: sorted,
-                messagesMap: cleanedMap,
+                messages: visible.messages,
+                messagesMap: visible.messagesMap,
                 reducerState,
                 isLoaded: true,
                 oldestSeq,
@@ -1676,15 +1672,17 @@ export const storage = create<StorageState>()((set, get) => {
                 }
             }
 
-            const sorted = Object.values(mergedMap).sort((a, b) => b.createdAt - a.createdAt);
+            const visible = visibleWindow(
+                Object.values(mergedMap).sort((a, b) => b.createdAt - a.createdAt)
+            );
 
             const totalSeq = sessionLive.get(sessionId)?.seq ?? 0;
             const cachedBitmap = computeBitmap(newOldestSeq, existing.newestSeq, totalSeq);
 
             sessionMessagesLive.set(sessionId, {
                 ...existing,
-                messages: sorted,
-                messagesMap: mergedMap,
+                messages: visible.messages,
+                messagesMap: visible.messagesMap,
                 oldestSeq: newOldestSeq,
                 cachedBitmap,
                 hasOlderMessages,
