@@ -600,7 +600,10 @@ export function startRelay(options: RelayOptions): RelayHandle {
                         teardown(previous);
                         try { previous.ws.close(4000, 'replaced'); } catch { /* gone */ }
                     }
-                    ws.send(JSON.stringify({ t: 'ok', tag }));
+                    // `features` is how a daemon learns what this relay can answer. A daemon that
+                    // sees "ping" may use the heartbeat; one that does not simply behaves as
+                    // before, so the frame stays additive.
+                    ws.send(JSON.stringify({ t: 'ok', tag, features: ['ping'] }));
                     // Names only. A machine needs to know which routes exist so it can offer them
                     // and refuse an unknown one early; what a route points at stays here.
                     ws.send(JSON.stringify({ t: 'routes', names: [...routes.keys()] }));
@@ -668,6 +671,11 @@ export function startRelay(options: RelayOptions): RelayHandle {
                     // machine's log records a new address.
                     daemon.reachable = msg.endpoints ? { endpoints: msg.endpoints, at: msg.at, rev: msg.rev } : null;
                     broadcastDirectory();
+                } else if (msg.t === 'ping') {
+                    // Application-level liveness: the daemon cannot see WebSocket control-frame
+                    // pongs, so the round trip has to be made of something it can read. Any frame
+                    // back proves both directions; this one is cheap and has no other meaning.
+                    try { ws.send(JSON.stringify({ t: 'pong', at: Date.now() })); } catch { /* closing */ }
                 } else if (msg.t === 'eg-open') {
                     openEgress(daemon, msg);
                 } else if (msg.t === 'eg-data') {
