@@ -89,6 +89,36 @@ const DIRECTORY_PUBLISH_INTERVAL_MS = 5_000;
  * the App has to understand.
  */
 const LOCAL_SOCKET_PING_INTERVAL_MS = 30_000;
+/**
+ * How much queued output means this socket is not keeping up.
+ *
+ * The directory frames — every session's summary, every five seconds — are this client's own
+ * traffic, and on a slow or flapping uplink they are what fills the queue first. Once queued
+ * output passes this, there is no point adding more: it would sit behind the backlog and make
+ * every egress frame behind it later still.
+ */
+const PUBLISH_HOLD_BYTES = 256 * 1024;
+/**
+ * How long a backed-up socket is given before it is treated as dead.
+ *
+ * A socket that drops without a close event — a WiFi hop that forgets the flow, a NAT that
+ * expired the mapping — keeps accepting writes into its kernel buffer forever. Nothing in the
+ * WebSocket API notices; the daemon's own traffic just stops arriving. Three checks at this
+ * interval is long enough for a genuinely slow link to drain and short enough that a session is
+ * not left mute for minutes.
+ */
+const BACKLOG_CHECK_INTERVAL_MS = 10_000;
+const BACKLOG_DEAD_BYTES = 512 * 1024;
+const BACKLOG_DEAD_CHECKS = 3;
+/**
+ * Heartbeat cadence and deadline, used only when the relay advertises support.
+ *
+ * Application-level rather than WebSocket control frames: the Bun client answers pings but exposes
+ * no pong event, so a control-frame ping is a liveness check the daemon cannot read the answer to.
+ * A frame back from the relay is proof both directions still carry traffic.
+ */
+const HEARTBEAT_INTERVAL_MS = 20_000;
+const HEARTBEAT_TIMEOUT_MS = 45_000;
 const STRIP_REQUEST_HEADERS = new Set(['host', 'connection', 'content-length', 'accept-encoding']);
 const STRIP_RESPONSE_HEADERS = new Set(['content-length', 'content-encoding', 'transfer-encoding', 'connection']);
 
@@ -107,6 +137,8 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
   /** The address set last published, deduped the same way. */
   let publishedReachable: string | null = null;
   let directoryTimer: ReturnType<typeof setInterval> | null = null;
+  /** Consecutive health checks that found the socket backed up past the point of recovery. */
+  let backlogChecks = 0;
   /**
    * How to write to the *registered* connection, or null while there is none.
    *
@@ -164,10 +196,16 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
     });
   };
 
+  /** Whether this connection is too backed up to take another directory frame. */
+  const publishHeld = (): boolean => {
+    const buffered = (socket as unknown as { bufferedAmount?: number } | null)?.bufferedAmount;
+    return typeof buffered === 'number' && buffered > PUBLISH_HOLD_BYTES;
+  };
+
   /** Sends the session list the relay publishes, if it is different from the last one. */
   const publishSessions = () => {
     const send = publishFrame;
-    if (!send || stopped) return;
+    if (!send || stopped || publishHeld()) return;
     let sessions: unknown[];
     try {
       sessions = options.getSessions?.() ?? [];
@@ -190,7 +228,7 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
    */
   const publishReachable = () => {
     const send = publishFrame;
-    if (!send || stopped) return;
+    if (!send || stopped || publishHeld()) return;
     let reachable: { endpoints: unknown[]; at: number; rev: number } | null;
     try {
       reachable = options.getReachable?.() ?? null;
@@ -204,6 +242,22 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
     publishedReachable = encoded;
     try { send({ t: 'reachable', ...reachable }); } catch { /* the close handler reconnects */ }
   };
+
+  /**
+   * Watches the socket for the failure a close event does not report: a connection that is dead
+   * underneath but still writable. Closing it is what starts the existing reconnect path.
+   */
+  const healthTimer = setInterval(() => {
+    const ws = socket;
+    if (stopped || !ws) { backlogChecks = 0; return; }
+    const buffered = (ws as unknown as { bufferedAmount?: number }).bufferedAmount ?? 0;
+    backlogChecks = buffered > BACKLOG_DEAD_BYTES ? backlogChecks + 1 : 0;
+    if (backlogChecks < BACKLOG_DEAD_CHECKS) return;
+    backlogChecks = 0;
+    logger.warn(`[relay] uplink stalled with ${buffered} bytes queued; reconnecting`);
+    try { ws.close(4001, 'uplink stalled'); } catch { /* onclose follows */ }
+  }, BACKLOG_CHECK_INTERVAL_MS);
+  (healthTimer as unknown as { unref?: () => void }).unref?.();
 
   /** Everything the relay's directory is built from. */
   const publishDirectory = () => {
@@ -229,7 +283,11 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
       try { ws.send(JSON.stringify(frame)); } catch { /* the close handler reconnects */ }
     };
 
+    let lastFrameAt = Date.now();
+    let pingTimer: ReturnType<typeof setInterval> | null = null;
+
     ws.onmessage = (event) => {
+      lastFrameAt = Date.now();
       let msg: any;
       try { msg = JSON.parse(String(event.data)); } catch { return; }
 
@@ -247,6 +305,21 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
         publishedSessions = null;
         publishedReachable = null;
         publishDirectory();
+        // Only when the relay says it answers: an older relay would let every ping go unanswered
+        // and this client would reconnect on a schedule for nothing.
+        const features: unknown = (msg as { features?: unknown }).features;
+        if (Array.isArray(features) && features.includes('ping') && pingTimer === null) {
+          pingTimer = setInterval(() => {
+            if (stopped || ws.readyState !== WebSocket.OPEN) return;
+            if (Date.now() - lastFrameAt > HEARTBEAT_TIMEOUT_MS) {
+              logger.warn(`[relay] no frame from the relay in ${Math.round((Date.now() - lastFrameAt) / 1000)}s; reconnecting`);
+              try { ws.close(4002, 'heartbeat lost'); } catch { /* onclose follows */ }
+              return;
+            }
+            send({ t: 'ping' });
+          }, HEARTBEAT_INTERVAL_MS);
+          (pingTimer as any).unref?.();
+        }
         if (directoryTimer === null) {
           directoryTimer = setInterval(publishDirectory, DIRECTORY_PUBLISH_INTERVAL_MS);
           (directoryTimer as any).unref?.();
@@ -366,9 +439,12 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
       egressStreams.clear();
       setConnected(false);
       if (stopped) return;
+      if (pingTimer !== null) { clearInterval(pingTimer); pingTimer = null; }
+      // Jitter so a fleet of machines that lost the relay together does not return in lockstep.
       const delay = opened ? minBackoff : backoff;
+      const wait = Math.round(delay * (0.75 + Math.random() * 0.5));
       backoff = Math.min(backoff * 2, maxBackoff);
-      retryTimer = setTimeout(connect, delay);
+      retryTimer = setTimeout(connect, wait);
       (retryTimer as any).unref?.();
     };
     ws.onclose = onGone;
