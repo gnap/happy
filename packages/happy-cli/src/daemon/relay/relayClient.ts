@@ -319,6 +319,7 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
             send({ t: 'ping' });
           }, HEARTBEAT_INTERVAL_MS);
           (pingTimer as any).unref?.();
+          logger.debug(`[relay] heartbeat started (every ${HEARTBEAT_INTERVAL_MS / 1000}s, reconnecting after ${HEARTBEAT_TIMEOUT_MS / 1000}s of silence)`);
         }
         if (directoryTimer === null) {
           directoryTimer = setInterval(publishDirectory, DIRECTORY_PUBLISH_INTERVAL_MS);
