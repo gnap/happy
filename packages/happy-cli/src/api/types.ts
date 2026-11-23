@@ -546,7 +546,12 @@ export type AgentState = {
   completedRequests?: {
     [id: string]: {
       tool: string,
-      arguments: any,
+      /**
+       * Absent for an answered AskUserQuestion: the permission response carries the questions in
+       * `updatedInput`, and repeating the form here put every answered question in agentState
+       * twice — agentState is pushed whole.
+       */
+      arguments?: any,
       createdAt: number,
       completedAt: number,
       status: 'canceled' | 'denied' | 'approved',

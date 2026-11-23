@@ -664,6 +664,7 @@ export const ru: TranslationStructure = {
         },
         askUserQuestion: {
             submit: 'Отправить ответ',
+            notAnswered: 'Нет ответа',
             multipleQuestions: ({ count }: { count: number }) => `${count} ${plural({ count, one: 'вопрос', few: 'вопроса', many: 'вопросов' })}`,
             other: 'Другое',
             otherDescription: 'Введите свой ответ',

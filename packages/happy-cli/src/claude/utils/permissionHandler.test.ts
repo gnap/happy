@@ -129,6 +129,69 @@ describe('PermissionHandler', () => {
     await expect(pending).rejects.toThrow('Session reset');
   });
 
+  it('records an answered AskUserQuestion without repeating its form in arguments', async () => {
+    const session = makeSession();
+    const handler = new PermissionHandler(session);
+    const input = { questions: [{ question: 'Proceed?', header: 'Action', options: [] }] };
+    handler.onMessage({
+      type: 'assistant',
+      message: { content: [{ type: 'tool_use', id: 'call_ask_1', name: 'AskUserQuestion', input }] },
+    } as any);
+
+    const pending = handler.handleToolCall('AskUserQuestion', input, { permissionMode: 'default' } as any, {
+      signal: new AbortController().signal,
+    });
+
+    const registered = vi.mocked(session.client.rpcHandlerManager.registerHandler).mock.calls as unknown as
+      [string, (message: any) => Promise<void>][];
+    const respond = registered.find(([method]) => method === 'permission')?.[1];
+    expect(respond).toBeDefined();
+
+    let recorded: any = null;
+    session.client.updateAgentState.mockImplementation((updater: any) => {
+      recorded = updater({
+        requests: { call_ask_1: { tool: 'AskUserQuestion', arguments: input, createdAt: 1 } },
+        completedRequests: {},
+      });
+    });
+
+    const updatedInput = { questions: input.questions, answers: { 'Proceed?': 'Yes' } };
+    await respond!({ id: 'call_ask_1', approved: true, updatedInput });
+    await expect(pending).resolves.toEqual({ behavior: 'allow', updatedInput });
+
+    // The answer already carries the questions; agentState does not need the form twice.
+    expect(recorded.completedRequests.call_ask_1.arguments).toBeUndefined();
+    expect(recorded.completedRequests.call_ask_1.updatedInput).toEqual(updatedInput);
+  });
+
+  it('keeps the question form when the question was never answered', async () => {
+    const session = makeSession();
+    const handler = new PermissionHandler(session);
+    const input = { questions: [{ question: 'Proceed?', header: 'Action', options: [] }] };
+    handler.onMessage({
+      type: 'assistant',
+      message: { content: [{ type: 'tool_use', id: 'call_ask_1', name: 'AskUserQuestion', input }] },
+    } as any);
+
+    const pending = handler.handleToolCall('AskUserQuestion', input, { permissionMode: 'default' } as any, {
+      signal: new AbortController().signal,
+    });
+
+    let recorded: any = null;
+    session.client.updateAgentState.mockImplementation((updater: any) => {
+      recorded = updater({
+        requests: { call_ask_1: { tool: 'AskUserQuestion', arguments: input, createdAt: 1 } },
+        completedRequests: {},
+      });
+    });
+
+    handler.reset();
+    await expect(pending).rejects.toThrow('Session reset');
+
+    // No answer to read the questions from — the form is the only record of what was asked.
+    expect(recorded.completedRequests.call_ask_1.arguments).toEqual(input);
+  });
+
   it('settles only edit tools when the mode changes to acceptEdits', async () => {
     const session = makeSession();
     const handler = new PermissionHandler(session);

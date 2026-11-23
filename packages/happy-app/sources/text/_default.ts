@@ -631,6 +631,7 @@ export const en = {
         },
         askUserQuestion: {
             submit: 'Submit Answer',
+            notAnswered: 'Not answered',
             multipleQuestions: ({ count }: { count: number }) => `${count} questions`,
             other: 'Other',
             otherDescription: 'Type your own answer',

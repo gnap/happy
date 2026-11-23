@@ -73,9 +73,6 @@ const styles = StyleSheet.create((theme) => ({
         backgroundColor: theme.colors.surfaceHigh,
         borderColor: theme.colors.radio.active,
     },
-    optionButtonDisabled: {
-        opacity: 0.6,
-    },
     radioOuter: {
         width: 20,
         height: 20,
@@ -164,6 +161,9 @@ const styles = StyleSheet.create((theme) => ({
         color: theme.colors.text,
         flex: 1,
     },
+    submittedValueMuted: {
+        color: theme.colors.textSecondary,
+    },
 }));
 
 export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId }) => {
@@ -172,9 +172,16 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
     const [isSubmitting, setIsSubmitting] = React.useState(false);
     const [isSubmitted, setIsSubmitted] = React.useState(false);
 
-    // Parse input
+    // Parse input. The questions can also arrive in the result: the answer is the permission
+    // response (`{ questions, answers }`), and a completed request need not repeat the form in
+    // its `arguments` as well.
     const input = tool.input as AskUserQuestionInput | undefined;
-    const questions = input?.questions;
+    const resultQuestions = (tool.result as { questions?: unknown } | undefined)?.questions;
+    const questions: Question[] | undefined = Array.isArray(input?.questions)
+        ? input.questions
+        : Array.isArray(resultQuestions)
+            ? resultQuestions as Question[]
+            : undefined;
 
     // When tool.result arrives after mount (e.g. from synced message stream),
     // restore selections so the submitted view shows the answer.
@@ -291,12 +298,15 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
         }
     }, [sessionId, questions, selections, allQuestionsAnswered, isSubmitting, tool.permission?.id]);
 
-    // Show submitted state whenever there are actual answers, whichever state the card ended
-    // up in — an answered question that later read as canceled/error still has an answer.
-    if (isSubmitted || hasAnswers) {
+    // Once a question is no longer answerable — submitted, answered, canceled, or otherwise past
+    // — what is left to read is the question and its answer, one line each. Rendering the form
+    // (all options and their descriptions, merely disabled) made every historical question take
+    // a card's worth of space to say "this happened".
+    if (isSubmitted || !canInteract) {
         // The stored answer is the authority when it arrived with the result; the local
         // selections only know about options that were still in the input.
         const storedAnswers = askUserQuestionAnswers(tool.result);
+        const unanswered = t('tools.askUserQuestion.notAnswered');
         return (
             <ToolSectionView>
                 <View style={styles.submittedContainer}>
@@ -310,11 +320,12 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
                         const labels = fromSelections.length > 0
                             ? fromSelections
                             : answerLabels(storedAnswers?.[q.question]);
-                        const selectedLabels = labels.length > 0 ? labels.join(', ') : '-';
                         return (
                             <View key={qIndex} style={styles.submittedItem}>
-                                <Text style={styles.submittedHeader}>{q.header}:</Text>
-                                <Text style={styles.submittedValue}>{selectedLabels}</Text>
+                                <Text style={styles.submittedHeader}>{q.header || q.question}:</Text>
+                                <Text style={[styles.submittedValue, labels.length === 0 && styles.submittedValueMuted]}>
+                                    {labels.length > 0 ? labels.join(', ') : unanswered}
+                                </Text>
                             </View>
                         );
                     })}
@@ -345,10 +356,8 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
                                             style={[
                                                 styles.optionButton,
                                                 isSelected && styles.optionButtonSelected,
-                                                !canInteract && styles.optionButtonDisabled,
                                             ]}
                                             onPress={() => handleOptionToggle(qIndex, oIndex, question.multiSelect)}
-                                            disabled={!canInteract}
                                             activeOpacity={0.7}
                                         >
                                             {question.multiSelect ? (

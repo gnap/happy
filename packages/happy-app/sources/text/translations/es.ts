@@ -654,6 +654,7 @@ export const es: TranslationStructure = {
         },
         askUserQuestion: {
             submit: 'Enviar respuesta',
+            notAnswered: 'Sin respuesta',
             multipleQuestions: ({ count }: { count: number }) => `${count} ${plural({ count, singular: 'pregunta', plural: 'preguntas' })}`,
             other: 'Otro',
             otherDescription: 'Escribe tu propia respuesta',
