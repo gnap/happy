@@ -131,6 +131,30 @@ const HEARTBEAT_TIMEOUT_MS = 45_000;
  * ten seconds and it sends `eg-err`, which ends the wait immediately.
  */
 const EGRESS_OPEN_TIMEOUT_MS = 60_000;
+/**
+ * How many egress connections this daemon keeps beside the control one.
+ *
+ * One connection is one queue: a model request's context upload holds the head while another
+ * request's open waits behind it. A small pool puts independent streams on independent sockets.
+ * Two is the default because it is the smallest number that removes the common collision (a
+ * foreground turn and a background one); more is available for machines that run many at once.
+ */
+const EGRESS_LANES = (() => {
+  const raw = Number(process.env.HAPPY_RELAY_EGRESS_LANES ?? '2');
+  return Number.isInteger(raw) && raw >= 1 && raw <= 8 ? raw : 2;
+})();
+
+/** One egress connection: its socket, its stream count, and its own reconnect state. */
+type EgressLane = {
+  slot: number;
+  ws: WebSocket | null;
+  ready: boolean;
+  streams: number;
+  backoff: number;
+  retry: ReturnType<typeof setTimeout> | null;
+  ping: ReturnType<typeof setInterval> | null;
+  lastFrameAt: number;
+};
 const STRIP_REQUEST_HEADERS = new Set(['host', 'connection', 'content-length', 'accept-encoding']);
 const STRIP_RESPONSE_HEADERS = new Set(['content-length', 'content-encoding', 'transfer-encoding', 'connection']);
 
@@ -173,17 +197,43 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
     timer: ReturnType<typeof setTimeout>;
   }>();
   let nextEgressId = 1;
+  /** Set once the relay says it keeps a pool; until then everything rides the control socket. */
+  let egressPool = false;
+  const egressLanes: EgressLane[] = [];
+  /** Which socket each pipe rides, so a lane's death only takes its own pipes with it. */
+  const laneOfStream = new Map<number, EgressLane | 'control'>();
+
+  /** The egress connection a new pipe should use: the ready one with the fewest pipes on it. */
+  const pickEgressLane = (): EgressLane | 'control' | null => {
+    const ready = egressLanes.filter((lane) => lane.ready && lane.ws);
+    if (ready.length > 0) {
+      return ready.reduce((best, lane) => (lane.streams < best.streams ? lane : best));
+    }
+    return publishFrame ? 'control' : null;
+  };
 
   const openEgress = (host: string, port: number, route?: string): Promise<Duplex> => {
-    const send = publishFrame;
-    if (!send || stopped) return Promise.reject(new Error('relay is not connected'));
+    if (stopped) return Promise.reject(new Error('relay is not connected'));
+    const lane = pickEgressLane();
+    if (!lane) return Promise.reject(new Error('relay is not connected'));
+    const send = lane === 'control'
+      ? publishFrame!
+      : (frame: unknown) => { try { lane.ws?.send(JSON.stringify(frame)); } catch { /* the lane's close handler tears it down */ } };
     const id = nextEgressId++;
     return new Promise<Duplex>((resolve, reject) => {
       const stream = new RelayEgressStream(id, (frame) => {
         try { send(frame); } catch { /* the close handler tears it down */ }
       });
       egressStreams.set(id, stream);
-      stream.once('close', () => { egressStreams.delete(id); });
+      laneOfStream.set(id, lane);
+      if (lane !== 'control') lane.streams += 1;
+      logger.debug(`[relay] egress ${lane === 'control' ? 'control' : `lane#${lane.slot}`} streams=${lane === 'control' ? '-' : lane.streams} -> ${host}:${port}`);
+      stream.once('close', () => {
+        egressStreams.delete(id);
+        const used = laneOfStream.get(id);
+        laneOfStream.delete(id);
+        if (used && used !== 'control') used.streams = Math.max(0, used.streams - 1);
+      });
       const timer = setTimeout(() => {
         if (!egressOpening.delete(id)) return;
         egressStreams.delete(id);
@@ -284,6 +334,45 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
     }
   };
 
+
+  /** The egress frames, handled the same wherever they arrive — control socket or a lane. */
+  const handleEgressFrame = (msg: any): void => {
+    if (msg.t === 'eg-ok') {
+        const id = Number(msg.id);
+        const opening = egressOpening.get(id);
+        const stream = egressStreams.get(id);
+        if (opening) {
+          egressOpening.delete(id);
+          if (stream) opening.resolve(stream);
+          else opening.reject(new Error('relay egress closed while opening'));
+        }
+      } else if (msg.t === 'eg-err') {
+        const opening = egressOpening.get(Number(msg.id));
+        if (opening) {
+          egressOpening.delete(Number(msg.id));
+          opening.reject(new Error(String(msg.message ?? 'relay egress failed')));
+        }
+      } else if (msg.t === 'eg-data') {
+        const stream = egressStreams.get(Number(msg.id));
+        if (stream && typeof msg.d === 'string') stream.receiveData(Buffer.from(msg.d, 'base64'));
+      } else if (msg.t === 'eg-credit') {
+        const stream = egressStreams.get(Number(msg.id));
+        stream?.addCredit(Number(msg.n) || 0);
+      } else if (msg.t === 'eg-half') {
+        egressStreams.get(Number(msg.id))?.remoteHalf();
+      } else if (msg.t === 'eg-close') {
+        const id = Number(msg.id);
+        const stream = egressStreams.get(id);
+        egressStreams.delete(id);
+        stream?.remoteClose();
+        const opening = egressOpening.get(id);
+        if (opening) {
+          egressOpening.delete(id);
+          opening.reject(new Error('relay egress closed'));
+        }
+    }
+  };
+
   const connect = () => {
     if (stopped) return;
     const ws = new WebSocket(control);
@@ -333,43 +422,19 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
           (pingTimer as any).unref?.();
           logger.debug(`[relay] heartbeat started (every ${HEARTBEAT_INTERVAL_MS / 1000}s, reconnecting after ${HEARTBEAT_TIMEOUT_MS / 1000}s of silence)`);
         }
+        // The relay says it keeps a pool: put the data plane on its own sockets, so a large model
+        // request no longer queues another stream's open behind itself.
+        if (Array.isArray(features) && features.includes('egress-pool') && !egressPool) {
+          egressPool = true;
+          logger.debug(`[relay] egress pool armed: ${EGRESS_LANES} lane(s) beside the control connection`);
+          for (let slot = 0; slot < EGRESS_LANES; slot++) connectEgressLane(slot);
+        }
         if (directoryTimer === null) {
           directoryTimer = setInterval(publishDirectory, DIRECTORY_PUBLISH_INTERVAL_MS);
           (directoryTimer as any).unref?.();
         }
-      } else if (msg.t === 'eg-ok') {
-        const id = Number(msg.id);
-        const opening = egressOpening.get(id);
-        const stream = egressStreams.get(id);
-        if (opening) {
-          egressOpening.delete(id);
-          if (stream) opening.resolve(stream);
-          else opening.reject(new Error('relay egress closed while opening'));
-        }
-      } else if (msg.t === 'eg-err') {
-        const opening = egressOpening.get(Number(msg.id));
-        if (opening) {
-          egressOpening.delete(Number(msg.id));
-          opening.reject(new Error(String(msg.message ?? 'relay egress failed')));
-        }
-      } else if (msg.t === 'eg-data') {
-        const stream = egressStreams.get(Number(msg.id));
-        if (stream && typeof msg.d === 'string') stream.receiveData(Buffer.from(msg.d, 'base64'));
-      } else if (msg.t === 'eg-credit') {
-        const stream = egressStreams.get(Number(msg.id));
-        stream?.addCredit(Number(msg.n) || 0);
-      } else if (msg.t === 'eg-half') {
-        egressStreams.get(Number(msg.id))?.remoteHalf();
-      } else if (msg.t === 'eg-close') {
-        const id = Number(msg.id);
-        const stream = egressStreams.get(id);
-        egressStreams.delete(id);
-        stream?.remoteClose();
-        const opening = egressOpening.get(id);
-        if (opening) {
-          egressOpening.delete(id);
-          opening.reject(new Error('relay egress closed'));
-        }
+      } else if (msg.t === 'eg-ok' || msg.t === 'eg-err' || msg.t === 'eg-data' || msg.t === 'eg-credit' || msg.t === 'eg-half' || msg.t === 'eg-close') {
+        handleEgressFrame(msg);
       } else if (msg.t === 'http') {
         // The query is part of the picture for a history read: `since` is what says whether the
         // reader is taking pages or re-reading the log from the start every time. The client
@@ -441,15 +506,19 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
         try { entry.ws.close(); } catch { /* gone */ }
       }
       locals.clear();
-      // Every egress pipe rode this connection. The relay has already torn its ends down, so
-      // holding these open would only leave callers waiting on bytes that cannot arrive.
-      for (const opening of egressOpening.values()) {
+      // Pipes that rode the control socket are gone with it. Pipes on an egress lane are the
+      // lane's own business — its close handler ends those, and the pool reconnects independently.
+      for (const [id, opening] of [...egressOpening]) {
+        if (laneOfStream.get(id) !== 'control') continue;
         clearTimeout(opening.timer);
         opening.reject(new Error('relay connection closed'));
+        egressOpening.delete(id);
       }
-      egressOpening.clear();
-      for (const stream of egressStreams.values()) stream.remoteClose();
-      egressStreams.clear();
+      for (const [id, stream] of [...egressStreams]) {
+        if (laneOfStream.get(id) !== 'control') continue;
+        laneOfStream.delete(id);
+        stream.remoteClose();
+      }
       setConnected(false);
       if (stopped) return;
       if (pingTimer !== null) { clearInterval(pingTimer); pingTimer = null; }
@@ -459,6 +528,79 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
       backoff = Math.min(backoff * 2, maxBackoff);
       retryTimer = setTimeout(connect, wait);
       (retryTimer as any).unref?.();
+    };
+    ws.onclose = onGone;
+    ws.onerror = () => { /* onclose follows */ };
+  };
+
+  /**
+   * One egress connection. It carries pipes and nothing else: no directory, no App routes, no
+   * session list. Its own heartbeat and its own backoff, so it can die and return without the
+   * control plane noticing anything but the pipes it was carrying.
+   */
+  const connectEgressLane = (slot: number): void => {
+    if (stopped) return;
+    const lane: EgressLane = egressLanes[slot] ?? {
+      slot, ws: null, ready: false, streams: 0, backoff: minBackoff, retry: null, ping: null, lastFrameAt: Date.now(),
+    };
+    egressLanes[slot] = lane;
+    const ws = new WebSocket(control);
+    lane.ws = ws;
+    lane.lastFrameAt = Date.now();
+    const send = (frame: unknown) => {
+      try { ws.send(JSON.stringify(frame)); } catch { /* this lane's close handler reconnects */ }
+    };
+
+    ws.onmessage = (event) => {
+      lane.lastFrameAt = Date.now();
+      let msg: any;
+      try { msg = JSON.parse(String(event.data)); } catch { return; }
+      if (msg.t === 'challenge') {
+        send({
+          t: 'register',
+          lane: 'egress',
+          slot,
+          pub: Buffer.from(identity.publicKey).toString('base64'),
+          sig: signRegistration(identity, msg.nonce),
+        });
+      } else if (msg.t === 'ok') {
+        lane.ready = true;
+        lane.backoff = minBackoff;
+        logger.debug(`[relay] egress lane#${slot} registered (pool=${EGRESS_LANES})`);
+        const features: unknown = (msg as { features?: unknown }).features;
+        if (Array.isArray(features) && features.includes('ping') && lane.ping === null) {
+          lane.ping = setInterval(() => {
+            if (stopped || ws.readyState !== WebSocket.OPEN) return;
+            if (Date.now() - lane.lastFrameAt > HEARTBEAT_TIMEOUT_MS) {
+              logger.warn(`[relay] egress lane#${slot} heard nothing for ${Math.round((Date.now() - lane.lastFrameAt) / 1000)}s; reconnecting`);
+              try { ws.close(4002, 'heartbeat lost'); } catch { /* onclose follows */ }
+              return;
+            }
+            send({ t: 'ping' });
+          }, HEARTBEAT_INTERVAL_MS);
+          (lane.ping as any).unref?.();
+        }
+      } else {
+        handleEgressFrame(msg);
+      }
+    };
+
+    const onGone = (event: any) => {
+      lane.ready = false;
+      lane.ws = null;
+      if (lane.ping !== null) { clearInterval(lane.ping); lane.ping = null; }
+      // Pipes that rode this socket end with it; the relay has already torn its ends down.
+      for (const [id, used] of [...laneOfStream]) {
+        if (used !== lane) continue;
+        const opening = egressOpening.get(id);
+        if (opening) { egressOpening.delete(id); clearTimeout(opening.timer); opening.reject(new Error('relay egress lane closed')); }
+      }
+      logger.debug(`[relay] egress lane#${slot} closed code=${event?.code ?? '-'}; reconnecting`);
+      if (stopped) return;
+      const wait = Math.round(lane.backoff * (0.75 + Math.random() * 0.5));
+      lane.backoff = Math.min(lane.backoff * 2, maxBackoff);
+      lane.retry = setTimeout(() => connectEgressLane(slot), wait);
+      (lane.retry as any).unref?.();
     };
     ws.onclose = onGone;
     ws.onerror = () => { /* onclose follows */ };
@@ -476,6 +618,11 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
       if (retryTimer) clearTimeout(retryTimer);
       if (directoryTimer) { clearInterval(directoryTimer); directoryTimer = null; }
       try { socket?.close(); } catch { /* gone */ }
+      for (const lane of egressLanes) {
+        if (lane.retry !== null) clearTimeout(lane.retry);
+        if (lane.ping !== null) clearInterval(lane.ping);
+        try { lane.ws?.close(); } catch { /* gone */ }
+      }
       setConnected(false);
     },
   };
