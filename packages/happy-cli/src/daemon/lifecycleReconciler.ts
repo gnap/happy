@@ -81,11 +81,14 @@ export function decideReconcile(args: {
     const progress = forGeneration(args.progress, spec);
 
     if (spec.lifecycle === 'archived') {
-        if (observation.phase === 'Archived') {
+        // Two shapes settle this want: the session was deleted (no row left) or it was archived
+        // and its process is already gone. Archive is not terminal — the row and its history stay,
+        // and a later `running` want can bring it back — so a stopped session is the end state.
+        if (observation.phase === 'Archived' || observation.phase === 'Stopped') {
             return { kind: 'settled' };
         }
-        // The log says the session is gone; the process (or the local row) is what has not caught
-        // up. This is terminal, so it is retried until the effect matches the want.
+        // A process or a scheduled spawn is still there. Putting the session away is the effect
+        // this want needs, and it is retried until the facts agree.
         return retryOrBlock(progress, now, 'spec-archived', 'archive');
     }
 

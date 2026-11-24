@@ -8,7 +8,7 @@ import { z } from 'zod';
 import { serializerCompiler, validatorCompiler, ZodTypeProvider } from 'fastify-type-provider-zod';
 import { logger } from '@/ui/logger';
 import { Metadata } from '@/api/types';
-import { TrackedSession, type ArchiveSessionResult } from './types';
+import { TrackedSession, type SessionLifecycleResult } from './types';
 import { SpawnSessionOptions, SpawnSessionResult } from '@/modules/common/registerCommonHandlers';
 import type { RestartSessionResult } from './types';
 import { extractA2aText, extractA2aTitle } from '@/a2a/parse';
@@ -22,6 +22,7 @@ export function startDaemonControlServer({
   port,
   spawnSession,
   restartSession,
+  deleteSession,
   archiveSession,
   requestShutdown,
   onHappySessionWebhook,
@@ -35,7 +36,10 @@ export function startDaemonControlServer({
   port: number;
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
   restartSession: (sessionId: string, sandboxConfig?: unknown, requiresDesktop?: boolean, expectGeneration?: number, mode?: 'wait' | 'accept') => Promise<RestartSessionResult>;
-  archiveSession: (sessionId: string) => ArchiveSessionResult;
+  /** Remove a session from this machine and from the server. */
+  deleteSession: (sessionId: string) => SessionLifecycleResult;
+  /** Stop a session and keep it, marked archived. */
+  archiveSession: (sessionId: string) => SessionLifecycleResult;
   requestShutdown: () => void;
   onHappySessionWebhook: (sessionId: string, metadata: Metadata) => void;
   onSessionEnding: (sessionId: string, pid: number, reason: string, exitCode?: number, archive?: boolean) => void;
@@ -358,18 +362,38 @@ export function startDaemonControlServer({
       );
     });
 
-    // Archive (permanently remove from list) a stopped session
-    typed.post('/archive-session', {
+    const sessionActionBody = {
       schema: {
         body: z.object({ sessionId: z.string() }),
         response: {
           200: z.object({ success: z.boolean() })
         }
       }
-    }, async (request) => {
+    } as const;
+
+    // Delete: stop the process, write the tombstone, replay the removal to the server.
+    typed.post('/delete-session', sessionActionBody, async (request) => {
+      const { sessionId } = request.body;
+      logger.debug(`[CONTROL SERVER] Delete session request: ${sessionId}`);
+      const result = deleteSession(sessionId);
+      return { success: result.applied };
+    });
+
+    // Archive: stop the process and keep the session, marked archived.
+    typed.post('/archive', sessionActionBody, async (request) => {
       const { sessionId } = request.body;
       logger.debug(`[CONTROL SERVER] Archive session request: ${sessionId}`);
       const result = archiveSession(sessionId);
+      return { success: result.applied };
+    });
+
+    // The name the `happy daemon archive-session` command has always used. It has always meant a
+    // deletion, so it stays one until that command is renamed; the route is the compatibility
+    // surface, not a second operation.
+    typed.post('/archive-session', sessionActionBody, async (request) => {
+      const { sessionId } = request.body;
+      logger.debug(`[CONTROL SERVER] Delete session request (legacy archive-session route): ${sessionId}`);
+      const result = deleteSession(sessionId);
       return { success: result.applied };
     });
 

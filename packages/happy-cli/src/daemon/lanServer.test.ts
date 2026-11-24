@@ -10,7 +10,7 @@ import { Readable } from 'node:stream';
 import nacl from 'tweetnacl';
 import { startLanServer, lanProofFor, LAN_PROTOCOL_VERSION, type LanHistory, type LanServerHandle, type LanSessionSummary, type LanServerOptions } from './lanServer';
 import { accountProofMessage } from './accountProof';
-import type { ArchiveSessionResult } from './types';
+import type { SessionLifecycleResult } from './types';
 
 const SECRET = new Uint8Array(32).fill(3);
 const WRONG_SECRET = new Uint8Array(32).fill(4);
@@ -66,11 +66,13 @@ function signed(path: string, init: { token?: string; body?: unknown } = {}) {
                         ? 'listing'
                         : isToolContent
                             ? 'tool-content'
-                            : path.endsWith('/archive')
-                                ? 'archive'
-                                : path.endsWith('/restart')
-                                    ? 'restart'
-                                    : 'control';
+                            : path.endsWith('/delete')
+                                ? 'delete'
+                                : path.endsWith('/archive')
+                                    ? 'archive'
+                                    : path.endsWith('/restart')
+                                        ? 'restart'
+                                        : 'control';
     const target = isFile || isDiff || isFolder || isPreview
         ? `${sessionId}:${queryPath}`
         : isToolContent
@@ -150,9 +152,11 @@ let restartHandler: ((
     generation?: number;
     phase?: string;
 }>) | undefined;
-/** Sessions the archive route was asked to delete, in order. Unset by default, like restart. */
+/** Sessions a route was asked to act on, in order. Unset by default, like restart. */
+let deleted: string[] = [];
 let archived: string[] = [];
-let archiveHandler: ((sessionId: string) => ArchiveSessionResult) | undefined;
+let deleteHandler: ((sessionId: string) => SessionLifecycleResult) | undefined;
+let archiveHandler: ((sessionId: string) => SessionLifecycleResult) | undefined;
 
 let server: LanServerHandle | null = null;
 /** What a socket reader should be handed on connect; mutable so one test can set it. */
@@ -188,6 +192,7 @@ async function start(limits?: Parameters<typeof startLanServer>[0]['limits']) {
                 ) => restartHandler!(sessionId, sandboxConfig, requiresDesktop, expectGeneration, mode)) as NonNullable<LanServerOptions['restartSession']>,
             }
             : {}),
+        ...(deleteHandler ? { deleteSession: deleteHandler } : {}),
         ...(archiveHandler ? { archiveSession: archiveHandler } : {}),
         ...(toolContentHandler ? { getToolContent: toolContentHandler } : {}),
         ...(sessionFileHandler ? { getSessionFile: sessionFileHandler } : {}),
@@ -251,11 +256,13 @@ afterEach(async () => {
     await server?.stop();
     server = null;
     restarted = [];
+    deleted = [];
     archived = [];
     controlled = [];
     liveSessions = new Set(['sess-1']);
     lifecycleEntries = [];
     restartHandler = undefined;
+    deleteHandler = undefined;
     archiveHandler = undefined;
     toolContentHandler = undefined;
     sessionFileHandler = undefined;
@@ -485,7 +492,7 @@ describe('lanServer read-only API', () => {
             // A refusal is this machine's verdict and the caller must not go and ask the server the
             // same question: the two routes call the same handler, so it would come back the same
             // way, and in between a restart that was refused would look like one that was attempted.
-            restartHandler = async () => ({ success: false, error: 'Session has been archived and cannot be restarted' });
+            restartHandler = async () => ({ success: false, error: 'Session has been deleted and cannot be restarted' });
             await start();
             const token = await getToken();
 
@@ -495,7 +502,7 @@ describe('lanServer read-only API', () => {
             expect(await res.json()).toEqual({
                 v: 1,
                 success: false,
-                error: 'Session has been archived and cannot be restarted',
+                error: 'Session has been deleted and cannot be restarted',
             });
         });
 
@@ -551,10 +558,10 @@ describe('lanServer read-only API', () => {
         });
     });
 
-    describe('archiving a session', () => {
+    describe('deleting a session over the legacy archive path', () => {
         it('records the deletion and says so', async () => {
-            archiveHandler = (sessionId) => {
-                archived.push(sessionId);
+            deleteHandler = (sessionId) => {
+                deleted.push(sessionId);
                 return { applied: true, known: true };
             };
             await start();
@@ -573,15 +580,15 @@ describe('lanServer read-only API', () => {
                 ref: 'sess-1',
                 phase: 'Archived',
             });
-            expect(archived).toEqual(['sess-1']);
+            expect(deleted).toEqual(['sess-1']);
         });
 
         it('records a deletion for a session this machine no longer holds', async () => {
             // The row may have been pruned, or only ever lived on the server. The id is what the
             // server addresses, so the tombstone is still the transaction; a 404 here is what used
             // to send the caller down a road that left the server's row alive.
-            archiveHandler = (sessionId) => {
-                archived.push(sessionId);
+            deleteHandler = (sessionId) => {
+                deleted.push(sessionId);
                 return { applied: true, known: false };
             };
             await start();
@@ -590,13 +597,13 @@ describe('lanServer read-only API', () => {
             const res = await fetch(url('/lan/sessions/sess-1/archive'), signed('/lan/sessions/sess-1/archive', { token }));
 
             expect(res.status).toBe(200);
-            expect(archived).toEqual(['sess-1']);
+            expect(deleted).toEqual(['sess-1']);
         });
 
         it('says 404 when the machine could not record the deletion', async () => {
             // The remaining reason for the route's negative answer: the fact could not be written.
             // The caller's own delete path may still try the server.
-            archiveHandler = () => ({ applied: false, known: false });
+            deleteHandler = () => ({ applied: false, known: false });
             await start();
             const token = await getToken();
 
@@ -605,19 +612,19 @@ describe('lanServer read-only API', () => {
             expect(res.status).toBe(404);
         });
 
-        it('says 404 when the build has no archive route at all', async () => {
+        it('says 404 when the build has no delete route at all', async () => {
             await start();
             const token = await getToken();
 
             const res = await fetch(url('/lan/sessions/sess-1/archive'), signed('/lan/sessions/sess-1/archive', { token }));
 
             expect(res.status).toBe(404);
-            expect(archived).toEqual([]);
+            expect(deleted).toEqual([]);
         });
 
         it('is not reachable without a token', async () => {
-            archiveHandler = (sessionId) => {
-                archived.push(sessionId);
+            deleteHandler = (sessionId) => {
+                deleted.push(sessionId);
                 return { applied: true, known: true };
             };
             await start();
@@ -625,7 +632,96 @@ describe('lanServer read-only API', () => {
             const res = await fetch(url('/lan/sessions/sess-1/archive'), { method: 'POST' });
 
             expect(res.status).toBe(401);
+            expect(deleted).toEqual([]);
+        });
+    });
+
+    describe('the v2 lifecycle routes', () => {
+        it('deletes over /v2 and reports the row gone', async () => {
+            deleteHandler = (sessionId) => {
+                deleted.push(sessionId);
+                return { applied: true, known: true, stopped: true };
+            };
+            await start();
+            const token = await getToken();
+
+            const path = '/lan/v2/sessions/sess-1/delete';
+            const res = await fetch(url(path), signed(path, { token }));
+
+            expect(res.status).toBe(200);
+            expect(await res.json()).toEqual({
+                v: 1,
+                success: true,
+                accepted: true,
+                stage: 'done',
+                ref: 'sess-1',
+                phase: 'Archived',
+            });
+            expect(deleted).toEqual(['sess-1']);
             expect(archived).toEqual([]);
+        });
+
+        it('archives over /v2 and says the row stays', async () => {
+            archiveHandler = (sessionId) => {
+                archived.push(sessionId);
+                return { applied: true, known: true, stopped: true, generation: 7 };
+            };
+            await start();
+            const token = await getToken();
+
+            const path = '/lan/v2/sessions/sess-1/archive';
+            const res = await fetch(url(path), signed(path, { token }));
+
+            expect(res.status).toBe(200);
+            expect(await res.json()).toEqual({
+                v: 1,
+                success: true,
+                accepted: true,
+                stage: 'done',
+                ref: 'sess-1',
+                phase: 'Stopped',
+                archived: true,
+                generation: 7,
+            });
+            expect(archived).toEqual(['sess-1']);
+            expect(deleted).toEqual([]);
+        });
+
+        it('refuses to archive a row the machine has no lineage for, without deleting it', async () => {
+            archiveHandler = () => ({ applied: false, known: false, reason: 'the machine has no lineage for this session' });
+            await start();
+            const token = await getToken();
+
+            const path = '/lan/v2/sessions/sess-1/archive';
+            const res = await fetch(url(path), signed(path, { token }));
+
+            expect(res.status).toBe(409);
+            expect(deleted).toEqual([]);
+            expect(archived).toEqual([]);
+        });
+
+        it('already signs a distinct operation for delete', async () => {
+            // The proof's operation is what makes the two actions unforgeable from one another;
+            // a delete proof must not open the archive route.
+            archiveHandler = () => ({ applied: true, known: true });
+            await start();
+            const token = await getToken();
+
+            const path = '/lan/v2/sessions/sess-1/archive';
+            const nonce = `forged-${++proofCounter}`;
+            const at = Date.now();
+            const message = accountProofMessage({ operation: 'delete', target: 'sess-1', nonce, at, bodyDigest: '' });
+            const res = await fetch(url(path), {
+                method: 'POST',
+                headers: {
+                    authorization: `Bearer ${token}`,
+                    'x-happy-proof-nonce': nonce,
+                    'x-happy-proof-at': String(at),
+                    'x-happy-proof-signature': Buffer.from(nacl.sign.detached(utf8(message), ACCOUNT.secretKey)).toString('base64'),
+                },
+            });
+
+            expect(res.status).toBe(403);
         });
     });
 

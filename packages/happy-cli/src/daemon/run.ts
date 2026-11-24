@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import * as tmp from 'tmp';
 
 import { ApiClient } from '@/api/api';
-import { TrackedSession, type ArchiveSessionResult, type RestartSessionResult } from './types';
+import { TrackedSession, type SessionLifecycleResult, type RestartSessionResult } from './types';
 import { MachineMetadata, DaemonState, Metadata } from '@/api/types';
 import { SpawnSessionOptions, SpawnSessionResult } from '@/modules/common/registerCommonHandlers';
 import { appendResumeAfterSeqCliArgs } from '@/utils/resumeAfterSeq';
@@ -699,15 +699,15 @@ export async function startDaemon(): Promise<void> {
      * function (or was backfilled from the log at startup), so a second entry would only grow the
      * file.
      */
-    const commitArchive = (sessionId: string, tag?: string): number | undefined => {
+    const commitDeletion = (sessionId: string, tag?: string): number | undefined => {
       if (archivedSessionIds[sessionId] !== undefined) {
-        // A retried archive is still applied; it simply states no new want. Telling the caller
+        // A retried delete is still applied; it simply states no new want. Telling the caller
         // there is no new generation is more honest than inventing one for a fact already written.
         return undefined;
       }
       // The same line is the desired state and its effect: this machine now wants the session
-      // archived, and the deletion is what makes that true. Numbering the want lets a reader see
-      // which of its observations is stale — an archive requested while a restart was in flight is
+      // gone, and the tombstone is what makes that true. Numbering the want lets a reader see
+      // which of its observations is stale — a delete requested while a restart was in flight is
       // a newer spec than the restart, and the log order says so.
       const observedGeneration = Math.max(
         sessions[sessionId]?.generation ?? 0,
@@ -768,7 +768,7 @@ export async function startDaemon(): Promise<void> {
           // App-initiated archive (killSession RPC): do not keep in list
           logger.debug(`[DAEMON RUN] Session ${session.happySessionId} (PID ${pid}) archived by app, removing from list`);
           if (session.happySessionId) {
-            commitArchive(session.happySessionId, session.sessionTag);
+            commitDeletion(session.happySessionId, session.sessionTag);
             persistNow();
             announceLifecycle();
           }
@@ -869,7 +869,7 @@ export async function startDaemon(): Promise<void> {
         if (archive) session.pendingArchive = true;
         logger.debug(`[DAEMON RUN] Session ending (self-reported): ${sessionId} PID ${pid} reason="${reason}" archive=${archive ?? false}`);
         if (archive) {
-          commitArchive(sessionId, session.sessionTag ?? sessions[sessionId]?.sessionTag);
+          commitDeletion(sessionId, session.sessionTag ?? sessions[sessionId]?.sessionTag);
           persistNow();
           announceLifecycle();
         }
@@ -882,7 +882,7 @@ export async function startDaemon(): Promise<void> {
           logger.debug(`[DAEMON RUN] Session ending (self-reported, already evicted): ${sessionId} PID ${pid} reason="${reason}"`);;
         }
         if (archive) {
-          commitArchive(sessionId, recent?.sessionTag ?? sessions[sessionId]?.sessionTag);
+          commitDeletion(sessionId, recent?.sessionTag ?? sessions[sessionId]?.sessionTag);
           persistNow();
           announceLifecycle();
         }
@@ -1718,7 +1718,7 @@ export async function startDaemon(): Promise<void> {
     // Handle child process exit
 
     /**
-     * Remove a session from this machine's list (explicit user action).
+     * Delete a session: remove it from this machine's list and from the server.
      *
      * The tombstone is written for *every* id, including one this machine has no row for. An
      * unknown id is not a failure: the App is asking for a deletion, the server addresses sessions
@@ -1726,28 +1726,31 @@ export async function startDaemon(): Promise<void> {
      * Refusing here is what made the App's delete look applied while the server kept serving the
      * session.
      */
-    const archiveSession = (sessionId: string): ArchiveSessionResult => {
+    const deleteSession = (sessionId: string): SessionLifecycleResult => {
       const stored = sessions[sessionId];
       const tracked = stoppedSessions.get(sessionId)
         ?? [...pidToTrackedSession.values()].find((session) => session.happySessionId === sessionId);
       const known = tracked !== undefined || stored !== undefined;
       const tag = tracked?.sessionTag || stored?.sessionTag || undefined;
+      // A deletion is about the session, not just its row: a process left behind is an orphan no
+      // reader can reach.
+      const stopped = stopSession(sessionId);
       // Desired state is now absent, so any spawn spec for the session goes before the tombstone
       // is written — a spec that outlived it would put a Scheduling row back for a session the
       // user just deleted.
       forgetPendingSpawnsFor(sessionId, tag);
-      // Written first: an archived session is a fact every reader has to be able to replay, and the
+      // Written first: a deletion is a fact every reader has to be able to replay, and the
       // tracking below is what stops being able to tell them.
-      const generation = commitArchive(sessionId, tag);
+      const generation = commitDeletion(sessionId, tag);
       let removed = stoppedSessions.delete(sessionId);
       if (removed) {
-        logger.debug(`[DAEMON RUN] Archived session ${sessionId}`);
+        logger.debug(`[DAEMON RUN] Deleted session ${sessionId}`);
       }
-      // Also handle the edge case where it's still in active tracking (e.g. archive while running)
+      // Also handle the edge case where it's still in active tracking (e.g. delete while running)
       for (const [pid, session] of pidToTrackedSession.entries()) {
         if (session.happySessionId === sessionId) {
           pidToTrackedSession.delete(pid);
-          logger.debug(`[DAEMON RUN] Archived active session ${sessionId} (PID ${pid})`);
+          logger.debug(`[DAEMON RUN] Deleted active session ${sessionId} (PID ${pid})`);
           removed = true;
           break;
         }
@@ -1757,21 +1760,64 @@ export async function startDaemon(): Promise<void> {
       return {
         applied: true,
         known,
+        stopped,
         ...(tag ? { tag } : {}),
         ...(generation !== undefined ? { generation } : {}),
       };
     };
 
     /**
-     * What the App means by "delete": stop the process if one is running, then record the removal.
+     * Archive a session: stop its process and record that this machine wants it put away.
      *
-     * The same pair the `killSession` RPC performs, because it is the same request arriving over a
-     * different road. Archiving alone would remove the row while leaving the process running, and
-     * a session whose row is gone but whose process is not is the orphan this exists to prevent.
+     * An archive is a want with no effect of its own — the row, the server record and the local
+     * history all stay — so the line it writes is a `created` spec, not a `deleted` tombstone. The
+     * spec goes first: a process stopped without the want recorded would look like an ordinary
+     * exit, and neither this daemon after a restart nor the App would know it was meant to stay
+     * away. A later `running` want is what brings it back.
      */
-    const deleteSessionFromApp = (sessionId: string): ArchiveSessionResult => {
-      stopSession(sessionId);
-      return archiveSession(sessionId);
+    const archiveSession = (sessionId: string): SessionLifecycleResult => {
+      const stored = sessions[sessionId];
+      const tracked = stoppedSessions.get(sessionId)
+        ?? [...pidToTrackedSession.values()].find((session) => session.happySessionId === sessionId);
+      const known = tracked !== undefined || stored !== undefined;
+      const current = specFor(sessionId, tracked?.sessionTag ?? stored?.sessionTag);
+      const tag = tracked?.sessionTag || stored?.sessionTag || current?.tag || undefined;
+      if (tag === undefined) {
+        // A `created` line names the session by its tag. A row this machine never knew cannot be
+        // archived, and inventing a tag would make a second lineage.
+        return {
+          applied: false,
+          known,
+          reason: 'the machine has no lineage for this session',
+        };
+      }
+      // A scheduled spawn would put a Scheduling row back for a session meant to stay away.
+      forgetPendingSpawnsFor(sessionId, tag);
+      let generation: number | undefined;
+      if (current?.lifecycle !== 'archived') {
+        generation = Math.max(current?.generation ?? 0, stored?.generation ?? 0) + 1;
+        const uid = sessionUidOfTag(tag);
+        lifecycleLog.record({
+          op: 'created',
+          tag,
+          sessionId,
+          ...(uid !== undefined ? { sessionUid: uid } : {}),
+          lifecycle: 'archived',
+          generation,
+        });
+      }
+      // The want is on disk; now make the facts match it. Only the process is stopped — the row
+      // stays tracked, which is what lets a later running want resume it.
+      const stopped = stopSession(sessionId);
+      announceLifecycle();
+      persistNow();
+      return {
+        applied: true,
+        known,
+        stopped,
+        tag,
+        ...(generation !== undefined ? { generation } : {}),
+      };
     };
 
     /**
@@ -2288,10 +2334,9 @@ export async function startDaemon(): Promise<void> {
     /**
      * Realize an `archived` want whose effect has not landed.
      *
-     * The same pair the App's delete uses — stop the process, then write the tombstone — because
-     * an archived row with a live process behind it is the orphan this exists to prevent. The
-     * tombstone is only written when this machine does not already hold one, which is what
-     * `commitArchive` decides; a retry of an applied archive costs nothing.
+     * The want is already in the log — that is where this spec came from — so the only effect is
+     * stopping the process (and cancelling a spawn that has not produced one yet). The row stays:
+     * an archived session is kept, not removed, and a later `running` want is what resumes it.
      */
     const performArchive = (spec: LifecycleSpec): void => {
       const sessionId = sessionIdOfSpec(spec);
@@ -2300,10 +2345,9 @@ export async function startDaemon(): Promise<void> {
         return;
       }
       const applied = stopSession(sessionId);
-      const result = archiveSession(sessionId);
       forgetPendingSpawnsFor(sessionId, spec.tag);
       persistNow();
-      logger.debug(`[DAEMON RUN] Reconcile: applied archived want for ${sessionId} (process stopped: ${applied}, tombstone: ${result.applied})`);
+      logger.debug(`[DAEMON RUN] Reconcile: applied archived want for ${sessionId} (process stopped: ${applied})`);
     };
 
     const reconcileSpecOf = (spec: LifecycleSpec, key: string): ReconcileSpec => ({
@@ -2902,6 +2946,7 @@ export async function startDaemon(): Promise<void> {
       port: configuration.daemonHttpPort,
       spawnSession,
       restartSession,
+      deleteSession,
       archiveSession,
       requestShutdown: () => requestShutdown('happy-cli'),
       onHappySessionWebhook,
@@ -3473,9 +3518,11 @@ export async function startDaemon(): Promise<void> {
             },
             getSessions: sessionSummaries,
             getTombstones,
-            // The App's delete lands here: a transaction in this machine's log, replayed to the
-            // server by `replayLifecycleToServer` — not a second, unrecorded removal.
-            archiveSession: deleteSessionFromApp,
+            // The App's delete and archive land here: each is a transaction in this machine's log,
+            // replayed to the server only when it has an effect there (a deletion does, an archive
+            // does not).
+            deleteSession,
+            archiveSession,
             // The same handler the control server and the server route call, so a restart means one
             // thing however it was asked for — including every refusal, which is where the rules
             // about archived sessions and sessions with live processes live.
@@ -4228,6 +4275,7 @@ export async function startDaemon(): Promise<void> {
     apiMachine.setRPCHandlers({
       spawnSession,
       stopSession,
+      deleteSession,
       archiveSession,
       restartSession,
       requestShutdown: () => requestShutdown('happy-app')

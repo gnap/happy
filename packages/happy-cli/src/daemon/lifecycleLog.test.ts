@@ -217,10 +217,26 @@ describe('LifecycleLog', () => {
     });
 
     it('reads a lifecycle that contradicts its op as a torn line, not as a fact', () => {
+        // `deleted` is an effect; it cannot ride on a `created` line.
         const dir = mkdtempSync(join(tmpdir(), 'happy-lifecycle-'));
         const file = join(dir, 'lifecycle.jsonl');
-        writeFileSync(file, '{"rev":1,"at":1,"op":"created","tag":"a","lifecycle":"archived"}\n', 'utf8');
+        writeFileSync(file, '{"rev":1,"at":1,"op":"created","tag":"a","lifecycle":"deleted"}\n', 'utf8');
         expect(new LifecycleLog(file).read()).toEqual([]);
+    });
+
+    it('reads an archive as a created entry that wants the session away', () => {
+        // The archive is a spec with no effect: the row and the server record stay, so it is a
+        // `created` statement rather than a tombstone.
+        const dir = mkdtempSync(join(tmpdir(), 'happy-lifecycle-'));
+        const file = join(dir, 'lifecycle.jsonl');
+        writeFileSync(file, '{"rev":1,"at":1,"op":"created","tag":"a","lifecycle":"archived","generation":2}\n', 'utf8');
+
+        const log = new LifecycleLog(file);
+        expect(log.read()).toHaveLength(1);
+        expect(foldLifecycleSpecs(log.read()).get('a')).toMatchObject({
+            lifecycle: 'archived',
+            generation: 2,
+        });
     });
 
     it('writes one line per fact, so a reader never has to parse a document', () => {
