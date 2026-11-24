@@ -289,7 +289,14 @@ function divergenceOf(
     desired: NonNullable<SessionStatusFacts['desired']>,
 ): SessionDivergence | undefined {
     const runningButArchived = desired.lifecycle === 'running' && status.phase === 'Archived';
-    const archivedButPresent = desired.lifecycle === 'archived' && status.phase !== 'Archived';
+    // A want to archive is realized by the process being gone; the row staying listed is the
+    // point of an archive, not evidence that it was not applied. Only a live process (or a spawn
+    // on its way to one) is a divergence.
+    const present = status.phase === 'Running'
+        || status.phase === 'Scheduling'
+        || status.phase === 'Starting'
+        || status.phase === 'Restarting';
+    const archivedButPresent = desired.lifecycle === 'archived' && present;
     const wantNotObserved = desired.lifecycle === 'running'
         && status.phase !== 'Archived'
         && status.observedGeneration < desired.generation;

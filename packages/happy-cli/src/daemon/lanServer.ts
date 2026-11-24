@@ -27,7 +27,7 @@ import fastify, { type FastifyInstance } from 'fastify';
 import websocket, { type WebSocket } from '@fastify/websocket';
 import { logger } from '@/ui/logger';
 import type { SessionLogEntry } from '@/api/sessionLog';
-import type { ArchiveSessionResult } from './types';
+import type { SessionLifecycleResult } from './types';
 import type { SessionCondition, SessionDesiredLifecycle, SessionDivergence, SessionPhase } from './sessionStatus';
 
 /** How long an issued bearer token stays valid. Short because it travels over cleartext. */
@@ -260,8 +260,10 @@ export type LanServerOptions = {
   getSessions: () => LanSessionSummary[];
   /** Sessions this machine has archived, so a reader can apply deletions from the same state. */
   getTombstones?: () => Array<{ sessionId: string; tag?: string; at: number }>;
-  /** Archive locally and record the delete transaction; the daemon replays it to the server. */
-  archiveSession?: (sessionId: string) => ArchiveSessionResult;
+  /** Delete locally and record the tombstone; the daemon replays it to the server. */
+  deleteSession?: (sessionId: string) => SessionLifecycleResult;
+  /** Stop the session and record that this machine wants it archived; the row stays. */
+  archiveSession?: (sessionId: string) => SessionLifecycleResult;
   /**
    * What this machine is running against what it has on disk.
    *
@@ -915,26 +917,30 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
   };
 
   /**
-   * Archive a session on this machine.
+   * A deletion over the original LAN path.
    *
-   * The caller is asking for a deletion, but the fact is recorded here first: the daemon appends
-   * a `deleted` lifecycle entry and replays it to the server at its own pace. A server that is
-   * down therefore delays the server's copy, not the local list. Account-signed for the same
-   * reason as restart — a machine-key holder may read, but only the account may delete.
+   * The name is a legacy surface: it has always meant "remove this session", and older Apps sign
+   * it that way. The fact is recorded here first — the daemon appends a `deleted` lifecycle entry
+   * and replays it to the server at its own pace — so a server that is down delays the server's
+   * copy, not the local list. Account-signed for the same reason as restart: a machine-key holder
+   * may read, but only the account may delete.
+   *
+   * New clients use `/lan/v2/sessions/:id/delete`; this route stays until every App in the field
+   * speaks that one.
    */
   app.post('/lan/sessions/:sessionId/archive', async (request, reply) => {
     if (!requireToken(request)) {
       return reply.code(401).send({ error: 'unauthorized' });
     }
-    if (!opts.archiveSession) {
-      return reply.code(404).send({ error: 'this daemon does not archive sessions' });
+    if (!opts.deleteSession) {
+      return reply.code(404).send({ error: 'this daemon does not delete sessions' });
     }
     const { sessionId } = request.params as { sessionId: string };
     if (!requireAccountProof(request, { operation: 'archive', target: sessionId })) {
       return reply.code(403).send({ error: 'account proof required' });
     }
-    const result = opts.archiveSession(sessionId);
-    logger.debug(`[lan] archive ${sessionId} from=${clientAddress(request)} applied=${result.applied} known=${result.known}`);
+    const result = opts.deleteSession(sessionId);
+    logger.debug(`[lan] delete (legacy archive path) ${sessionId} from=${clientAddress(request)} applied=${result.applied} known=${result.known}`);
     if (!result.applied) {
       return reply.code(404).send({
         error: 'the machine could not record the deletion',
@@ -956,8 +962,96 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       ref: sessionId,
       phase: 'Archived',
       ...(result.tag ? { tag: result.tag } : {}),
-      // The generation of the archived want this attempt wrote. Absent on a retry that found the
-      // deletion already recorded, because that attempt stated no new want.
+      // The generation of the want this attempt wrote. Absent on a retry that found the deletion
+      // already recorded, because that attempt stated no new want.
+      ...(result.generation !== undefined ? { generation: result.generation } : {}),
+    });
+  });
+
+  /**
+   * Delete a session: stop it, record the tombstone, and let the replay remove the server's row.
+   *
+   * The canonical path. It differs from the archive route below in what it leaves behind: nothing.
+   */
+  app.post('/lan/v2/sessions/:sessionId/delete', async (request, reply) => {
+    if (!requireToken(request)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    if (!opts.deleteSession) {
+      return reply.code(404).send({ error: 'this daemon does not delete sessions' });
+    }
+    const { sessionId } = request.params as { sessionId: string };
+    if (!requireAccountProof(request, { operation: 'delete', target: sessionId })) {
+      return reply.code(403).send({ error: 'account proof required' });
+    }
+    const result = opts.deleteSession(sessionId);
+    logger.debug(`[lan] delete ${sessionId} from=${clientAddress(request)} applied=${result.applied} known=${result.known}`);
+    if (!result.applied) {
+      return reply.code(404).send({
+        error: 'the machine could not record the deletion',
+        success: false,
+        accepted: false,
+        stage: 'failed',
+        ref: sessionId,
+        reason: result.reason ?? 'not-recorded',
+      });
+    }
+    return reply.send({
+      v: LAN_PROTOCOL_VERSION,
+      success: true,
+      accepted: true,
+      stage: 'done',
+      ref: sessionId,
+      phase: 'Archived',
+      ...(result.tag ? { tag: result.tag } : {}),
+      ...(result.generation !== undefined ? { generation: result.generation } : {}),
+    });
+  });
+
+  /**
+   * Archive a session: stop the process and keep the row, its history and the server's record.
+   *
+   * A deletion is what older App versions mean by the original `/archive` path above; this is a
+   * different action, so it is a different path. The answer says `Stopped` rather than `Archived`:
+   * the row is still there, which is the point. A later `running` want is what brings it back.
+   */
+  app.post('/lan/v2/sessions/:sessionId/archive', async (request, reply) => {
+    if (!requireToken(request)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    if (!opts.archiveSession) {
+      return reply.code(404).send({ error: 'this daemon does not archive sessions' });
+    }
+    const { sessionId } = request.params as { sessionId: string };
+    // The legacy route signs `archive` too, and its meaning there is a deletion. The overlap ends
+    // with the legacy route; a proof is one-shot and short-lived, so the window to move one
+    // between the two is the same one that already lets it be replayed on the route it names.
+    if (!requireAccountProof(request, { operation: 'archive', target: sessionId })) {
+      return reply.code(403).send({ error: 'account proof required' });
+    }
+    const result = opts.archiveSession(sessionId);
+    logger.debug(`[lan] archive ${sessionId} from=${clientAddress(request)} applied=${result.applied} known=${result.known}`);
+    if (!result.applied) {
+      // A row this machine has no lineage for cannot be archived; it can only be deleted. Saying
+      // so is more useful than an answer that would let the caller believe a row was kept.
+      return reply.code(409).send({
+        error: 'the machine could not archive this session',
+        success: false,
+        accepted: false,
+        stage: 'failed',
+        ref: sessionId,
+        reason: result.reason ?? 'not-recorded',
+      });
+    }
+    return reply.send({
+      v: LAN_PROTOCOL_VERSION,
+      success: true,
+      accepted: true,
+      stage: 'done',
+      ref: sessionId,
+      phase: 'Stopped',
+      archived: true,
+      ...(result.tag ? { tag: result.tag } : {}),
       ...(result.generation !== undefined ? { generation: result.generation } : {}),
     });
   });
