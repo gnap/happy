@@ -5,6 +5,7 @@ import { ToolViewProps } from './_all';
 import { ToolSectionView } from '../ToolSectionView';
 import { sessionAllow } from '@/sync/ops';
 import { sync } from '@/sync/sync';
+import { askUserQuestionAnswers, answerLabels } from '../askUserQuestionResult';
 import { t } from '@/text';
 import { Ionicons } from '@expo/vector-icons';
 
@@ -71,9 +72,6 @@ const styles = StyleSheet.create((theme) => ({
     optionButtonSelected: {
         backgroundColor: theme.colors.surfaceHigh,
         borderColor: theme.colors.radio.active,
-    },
-    optionButtonDisabled: {
-        opacity: 0.6,
     },
     radioOuter: {
         width: 20,
@@ -163,6 +161,9 @@ const styles = StyleSheet.create((theme) => ({
         color: theme.colors.text,
         flex: 1,
     },
+    submittedValueMuted: {
+        color: theme.colors.textSecondary,
+    },
 }));
 
 export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId }) => {
@@ -171,34 +172,38 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
     const [isSubmitting, setIsSubmitting] = React.useState(false);
     const [isSubmitted, setIsSubmitted] = React.useState(false);
 
-    // Parse input
+    // Parse input. The questions can also arrive in the result: the answer is the permission
+    // response (`{ questions, answers }`), and a completed request need not repeat the form in
+    // its `arguments` as well.
     const input = tool.input as AskUserQuestionInput | undefined;
-    const questions = input?.questions;
+    const resultQuestions = (tool.result as { questions?: unknown } | undefined)?.questions;
+    const questions: Question[] | undefined = Array.isArray(input?.questions)
+        ? input.questions
+        : Array.isArray(resultQuestions)
+            ? resultQuestions as Question[]
+            : undefined;
 
     // When tool.result arrives after mount (e.g. from synced message stream),
     // restore selections so the submitted view shows the answer.
     React.useEffect(() => {
-        if (tool.state === 'completed' || tool.state === 'error') {
-            const result = tool.result as Record<string, unknown> | undefined;
-            const answers = result?.answers as Record<string, string> | undefined;
-            if (answers && questions) {
-                const map = new Map<number, Set<number>>();
-                questions.forEach((q, qIndex) => {
-                    const answer = answers[q.question];
-                    if (answer) {
-                        const labels = answer.split(', ').map(s => s.trim());
-                        const indices = new Set<number>();
-                        labels.forEach(label => {
-                            const optIdx = q.options.findIndex(o => o.label === label);
-                            if (optIdx >= 0) indices.add(optIdx);
-                        });
-                        if (indices.size > 0) map.set(qIndex, indices);
-                    }
-                });
-                if (map.size > 0) setSelections(map);
-            }
+        const answers = askUserQuestionAnswers(tool.result);
+        if (!answers || !questions) {
+            return;
         }
-    }, [tool.result, tool.state, questions]);
+        const map = new Map<number, Set<number>>();
+        questions.forEach((q, qIndex) => {
+            const labels = answerLabels(answers[q.question]);
+            const indices = new Set<number>();
+            labels.forEach(label => {
+                const optIdx = Array.isArray(q.options)
+                    ? q.options.findIndex(o => o.label === label)
+                    : -1;
+                if (optIdx >= 0) indices.add(optIdx);
+            });
+            if (indices.size > 0) map.set(qIndex, indices);
+        });
+        if (map.size > 0) setSelections(map);
+    }, [tool.result, questions]);
 
     if (!questions || !Array.isArray(questions) || questions.length === 0) {
         return null;
@@ -210,14 +215,8 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
     // 2. It wasn't already submitted locally
     // 3. Either has a permission id (CLI flow) or the tool is still running
     //    (Cursor / agent-state flow where permission may not be set).
-    const hasAnswers = tool.result && typeof tool.result === 'object' && !!(tool.result as any).answers;
+    const hasAnswers = askUserQuestionAnswers(tool.result) !== null;
     const canInteract = !isSubmitted && !hasAnswers && (!!tool.permission?.id || tool.state === 'running');
-
-    // Diagnostic: log when form is non-interactive
-    if (!canInteract && !isSubmitted) {
-        const resultType = typeof tool.result;
-        console.warn(`[AskUserQuestion] form non-interactive: tool.state=${tool.state}, perm.id=${tool.permission?.id}, perm.status=${tool.permission?.status}, isSubmitted=${isSubmitted}, hasAnswers=${hasAnswers}, resultType=${resultType}`);
-    }
 
     // Check if all questions have at least one selection
     const allQuestionsAnswered = questions.every((_, qIndex) => {
@@ -265,7 +264,7 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
         const answers: Record<string, string> = {};
         questions.forEach((q, qIndex) => {
             const selected = selections.get(qIndex);
-            const selectedLabels = (selected && selected.size > 0)
+            const selectedLabels = (selected && selected.size > 0 && Array.isArray(q.options))
                 ? Array.from(selected)
                     .map(optIndex => q.options[optIndex]?.label)
                     .filter(Boolean)
@@ -299,24 +298,34 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
         }
     }, [sessionId, questions, selections, allQuestionsAnswered, isSubmitting, tool.permission?.id]);
 
-    // Show submitted state only when there are actual answers
-    // (hasAnswers is defined above in the canInteract block)
-    if (isSubmitted || (tool.state === 'completed' && hasAnswers)) {
+    // Once a question is no longer answerable — submitted, answered, canceled, or otherwise past
+    // — what is left to read is the question and its answer, one line each. Rendering the form
+    // (all options and their descriptions, merely disabled) made every historical question take
+    // a card's worth of space to say "this happened".
+    if (isSubmitted || !canInteract) {
+        // The stored answer is the authority when it arrived with the result; the local
+        // selections only know about options that were still in the input.
+        const storedAnswers = askUserQuestionAnswers(tool.result);
+        const unanswered = t('tools.askUserQuestion.notAnswered');
         return (
             <ToolSectionView>
                 <View style={styles.submittedContainer}>
                     {questions.map((q, qIndex) => {
                         const selected = selections.get(qIndex);
-                        const selectedLabels = selected
+                        const fromSelections = selected && Array.isArray(q.options)
                             ? Array.from(selected)
                                 .map(optIndex => q.options[optIndex]?.label)
-                                .filter(Boolean)
-                                .join(', ')
-                            : '-';
+                                .filter((label): label is string => typeof label === 'string' && label.length > 0)
+                            : [];
+                        const labels = fromSelections.length > 0
+                            ? fromSelections
+                            : answerLabels(storedAnswers?.[q.question]);
                         return (
                             <View key={qIndex} style={styles.submittedItem}>
-                                <Text style={styles.submittedHeader}>{q.header}:</Text>
-                                <Text style={styles.submittedValue}>{selectedLabels}</Text>
+                                <Text style={styles.submittedHeader}>{q.header || q.question}:</Text>
+                                <Text style={[styles.submittedValue, labels.length === 0 && styles.submittedValueMuted]}>
+                                    {labels.length > 0 ? labels.join(', ') : unanswered}
+                                </Text>
                             </View>
                         );
                     })}
@@ -347,10 +356,8 @@ export const AskUserQuestionView = React.memo<ToolViewProps>(({ tool, sessionId 
                                             style={[
                                                 styles.optionButton,
                                                 isSelected && styles.optionButtonSelected,
-                                                !canInteract && styles.optionButtonDisabled,
                                             ]}
                                             onPress={() => handleOptionToggle(qIndex, oIndex, question.multiSelect)}
-                                            disabled={!canInteract}
                                             activeOpacity={0.7}
                                         >
                                             {question.multiSelect ? (

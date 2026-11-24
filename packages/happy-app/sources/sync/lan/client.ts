@@ -664,18 +664,73 @@ export async function sessionControlAt(
  * what this machine does not. Everything else is thrown with the daemon's own words: a refusal is
  * about this device, and walking it to the server would ask a different party the same question.
  */
-export async function archiveSessionAt(
+export async function deleteSessionAt(
     baseUrl: string,
     token: string,
     sessionId: string,
     /** The account's proof of this request, when this device can make one. */
     proof?: Record<string, string>
 ): Promise<boolean> {
-    const response = await request(`${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/archive`, {
+    const response = await request(`${baseUrl}/lan/v2/sessions/${encodeURIComponent(sessionId)}/delete`, {
         method: 'POST',
         token,
         headers: { ...(proof ?? {}) },
         // A log append and a state write, answered as soon as they are durable.
+        timeoutMs: REQUEST_TIMEOUT_MS,
+    });
+    if (response.status === 404) {
+        return false;
+    }
+    if (!response.ok) {
+        return throwAnswer(response, 'delete request failed');
+    }
+    return true;
+}
+
+/**
+ * The path a daemon built before the v2 routes answers, and always meant a deletion.
+ *
+ * Called only after the canonical route has said it does not exist on that machine. The proof for
+ * this request names `archive`, because that is the word the old route has always checked.
+ */
+export async function deleteSessionAtLegacy(
+    baseUrl: string,
+    token: string,
+    sessionId: string,
+    proof?: Record<string, string>
+): Promise<boolean> {
+    const response = await request(`${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/archive`, {
+        method: 'POST',
+        token,
+        headers: { ...(proof ?? {}) },
+        timeoutMs: REQUEST_TIMEOUT_MS,
+    });
+    if (response.status === 404) {
+        return false;
+    }
+    if (!response.ok) {
+        return throwAnswer(response, 'delete request failed');
+    }
+    return true;
+}
+
+/**
+ * Asks a daemon to archive one of its sessions: stop it, keep the row and its history.
+ *
+ * Not a deletion, and deliberately not interchangeable with one: a daemon that does not have this
+ * route answers 404, and the caller must say so rather than fall back to the legacy delete path.
+ * A 409 means the machine has no lineage it could archive; it is thrown with the daemon's words.
+ */
+export async function archiveSessionAt(
+    baseUrl: string,
+    token: string,
+    sessionId: string,
+    proof?: Record<string, string>
+): Promise<boolean> {
+    const response = await request(`${baseUrl}/lan/v2/sessions/${encodeURIComponent(sessionId)}/archive`, {
+        method: 'POST',
+        token,
+        headers: { ...(proof ?? {}) },
         timeoutMs: REQUEST_TIMEOUT_MS,
     });
     if (response.status === 404) {

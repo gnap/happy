@@ -76,14 +76,26 @@ describe('decideReconcile', () => {
         expect(decision).toEqual({ kind: 'resume', reason: 'newer-want-while-running', attempt: 1 });
     });
 
-    it('archives a session whose tombstone has not been applied', () => {
+    it('archives a session whose process is still running', () => {
+        const decision = decideReconcile({
+            spec: spec({ lifecycle: 'archived', generation: 3 }),
+            observation: { phase: 'Running', observedGeneration: 2 },
+            now: 10_000,
+        });
+
+        expect(decision).toEqual({ kind: 'archive', reason: 'spec-archived', attempt: 1 });
+    });
+
+    it('treats an archived want as settled once no process is left', () => {
+        // An archive keeps the row, so `Stopped` is its end state — unlike a deletion, which
+        // removes the row and reads as `Archived`.
         const decision = decideReconcile({
             spec: spec({ lifecycle: 'archived', generation: 3 }),
             observation: { phase: 'Stopped', observedGeneration: 2 },
             now: 10_000,
         });
 
-        expect(decision).toEqual({ kind: 'archive', reason: 'spec-archived', attempt: 1 });
+        expect(decision).toEqual({ kind: 'settled' });
     });
 
     it('does not re-archive a session that is already gone', () => {

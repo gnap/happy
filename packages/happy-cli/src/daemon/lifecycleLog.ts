@@ -45,7 +45,7 @@ export type LifecycleOp = 'created' | 'deleted' | 'reachable';
 /** What this machine wants a session to be. Absent on entries written before the spec existed. */
 export type LifecycleDesiredState = 'running' | 'archived';
 
-/** A session this machine started, or wants running. */
+/** A session this machine started, or a later want about it (running, or archived). */
 export type LifecycleCreatedEntry = {
     /** Position in the log, 1-based and monotonic. A reader's cursor is the last entry it applied. */
     rev: number;
@@ -69,12 +69,17 @@ export type LifecycleCreatedEntry = {
     /**
      * The desired lifecycle this entry states.
      *
-     * Optional because entries written before the spec existed say nothing about it; a `created`
-     * entry is a statement that the session should run either way, so a reader that finds it absent
-     * reads `running`. A later statement for the same session — a restart, for instance — repeats
-     * this op with a new generation rather than inventing a second way to say it.
+     * `running` means this machine wants a process; `archived` means it wants the session stopped
+     * and kept out of the active list while the row — and its history — stay. A `created` entry
+     * without the field is a statement that the session should run, which is what entries written
+     * before the spec existed meant; a later statement for the same session repeats this op with a
+     * new generation rather than inventing a second way to say it.
+     *
+     * An archive is therefore a spec with no effect of its own: unlike `deleted`, it replays
+     * nothing to the server, so the row remains addressable and a later `running` want can bring
+     * it back.
      */
-    lifecycle?: 'running';
+    lifecycle?: 'running' | 'archived';
     /**
      * Which successive want this is, starting at 0 for the creation.
      *
@@ -137,7 +142,7 @@ export type LifecycleEntry = LifecycleSessionEntry | LifecycleReachableEntry;
  * App delete a session this machine's snapshot no longer holds.
  */
 export type LifecycleFactInput =
-    | { op: 'created'; tag: string; sessionUid?: string; sessionId?: string; directory?: string; agent?: string; lifecycle?: 'running'; generation?: number; at?: number }
+    | { op: 'created'; tag: string; sessionUid?: string; sessionId?: string; directory?: string; agent?: string; lifecycle?: 'running' | 'archived'; generation?: number; at?: number }
     | { op: 'deleted'; tag: string; sessionUid?: string; sessionId?: string; directory?: string; agent?: string; lifecycle?: 'archived'; generation?: number; at?: number }
     | { op: 'deleted'; tag?: string; sessionUid?: string; sessionId: string; directory?: string; agent?: string; lifecycle?: 'archived'; generation?: number; at?: number };
 
@@ -157,9 +162,14 @@ const asEntry = (line: string): LifecycleEntry | null => {
             return null;
         }
         if (parsed.op === 'created') {
-            // A lifecycle that contradicts the op is not a line this version wrote: `created` is
-            // this machine saying it wants the session, so it can only ever say `running`.
-            if (parsed.lifecycle !== undefined && parsed.lifecycle !== 'running') {
+            // A `created` entry is a spec for a session this machine knows; it can ask for a
+            // process or ask that the session be put away. A deletion is the other op, so
+            // `deleted` is the one value this line may not carry.
+            if (
+                parsed.lifecycle !== undefined
+                && parsed.lifecycle !== 'running'
+                && parsed.lifecycle !== 'archived'
+            ) {
                 return null;
             }
             return typeof parsed.tag === 'string' ? (parsed as LifecycleCreatedEntry) : null;

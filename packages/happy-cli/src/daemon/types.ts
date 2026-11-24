@@ -8,28 +8,35 @@ import type { SandboxConfig } from '@/persistence';
 import type { SessionPhase } from './sessionStatus';
 
 /**
- * What `archiveSession` did, rather than whether it "succeeded".
+ * What an archive or a delete did, rather than whether it "succeeded".
  *
- * A deletion is a fact written to this machine's log, so it has an outcome even when the machine
- * never held the row: the tombstone is applied, `known` is false, and the server replay consumes
- * it by id. Separating the two is what stops an unknown session from being reported as a failure
- * (and then silently doing nothing, which is how the server kept a row the App had deleted).
+ * Both actions are facts written to this machine's log, so each has an outcome even when the
+ * machine never held the row: a deletion writes a tombstone the server replay consumes by id, and
+ * an archive writes a want for a row the machine still knows. `known` separates "the fact landed"
+ * from "this machine had a row for it".
  */
-export type ArchiveSessionResult = {
-    /** The tombstone is in the log. Anything else means the caller has to retry or ask another road. */
+export type SessionLifecycleResult = {
+    /**
+     * The fact is in the log: a tombstone for a delete, an archived want for an archive.
+     * Anything else means the caller has to retry or ask another road.
+     */
     applied: boolean;
-    /** This machine had a row for the session before the tombstone. */
+    /** This machine had a row for the session before the action. */
     known: boolean;
+    /** A live process was asked to stop as part of the action. */
+    stopped?: boolean;
     /** The CLI's tag, when this machine knew it. */
     tag?: string;
     /**
-     * The generation of the archived spec this attempt wrote, when it wrote one.
+     * The generation of the want this attempt wrote, when it wrote one.
      *
-     * Absent when the deletion was already recorded — a retried request is still applied, and the
-     * same want is not numbered twice. Read-only for callers: the number is this machine's, and
-     * the App uses it to line up what it observed with what was asked for.
+     * Absent when the same want was already recorded — a retried request is still applied, and
+     * the same want is not numbered twice. Read-only for callers: the number is this machine's,
+     * and the App uses it to line up what it observed with what was asked for.
      */
     generation?: number;
+    /** Why nothing was written, when `applied` is false. */
+    reason?: string;
 };
 
 /**

@@ -10,6 +10,7 @@ import { useLocalSetting } from '@/sync/storage';
 import { StyleSheet } from 'react-native-unistyles';
 import { t } from '@/text';
 import { useLazyToolInput } from './views/useLazyToolInput';
+import { toolErrorMessage } from './toolErrorText';
 
 interface ToolFullViewProps {
     tool: ToolCall;
@@ -75,6 +76,8 @@ export function ToolFullView({ tool, metadata, messages = [], sessionId, message
 function GenericToolBody(props: { tool: ToolCall; sessionId?: string; messageId?: string }) {
     const { loading } = useLazyToolInput(props.tool, props.sessionId, props.messageId);
     const { tool } = props;
+    // A structured result is not text: `String()` on it would print "[object Object]".
+    const errorText = tool.state === 'error' ? toolErrorMessage(tool.result) : null;
     return (
         <>
             {loading && (
@@ -115,14 +118,14 @@ function GenericToolBody(props: { tool: ToolCall; sessionId?: string; messageId?
             )}
 
             {/* Error Details */}
-            {tool.state === 'error' && tool.result && (
+            {errorText && (
                 <View style={styles.section}>
                     <View style={styles.sectionHeader}>
                         <Ionicons name="close-circle" size={20} color="#FF3B30" />
                         <Text style={styles.sectionTitle}>{t('tools.fullView.error')}</Text>
                     </View>
                     <View style={styles.errorContainer}>
-                        <Text style={styles.errorText}>{String(tool.result)}</Text>
+                        <Text style={styles.errorText}>{errorText}</Text>
                     </View>
                 </View>
             )}

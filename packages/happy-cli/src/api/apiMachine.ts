@@ -15,7 +15,7 @@ import { backoff } from '@/utils/time';
 import { localRouteNames } from '@/daemon/proxy/routes';
 import { isBun, isNode } from '@/utils/runtime';
 import { RpcHandlerManager } from './rpc/RpcHandlerManager';
-import type { ArchiveSessionResult, RestartSessionResult } from '../daemon/types';
+import type { SessionLifecycleResult, RestartSessionResult } from '../daemon/types';
 
 /** How long a best-effort daemon-state write may take before the caller moves on. */
 const DAEMON_STATE_WRITE_TIMEOUT_MS = 2000;
@@ -132,7 +132,10 @@ interface DaemonToServerEvents {
 type MachineRpcHandlers = {
     spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
     stopSession: (sessionId: string) => boolean;
-    archiveSession: (sessionId: string) => ArchiveSessionResult;
+    /** Remove a session from this machine and from the server. */
+    deleteSession: (sessionId: string) => SessionLifecycleResult;
+    /** Stop a session and keep it, marked archived. */
+    archiveSession: (sessionId: string) => SessionLifecycleResult;
     restartSession: (sessionId: string, sandboxConfig?: any, requiresDesktop?: boolean, expectGeneration?: number, mode?: 'wait' | 'accept') => Promise<RestartSessionResult>;
     requestShutdown: () => void;
 }
@@ -161,6 +164,7 @@ export class ApiMachineClient {
     setRPCHandlers({
         spawnSession,
         stopSession,
+        deleteSession,
         archiveSession,
         restartSession,
         requestShutdown
@@ -239,7 +243,59 @@ export class ApiMachineClient {
             return { message: 'Session stopped' };
         });
 
-        // Register kill session handler (handles both active and stopped sessions)
+        /**
+         * What a delete or an archive looks like to the caller.
+         *
+         * `success` remains for older Apps; accepted/applied/reason are what a newer one reads.
+         * The two actions differ only in the end state: a deletion leaves no row (`Archived`), an
+         * archive leaves one (`Stopped`) and says so with `archived`.
+         */
+        const lifecycleAnswer = (
+            sessionId: string,
+            kind: 'delete' | 'archive',
+            result: SessionLifecycleResult,
+        ) => {
+            const done = result.applied;
+            const stopped = result.stopped === true;
+            const noun = kind === 'delete' ? 'deleted' : 'archived';
+            return {
+                success: done,
+                accepted: true,
+                applied: done,
+                stage: done ? 'done' : 'failed',
+                ref: sessionId,
+                ...(done ? { phase: kind === 'delete' ? 'Archived' : 'Stopped' } : {}),
+                ...(done && kind === 'archive' ? { archived: true } : {}),
+                stopped,
+                known: result.known,
+                ...(result.generation !== undefined ? { generation: result.generation } : {}),
+                reason: done
+                    ? (stopped ? `stopped-and-${noun}` : noun)
+                    : (result.reason ?? `${kind}-failed`),
+                message: done
+                    ? (kind === 'delete'
+                        ? (stopped ? 'Session stopped and deleted' : 'Session deleted')
+                        : (stopped ? 'Session stopped and archived' : 'Session archived'))
+                    : (kind === 'delete' ? 'Session could not be deleted' : 'Session could not be archived'),
+            };
+        };
+
+        this.rpcHandlerManager.registerHandler('deleteSession', (params: any) => {
+            const { sessionId } = params || {};
+
+            if (!sessionId) {
+                throw new Error('Session ID is required');
+            }
+
+            // The tombstone is applied even when the machine has no row for the id: it is what the
+            // server replay consumes, and the id is what the server addresses.
+            const result = deleteSession(sessionId);
+            logger.debug(`[API MACHINE] deleteSession: ${sessionId} — stopped=${result.stopped ?? false} applied=${result.applied} known=${result.known}`);
+            return lifecycleAnswer(sessionId, 'delete', result);
+        });
+
+        // The name older Apps call. It has always meant a deletion, so the compatibility surface
+        // is the RPC name, never a second operation behind it.
         this.rpcHandlerManager.registerHandler('killSession', (params: any) => {
             const { sessionId } = params || {};
 
@@ -247,35 +303,21 @@ export class ApiMachineClient {
                 throw new Error('Session ID is required');
             }
 
-            // Stop first if still running
-            const stopped = stopSession(sessionId);
+            const result = deleteSession(sessionId);
+            logger.debug(`[API MACHINE] killSession (legacy deleteSession): ${sessionId} — applied=${result.applied} known=${result.known}`);
+            return lifecycleAnswer(sessionId, 'delete', result);
+        });
 
-            // Then record the deletion. This is applied even when the machine has no row for the
-            // id: the tombstone is what the server replay consumes, and it is the App's delete.
-            const archived = archiveSession(sessionId);
-            logger.debug(`[API MACHINE] killSession: ${sessionId} — stopped=${stopped} applied=${archived.applied} known=${archived.known}`);
-            // `success` remains for older Apps; accepted/applied/reason are what a newer one reads.
-            // A stopped process and a recorded deletion are different facts, and the caller now
-            // gets both instead of a single boolean that hid the one that did not happen.
-            return {
-                success: archived.applied,
-                accepted: true,
-                applied: archived.applied,
-                // Additive to the fields older Apps read: which stage the deletion reached and
-                // what the session is now. A tombstone that landed means the row is Archived.
-                stage: archived.applied ? 'done' : 'failed',
-                ref: sessionId,
-                ...(archived.applied ? { phase: 'Archived' } : {}),
-                stopped,
-                known: archived.known,
-                ...(archived.generation !== undefined ? { generation: archived.generation } : {}),
-                reason: archived.applied
-                    ? (stopped ? 'stopped-and-archived' : 'archived')
-                    : 'archive-failed',
-                message: archived.applied
-                    ? (stopped ? 'Session stopped and archived' : 'Session archived')
-                    : 'Session could not be archived',
-            };
+        this.rpcHandlerManager.registerHandler('archiveSession', (params: any) => {
+            const { sessionId } = params || {};
+
+            if (!sessionId) {
+                throw new Error('Session ID is required');
+            }
+
+            const result = archiveSession(sessionId);
+            logger.debug(`[API MACHINE] archiveSession: ${sessionId} — stopped=${result.stopped ?? false} applied=${result.applied} known=${result.known}`);
+            return lifecycleAnswer(sessionId, 'archive', result);
         });
 
         // Register restart session handler.

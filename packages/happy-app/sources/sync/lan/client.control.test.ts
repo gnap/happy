@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 // other LAN tests use.
 vi.mock('@/encryption/hmac_sha256', () => ({ hmac_sha256: vi.fn(async () => new Uint8Array(32)) }));
 
-const { archiveSessionAt, restartAskBody, restartSessionAt, sessionControlAt } = await import('./client');
+const { archiveSessionAt, deleteSessionAt, deleteSessionAtLegacy, restartAskBody, restartSessionAt, sessionControlAt } = await import('./client');
 
 const base = 'http://10.0.0.2:55673';
 
@@ -52,11 +52,11 @@ describe('sessionControlAt', () => {
     });
 });
 
-describe('archiveSessionAt', () => {
-    it('posts the deletion to the daemon, with the account proof it was given', async () => {
+describe('deleteSessionAt', () => {
+    it('posts the deletion to the canonical route, with the account proof it was given', async () => {
         const calls = stub({ status: 200 });
-        expect(await archiveSessionAt(base, 't1', 'sess-1', { 'x-happy-proof-signature': 'sig' })).toBe(true);
-        expect(calls[0].url).toBe(`${base}/lan/sessions/sess-1/archive`);
+        expect(await deleteSessionAt(base, 't1', 'sess-1', { 'x-happy-proof-signature': 'sig' })).toBe(true);
+        expect(calls[0].url).toBe(`${base}/lan/v2/sessions/sess-1/delete`);
         expect(calls[0].init.method).toBe('POST');
         expect(calls[0].init.headers['x-happy-proof-signature']).toBe('sig');
     });
@@ -65,13 +65,42 @@ describe('archiveSessionAt', () => {
         // A build without the route, or no session by that id: the server may still hold it, so
         // this is the one answer that belongs to another channel.
         stub({ status: 404 });
-        expect(await archiveSessionAt(base, 't1', 'sess-1')).toBe(false);
+        expect(await deleteSessionAt(base, 't1', 'sess-1')).toBe(false);
     });
 
     it('throws a proof refusal rather than sending the same delete to the server', async () => {
         stub({ status: 403, body: { error: 'account proof required' } });
-        await expect(archiveSessionAt(base, 't1', 'sess-1'))
+        await expect(deleteSessionAt(base, 't1', 'sess-1'))
             .rejects.toMatchObject({ name: 'LanRequestError', status: 403, body: 'account proof required' });
+    });
+});
+
+describe('deleteSessionAtLegacy', () => {
+    it('asks the path a build from before the v2 routes answers', async () => {
+        const calls = stub({ status: 200 });
+        expect(await deleteSessionAtLegacy(base, 't1', 'sess-1')).toBe(true);
+        expect(calls[0].url).toBe(`${base}/lan/sessions/sess-1/archive`);
+    });
+});
+
+describe('archiveSessionAt', () => {
+    it('posts the archive to the v2 route, keeping the row', async () => {
+        const calls = stub({ status: 200 });
+        expect(await archiveSessionAt(base, 't1', 'sess-1', { 'x-happy-proof-signature': 'sig' })).toBe(true);
+        expect(calls[0].url).toBe(`${base}/lan/v2/sessions/sess-1/archive`);
+        expect(calls[0].init.headers['x-happy-proof-signature']).toBe('sig');
+    });
+
+    it('says false when the machine has no archive route at all', async () => {
+        // An older build. The caller must not read this as "delete instead".
+        stub({ status: 404 });
+        expect(await archiveSessionAt(base, 't1', 'sess-1')).toBe(false);
+    });
+
+    it('throws the daemon\'s reason when the row has no lineage to archive', async () => {
+        stub({ status: 409, body: { error: 'the machine could not archive this session' } });
+        await expect(archiveSessionAt(base, 't1', 'sess-1'))
+            .rejects.toMatchObject({ name: 'LanRequestError', status: 409 });
     });
 });
 

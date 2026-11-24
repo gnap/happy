@@ -6,6 +6,7 @@ import { createReducer, reducer, ReducerState } from "./reducer/reducer";
 import { bump } from './metrics';
 import { Message } from "./typesMessage";
 import { collapseDuplicateMessages, mergePageIntoWindow } from "./messageIdentity";
+import { visibleWindow } from "./reducer/standIns";
 import { NormalizedMessage } from "./typesRaw";
 import type { DaemonRoute, LanSighting, RelayEndpoint, SessionChannel, SessionDivergence } from './lan/types';
 import { daemonSessionListSignature, daemonSessionRows, dropDeletedDaemonSessionRows, isStaleSessionRuntimeStatement, keepPendingDaemonSessionRows, mergeSessionRuntime, type DaemonSessionEntry, type DaemonSessionReport, type SessionRuntimeEntry, type SessionRuntimeReport } from './daemonSessionList';
@@ -39,12 +40,44 @@ function sameDivergence(a: SessionDivergence | undefined, b: SessionDivergence |
         && a.attempts === b.attempts
         && a.blocked === b.blocked;
 }
+
+/**
+ * The archived memory after what the owner said about some lineages.
+ *
+ * `archived` is the owner's want for a row that is still kept; `running` is the same owner saying
+ * it is not archived any more. A statement with no lifecycle is an older machine that never
+ * stated one, and silence about a row is not a statement about it either — both leave the memory
+ * exactly as it was.
+ */
+function nextArchivedSessions(
+    current: Record<string, number>,
+    statements: readonly { key: string; lifecycle: string | undefined }[],
+    at: number,
+): Record<string, number> {
+    let next: Record<string, number> | null = null;
+    for (const statement of statements) {
+        if (statement.lifecycle === 'archived') {
+            if ((next ?? current)[statement.key] === undefined) {
+                next = { ...(next ?? current), [statement.key]: at };
+            }
+        } else if (statement.lifecycle === 'running') {
+            if ((next ?? current)[statement.key] !== undefined) {
+                next = { ...(next ?? current) };
+                delete next[statement.key];
+            }
+        }
+    }
+    if (next !== null) {
+        saveArchivedSessions(next);
+    }
+    return next ?? current;
+}
 import { applySettings, Settings } from "./settings";
 import { LocalSettings, applyLocalSettings } from "./localSettings";
 import { Purchases, customerInfoToPurchases } from "./purchases";
 import { Profile } from "./profile";
 import { UserProfile, RelationshipUpdatedEvent } from "./friendTypes";
-import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionMaxModes, saveSessionMaxModes, loadSessionProfileIds, saveSessionProfileIds, loadSessionSandboxIsolations, saveSessionSandboxIsolations, loadRelayEndpoints, saveRelayEndpoints, loadDeletedSessions, saveDeletedSessions, loadDeletedSessionUids, saveDeletedSessionUids, loadPendingSessionDeletes, savePendingSessionDeletes, type PendingSessionDelete } from "./persistence";
+import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionMaxModes, saveSessionMaxModes, loadSessionProfileIds, saveSessionProfileIds, loadSessionSandboxIsolations, saveSessionSandboxIsolations, loadRelayEndpoints, saveRelayEndpoints, loadDeletedSessions, saveDeletedSessions, loadDeletedSessionUids, saveDeletedSessionUids, loadArchivedSessions, saveArchivedSessions } from "./persistence";
 import type { PermissionModeKey } from '@/components/PermissionModeSelector';
 import type { CustomerInfo } from './revenueCat/types';
 import React from "react";
@@ -269,21 +302,19 @@ interface StorageState {
     /** Records that a lineage was deleted, so a row with that uid cannot come back under a new id. */
     rememberDeletedSessionUid: (uid: string, at: number) => void;
     /**
-     * Deletions this device has asked for, waiting for the machine that owns each session.
+     * Sessions this account has archived, by lineage uid or server id.
      *
-     * The intent is written before the first attempt and survives a restart: an owner that is
-     * offline is late, not gone, so the row keeps its place and says it is deleting. It leaves this
-     * map only when the machine records the deletion (then `deletedSessions` takes over), when the
-     * machine declines, or when its build predates the archive route and the server's old delete is
-     * the only road left.
+     * An archive keeps the row and its history; the owner's roster says it wants the session out
+     * of the active list. The server still holds the row, so this memory is what stops a server
+     * listing from putting it back — and it is persisted, because the owner may be offline.
      */
-    pendingSessionDeletes: Record<string, PendingSessionDelete>;
-    /** Records the person's delete before any channel is asked, so a crash cannot lose it. */
-    queueSessionDelete: (sessionId: string, machineId: string) => void;
-    /** Records the outcome of an attempt that did not land, and when to try again. */
-    noteSessionDeleteAttempt: (sessionId: string, nextAttemptAt: number, lastError: string) => void;
-    /** Forgets an intent: it was recorded, declined, or handed to the legacy road. */
-    clearSessionDelete: (sessionId: string) => void;
+    archivedSessions: Record<string, number>;
+    /** Records that a lineage was archived. Repeated statements do not move the time. */
+    rememberArchivedSession: (key: string, at: number) => void;
+    /** Forgets an archive, when the owner says the session is running again. */
+    forgetArchivedSession: (key: string) => void;
+    /** Records an archive for one session, resolving its lineage uid. */
+    archiveSessionLocally: (sessionId: string, at?: number) => void;
     /** What each machine last said it was running, asked over a channel it answered on. */
     daemonVersions: Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }>;
     /** Replace the daemons' view. Pass null to clear it (the server answered). */
@@ -581,6 +612,14 @@ function buildSessionListViewData(
      * was counted offline — in the same row that showed it online, and in the count directly above.
      */
     drivers: readonly ChannelDriver[] = [],
+    /**
+     * Lineages this account has archived, by uid or server id.
+     *
+     * An archived session is still kept — by the machine, by the server and in the cache — and
+     * the list is the one place that decides not to draw it. Hiding it here rather than removing
+     * the row keeps it addressable by a deep link and leaves an "archived" surface possible later.
+     */
+    archived: Readonly<Record<string, number>> = {},
 ): SessionListViewItem[] {
     /** Whether anything is reaching this session, from any channel, the way the rest of the App asks. */
     const reached = (session: Session) => resolveSessionReach(session.id, session.metadata?.machineId, drivers).online;
@@ -636,6 +675,9 @@ function buildSessionListViewData(
     const inactiveSessions: Session[] = [];
 
     Object.values(sessions).forEach(session => {
+        if (archived[session.sessionUid ?? session.id] !== undefined) {
+            return;
+        }
         if (reached(session)) {
             activeSessions.push(session);
         } else {
@@ -1010,7 +1052,7 @@ export const storage = create<StorageState>()((set, get) => {
         sessionRuntime: {},
         deletedSessions: loadDeletedSessions(),
         deletedSessionUids: loadDeletedSessionUids(),
-        pendingSessionDeletes: loadPendingSessionDeletes(),
+        archivedSessions: loadArchivedSessions(),
         daemonVersions: {},
         channelOverride: {},
         artifacts: {},  // Initialize artifacts
@@ -1342,12 +1384,13 @@ export const storage = create<StorageState>()((set, get) => {
                         mergedMessagesMap[message.id] = message;
                     });
 
-                    const messagesArray = Object.values(mergedMessagesMap)
-                        .sort((a, b) => b.createdAt - a.createdAt);
+                    const visible = visibleWindow(
+                        Object.values(mergedMessagesMap).sort((a, b) => b.createdAt - a.createdAt)
+                    );
 
                     sessionMessagesLive.set(session.id, {
-                        messages: messagesArray,
-                        messagesMap: mergedMessagesMap,
+                        messages: visible.messages,
+                        messagesMap: visible.messagesMap,
                         reducerState: existingSessionMessages.reducerState,
                         isLoaded: existingSessionMessages.isLoaded,
                         oldestSeq: existingSessionMessages.oldestSeq,
@@ -1428,9 +1471,10 @@ export const storage = create<StorageState>()((set, get) => {
                     mergedMessagesMap[message.id] = message;
                 });
 
-                // Convert to array and sort by createdAt
-                const messagesArray = Object.values(mergedMessagesMap)
-                    .sort((a, b) => b.createdAt - a.createdAt);
+                // Convert to array and sort by createdAt, dropping stand-ins the window excludes
+                const visible = visibleWindow(
+                    Object.values(mergedMessagesMap).sort((a, b) => b.createdAt - a.createdAt)
+                );
 
                 // Update session with todos and latestUsage
                 // IMPORTANT: We extract latestUsage from the mutable reducerState and copy it to the Session object
@@ -1451,8 +1495,8 @@ export const storage = create<StorageState>()((set, get) => {
 
                 sessionMessagesLive.set(sessionId, {
                     ...existingSession,
-                    messages: messagesArray,
-                    messagesMap: mergedMessagesMap,
+                    messages: visible.messages,
+                    messagesMap: visible.messagesMap,
                     reducerState: existingSession.reducerState, // Explicitly include the mutated reducer state
                     isLoaded: true
                 });
@@ -1476,26 +1520,23 @@ export const storage = create<StorageState>()((set, get) => {
                 const reducerState = createReducer();
 
                 // Process AgentState if it exists
-                let messages: Message[] = [];
-                let messagesMap: Record<string, Message> = {};
-
+                const messagesMap: Record<string, Message> = {};
                 if (agentState) {
                     // Process AgentState through reducer to get initial permission messages
                     const reducerResult = reducer(reducerState, [], agentState);
-                    const processedMessages = reducerResult.messages;
-
-                    processedMessages.forEach(message => {
+                    for (const message of reducerResult.messages) {
                         messagesMap[message.id] = message;
-                    });
-
-                    messages = Object.values(messagesMap)
-                        .sort((a, b) => b.createdAt - a.createdAt);
+                    }
                 }
+
+                const visible = visibleWindow(
+                    Object.values(messagesMap).sort((a, b) => b.createdAt - a.createdAt)
+                );
 
                 sessionMessagesLive.set(sessionId, {
                     reducerState,
-                    messages,
-                    messagesMap,
+                    messages: visible.messages,
+                    messagesMap: visible.messagesMap,
                     isLoaded: true,
                     oldestSeq: 0,
                     newestSeq: 0,
@@ -1532,17 +1573,15 @@ export const storage = create<StorageState>()((set, get) => {
             // two entries (the queued `out` copy and the server's `in` echo) and a window merged
             // from two sources can hold both. Collapsing here is what keeps the list showing one
             // bubble per message, whatever write order produced the window.
-            const sorted = collapseDuplicateMessages([...messages].sort((a, b) => b.createdAt - a.createdAt));
-            const messagesMap: Record<string, Message> = {};
-            for (const msg of sorted) {
-                messagesMap[msg.id] = msg;
-            }
+            const visible = visibleWindow(
+                collapseDuplicateMessages([...messages].sort((a, b) => b.createdAt - a.createdAt))
+            );
             const totalSeq = sessionLive.get(sessionId)?.seq ?? 0;
             const cachedBitmap = computeBitmap(oldestSeq, lastSeq, totalSeq);
 
             sessionMessagesLive.set(sessionId, {
-                messages: sorted,
-                messagesMap,
+                messages: visible.messages,
+                messagesMap: visible.messagesMap,
                 reducerState,
                 isLoaded: true,
                 oldestSeq,
@@ -1621,17 +1660,15 @@ export const storage = create<StorageState>()((set, get) => {
                 messagesMap[msg.id] = msg;
             }
             // One message per bubble, however many wire entries produced it (see above).
-            const sorted = collapseDuplicateMessages(Object.values(messagesMap).sort((a, b) => b.createdAt - a.createdAt));
-            const cleanedMap: Record<string, Message> = {};
-            for (const msg of sorted) {
-                cleanedMap[msg.id] = msg;
-            }
+            const visible = visibleWindow(
+                collapseDuplicateMessages(Object.values(messagesMap).sort((a, b) => b.createdAt - a.createdAt))
+            );
             const totalSeq = session?.seq ?? 0;
             const cachedBitmap = computeBitmap(oldestSeq, newestSeq, totalSeq);
 
             sessionMessagesLive.set(sessionId, {
-                messages: sorted,
-                messagesMap: cleanedMap,
+                messages: visible.messages,
+                messagesMap: visible.messagesMap,
                 reducerState,
                 isLoaded: true,
                 oldestSeq,
@@ -1676,15 +1713,17 @@ export const storage = create<StorageState>()((set, get) => {
                 }
             }
 
-            const sorted = Object.values(mergedMap).sort((a, b) => b.createdAt - a.createdAt);
+            const visible = visibleWindow(
+                Object.values(mergedMap).sort((a, b) => b.createdAt - a.createdAt)
+            );
 
             const totalSeq = sessionLive.get(sessionId)?.seq ?? 0;
             const cachedBitmap = computeBitmap(newOldestSeq, existing.newestSeq, totalSeq);
 
             sessionMessagesLive.set(sessionId, {
                 ...existing,
-                messages: sorted,
-                messagesMap: mergedMap,
+                messages: visible.messages,
+                messagesMap: visible.messagesMap,
                 oldestSeq: newOldestSeq,
                 cachedBitmap,
                 hasOlderMessages,
@@ -2144,12 +2183,34 @@ export const storage = create<StorageState>()((set, get) => {
                     sessionLive.set(key, { ...known, restartingAt: row.restartingSince });
                 }
             }
+            // Archived rows are kept by the machine, so they are still in this listing; the
+            // owner's want is what makes them out of the active list. An imported row speaks for
+            // the server, not for the machine, and says nothing about a want it cannot see.
+            const archivedSessions = nextArchivedSessions(
+                state.archivedSessions,
+                listed
+                    .filter((row) => row.origin !== 'server')
+                    .map((row) => ({
+                        key: row.sessionUid ?? row.happySessionId,
+                        lifecycle: row.desiredLifecycle,
+                    }))
+                    .filter((statement): statement is { key: string; lifecycle: string | undefined } =>
+                        statement.key !== undefined),
+                Date.now(),
+            );
             // A heartbeat moving is not a change the list draws; when the list the UI reads is the
             // same, the store does not change at all.
-            if (daemonSessionListSignature(state.daemonSessionList) === daemonSessionListSignature(next)) {
+            const listChanged = daemonSessionListSignature(state.daemonSessionList)
+                !== daemonSessionListSignature(next);
+            const archiveChanged = archivedSessions !== state.archivedSessions;
+            if (!listChanged && !archiveChanged) {
                 return state;
             }
-            return { ...state, daemonSessionList: next };
+            return {
+                ...state,
+                ...(listChanged ? { daemonSessionList: next } : {}),
+                ...(archiveChanged ? { archivedSessions } : {}),
+            };
         }),
         applySessionRuntime: (entries) => set((state) => {
             if (entries === null) {
@@ -2160,6 +2221,20 @@ export const storage = create<StorageState>()((set, get) => {
             const offered = entries.filter((entry) => state.deletedSessions[entry.sessionId] === undefined);
             const at = Date.now();
             const next = mergeSessionRuntime(state.sessionRuntime, offered, at);
+            // The same want, arriving as a push rather than as a listing. A stale statement says
+            // nothing about the row now, so it must not move the archive memory either.
+            const archivedSessions = nextArchivedSessions(
+                state.archivedSessions,
+                offered
+                    .filter((entry) => entry.desiredLifecycle !== undefined
+                        && !isStaleSessionRuntimeStatement(state.sessionRuntime[entry.sessionId], entry))
+                    .map((entry) => ({
+                        key: sessionLive.get(entry.sessionId)?.sessionUid ?? entry.sessionId,
+                        lifecycle: entry.desiredLifecycle,
+                    })),
+                at,
+            );
+            const archiveChanged = archivedSessions !== state.archivedSessions;
             // A push that repeats what the row already says must not redraw it.
             const same = offered.every((entry) => {
                 const before = state.sessionRuntime[entry.sessionId];
@@ -2185,7 +2260,9 @@ export const storage = create<StorageState>()((set, get) => {
                 const restated = offered.some((entry) => entry.divergence !== null
                     && !isStaleSessionRuntimeStatement(state.sessionRuntime[entry.sessionId], entry)
                     && next[entry.sessionId]?.divergence !== undefined);
-                if (!restated) return state;
+                if (!restated) {
+                    return archiveChanged ? { ...state, archivedSessions } : state;
+                }
                 const refreshed = { ...state.sessionRuntime };
                 for (const entry of offered) {
                     if (isStaleSessionRuntimeStatement(state.sessionRuntime[entry.sessionId], entry)) continue;
@@ -2194,9 +2271,9 @@ export const storage = create<StorageState>()((set, get) => {
                         refreshed[entry.sessionId] = { ...current, at };
                     }
                 }
-                return { ...state, sessionRuntime: refreshed };
+                return { ...state, sessionRuntime: refreshed, ...(archiveChanged ? { archivedSessions } : {}) };
             }
-            return { ...state, sessionRuntime: next };
+            return { ...state, sessionRuntime: next, ...(archiveChanged ? { archivedSessions } : {}) };
         }),
         setSessionChannelOverride: (sessionId: string, channel: SessionChannel | null) => set((state) => {
             if (channel === null) {
@@ -2255,39 +2332,6 @@ export const storage = create<StorageState>()((set, get) => {
         deleteSessionMessages: (sessionId: string) => {
             sessionMessagesLive.delete(sessionId);
         },
-        queueSessionDelete: (sessionId: string, machineId: string) => set((state) => {
-            const existing = state.pendingSessionDeletes[sessionId];
-            const now = Date.now();
-            // A second ask keeps the attempt count — the ladder is about the machine, not about how
-            // many times the person tapped — but makes the next attempt now, because a tap is a
-            // better moment to try than whichever timer was pending.
-            const intent: PendingSessionDelete = existing
-                ? { ...existing, machineId, nextAttemptAt: Math.min(existing.nextAttemptAt, now) }
-                : { sessionId, machineId, at: now, attempts: 0, nextAttemptAt: now };
-            const pendingSessionDeletes = { ...state.pendingSessionDeletes, [sessionId]: intent };
-            savePendingSessionDeletes(pendingSessionDeletes);
-            return { ...state, pendingSessionDeletes };
-        }),
-        noteSessionDeleteAttempt: (sessionId: string, nextAttemptAt: number, lastError: string) => set((state) => {
-            const existing = state.pendingSessionDeletes[sessionId];
-            if (!existing) {
-                return state;
-            }
-            const pendingSessionDeletes = {
-                ...state.pendingSessionDeletes,
-                [sessionId]: { ...existing, attempts: existing.attempts + 1, nextAttemptAt, lastError },
-            };
-            savePendingSessionDeletes(pendingSessionDeletes);
-            return { ...state, pendingSessionDeletes };
-        }),
-        clearSessionDelete: (sessionId: string) => set((state) => {
-            if (state.pendingSessionDeletes[sessionId] === undefined) {
-                return state;
-            }
-            const { [sessionId]: _forgotten, ...pendingSessionDeletes } = state.pendingSessionDeletes;
-            savePendingSessionDeletes(pendingSessionDeletes);
-            return { ...state, pendingSessionDeletes };
-        }),
         rememberDeletedSessionUid: (uid: string, at: number) => set((state) => {
             if (state.deletedSessionUids[uid] !== undefined) {
                 return state;
@@ -2295,6 +2339,33 @@ export const storage = create<StorageState>()((set, get) => {
             const deletedSessionUids = { ...state.deletedSessionUids, [uid]: at };
             saveDeletedSessionUids(deletedSessionUids);
             return { ...state, deletedSessionUids };
+        }),
+        rememberArchivedSession: (key: string, at: number) => set((state) => {
+            if (state.archivedSessions[key] !== undefined) {
+                return state;
+            }
+            const archivedSessions = { ...state.archivedSessions, [key]: at };
+            saveArchivedSessions(archivedSessions);
+            return { ...state, archivedSessions };
+        }),
+        forgetArchivedSession: (key: string) => set((state) => {
+            if (state.archivedSessions[key] === undefined) {
+                return state;
+            }
+            const { [key]: _restored, ...archivedSessions } = state.archivedSessions;
+            saveArchivedSessions(archivedSessions);
+            return { ...state, archivedSessions };
+        }),
+        archiveSessionLocally: (sessionId: string, at = Date.now()) => set((state) => {
+            // The lineage is the stable name: a resumed conversation can come back under a new
+            // server id, and the archive still describes the conversation.
+            const key = sessionLive.get(sessionId)?.sessionUid ?? sessionId;
+            if (state.archivedSessions[key] !== undefined) {
+                return state;
+            }
+            const archivedSessions = { ...state.archivedSessions, [key]: at };
+            saveArchivedSessions(archivedSessions);
+            return { ...state, archivedSessions };
         }),
         deleteSession: (sessionId: string) => set((state) => {
             // The row is about to leave the store, so its lineage name is read first: a deletion
@@ -2348,10 +2419,24 @@ export const storage = create<StorageState>()((set, get) => {
             delete profileIds[sessionId];
             saveSessionProfileIds(profileIds);
 
+            // A deleted lineage has no archive left to remember; keeping the marker would describe
+            // a row that no longer exists and could only ever be read as stale.
+            const archivedSessions = (() => {
+                const keys = [sessionId, uid].filter(
+                    (key): key is string => key !== undefined && state.archivedSessions[key] !== undefined,
+                );
+                if (keys.length === 0) return state.archivedSessions;
+                const next = { ...state.archivedSessions };
+                for (const key of keys) delete next[key];
+                saveArchivedSessions(next);
+                return next;
+            })();
+
             return {
                 ...state,
                 deletedSessions,
                 deletedSessionUids,
+                archivedSessions,
             };
         }),
         // Outbox (send status tracking)
@@ -2549,6 +2634,7 @@ const builtFrom: {
     relayEndpoints: unknown;
     relayHubConnected: unknown;
     channelPriority: unknown;
+    archivedSessions: unknown;
     /**
      * What the list's channel-derived output is made of, for the last build.
      *
@@ -2573,6 +2659,7 @@ const builtFrom: {
     relayEndpoints: null,
     relayHubConnected: null,
     channelPriority: null,
+    archivedSessions: null,
     channelSignature: null,
 };
 
@@ -2640,7 +2727,8 @@ function recomputeDerived(state: StorageState): void {
         || builtFrom.candidateHealth !== state.candidateHealth
         || builtFrom.relayEndpoints !== state.relayEndpoints
         || builtFrom.relayHubConnected !== state.relayHubConnected
-        || builtFrom.channelPriority !== state.localSettings.channelPriority;
+        || builtFrom.channelPriority !== state.localSettings.channelPriority
+        || builtFrom.archivedSessions !== state.archivedSessions;
     if (!contentChanged && !channelChanged) {
         return;
     }
@@ -2659,6 +2747,7 @@ function recomputeDerived(state: StorageState): void {
     builtFrom.relayEndpoints = state.relayEndpoints;
     builtFrom.relayHubConnected = state.relayHubConnected;
     builtFrom.channelPriority = state.localSettings.channelPriority;
+    builtFrom.archivedSessions = state.archivedSessions;
     // Rows subscribe to their own answer; unchanged bits do not wake them.
     sessionOnlineLive.replaceAll(answers.online);
     const signatureChanged = answers.signature !== builtFrom.channelSignature;
@@ -2670,6 +2759,7 @@ function recomputeDerived(state: StorageState): void {
         sessions,
         state.machines,
         drivers,
+        state.archivedSessions,
     );
     // The list lives in its own store: writing it does not notify the zustand store, and an array
     // that did not move is not a write at all.
@@ -2716,7 +2806,12 @@ export function getSessionGitStatus(sessionId: string): GitStatus | null {
  * `useKeyedSelector` instead, so a write to one session does not re-render them.
  */
 export function useSessions(): Session[] {
-    return useAllKeyedValues(sessionLive);
+    const sessions = useAllKeyedValues(sessionLive);
+    const archived = storage((state) => state.archivedSessions);
+    return React.useMemo(
+        () => sessions.filter((session) => archived[session.sessionUid ?? session.id] === undefined),
+        [sessions, archived],
+    );
 }
 
 export function useSession(id: string): Session | null {
@@ -2726,16 +2821,6 @@ export function useSession(id: string): Session | null {
 /** One field of a session, re-rendering only when that field changes. */
 export function useSessionMachineId(sessionId: string): string | undefined {
     return useKeyedSelector(sessionLive, sessionId, (session) => session?.metadata?.machineId);
-}
-
-/**
- * Whether this session is waiting for its machine to record a deletion.
- *
- * A boolean, not the intent: a row draws only that the deletion is still owed, and re-rendering it
- * for each attempt's bookkeeping would make the backoff visible as churn.
- */
-export function useSessionDeletePending(sessionId: string): boolean {
-    return storage((state) => state.pendingSessionDeletes[sessionId] !== undefined);
 }
 
 /**
@@ -3123,9 +3208,14 @@ export function useSessionListViewData(): SessionListViewItem[] | null {
 export function useAllSessions(): Session[] {
     const ready = storage((state) => state.isDataReady);
     const sessions = useAllKeyedValues(sessionLive);
+    const archived = storage((state) => state.archivedSessions);
     return React.useMemo(
-        () => ready ? [...sessions].sort((a, b) => b.updatedAt - a.updatedAt) : [],
-        [ready, sessions],
+        () => ready
+            ? [...sessions]
+                .filter((session) => archived[session.sessionUid ?? session.id] === undefined)
+                .sort((a, b) => b.updatedAt - a.updatedAt)
+            : [],
+        [ready, sessions, archived],
     );
 }
 

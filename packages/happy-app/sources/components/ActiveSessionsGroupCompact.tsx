@@ -11,7 +11,7 @@ import { Typography } from '@/constants/Typography';
 import { SessionStatusDot } from './SessionStatusDot';
 import { useAllMachines, useSetting } from '@/sync/storage';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-import { machineSpawnNewSession, sessionKill } from '@/sync/ops';
+import { machineSpawnNewSession, sessionArchive } from '@/sync/ops';
 import { resolveAbsolutePath } from '@/utils/pathUtils';
 import { storage } from '@/sync/storage';
 import { Modal } from '@/modal';
@@ -299,7 +299,7 @@ const CompactSessionRow = React.memo(({ session, selected, showBorder }: { sessi
     const swipeEnabled = Platform.OS !== 'web';
 
     const [archivingSession, performArchive] = useHappyAction(async () => {
-        const result = await sessionKill(session.id, session.metadata?.machineId!);
+        const result = await sessionArchive(session.id, session.metadata?.machineId!);
         if (!result.success) {
             throw new HappyError(result.message || t('sessionInfo.failedToArchiveSession'), false);
         }

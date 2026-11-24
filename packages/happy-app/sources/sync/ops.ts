@@ -150,11 +150,6 @@ interface SessionKillRequest {
     // No parameters needed
 }
 
-interface SessionKillResponse {
-    success: boolean;
-    message: string;
-}
-
 // Response types for spawn session
 export type SpawnSessionResult =
     | { type: 'success'; sessionId: string }
@@ -618,21 +613,24 @@ export async function sessionRestart(
     }
 }
 
-export async function sessionKill(sessionId: string, machineId: string): Promise<SessionKillResponse> {
-    try {
-        requireChannelFor('stop');
-        const response = await apiSocket.machineRPC<SessionKillResponse, { sessionId: string }>(
-            machineId,
-            'killSession',
-            { sessionId }
-        );
-        return response;
-    } catch (error) {
-        return {
-            success: false,
-            message: error instanceof Error ? error.message : 'Unknown error'
-        };
+/**
+ * Archive a session: stop it and keep the row, its history and the server's record.
+ *
+ * The failure carries no message of its own — the caller's localized "failed to archive" is what
+ * the person reads — except when the machine itself gave a reason.
+ */
+export async function sessionArchive(sessionId: string, machineId: string): Promise<{ success: boolean; message?: string }> {
+    const outcome = await sync.archiveSession(sessionId, machineId);
+    if (outcome.kind === 'applied') {
+        // The owner's roster will say the same thing on its next statement; recording it here is
+        // what takes the row out of the list at the moment the person asked, not a heartbeat later.
+        storage.getState().archiveSessionLocally(sessionId);
+        return { success: true };
     }
+    if (outcome.kind === 'refused') {
+        return { success: false, message: outcome.body };
+    }
+    return { success: false };
 }
 
 // Types for lazy tool content RPC
@@ -693,6 +691,5 @@ export type {
     DirectoryEntry,
     SessionGetDirectoryTreeResponse,
     TreeNode,
-    SessionRipgrepResponse,
-    SessionKillResponse
+    SessionRipgrepResponse
 };
