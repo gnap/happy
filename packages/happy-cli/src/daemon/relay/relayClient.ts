@@ -119,6 +119,18 @@ const BACKLOG_DEAD_CHECKS = 3;
  */
 const HEARTBEAT_INTERVAL_MS = 20_000;
 const HEARTBEAT_TIMEOUT_MS = 45_000;
+/**
+ * How long an egress open is given before it is called a failure.
+ *
+ * The open is a frame on a socket shared with everything else this daemon sends, and the largest
+ * thing on it is a model request's context. On a lossy uplink a frame can therefore sit behind
+ * megabytes of older frames for tens of seconds — not because the relay or the hop is slow, but
+ * because the link is. Fifteen seconds called that a dead relay; a minute lets the backlog clear.
+ *
+ * A genuinely unreachable target is still answered quickly: the relay's own connect deadline is
+ * ten seconds and it sends `eg-err`, which ends the wait immediately.
+ */
+const EGRESS_OPEN_TIMEOUT_MS = 60_000;
 const STRIP_REQUEST_HEADERS = new Set(['host', 'connection', 'content-length', 'accept-encoding']);
 const STRIP_RESPONSE_HEADERS = new Set(['content-length', 'content-encoding', 'transfer-encoding', 'connection']);
 
@@ -177,7 +189,7 @@ export function startRelayClient(options: RelayClientOptions): RelayClientHandle
         egressStreams.delete(id);
         stream.destroy();
         reject(new Error('relay egress timed out'));
-      }, 15_000);
+      }, EGRESS_OPEN_TIMEOUT_MS);
       (timer as unknown as { unref?: () => void }).unref?.();
       egressOpening.set(id, {
         resolve: (open) => { clearTimeout(timer); resolve(open); },
