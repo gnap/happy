@@ -649,6 +649,19 @@ describe('relay', () => {
      * speaks SOCKS5. The machine learns the route's name and nothing else, which is the whole
      * point — one place holds the address and its credentials.
      */
+    it('answers a daemon heartbeat and advertises that it does', async () => {
+        // The Bun client cannot observe control-frame pongs, so liveness has to be made of frames
+        // it can read. The advertisement is what keeps an older relay from being pinged forever.
+        relay = startRelay({ port: 0 });
+        const d = await connectDaemon(relay.port);
+        await until(() => d.frames.some((f) => f.t === 'ok'));
+        expect(d.frames.find((f) => f.t === 'ok').features).toContain('ping');
+
+        d.ws.send(JSON.stringify({ t: 'ping' }));
+        await until(() => d.frames.some((f) => f.t === 'pong'));
+        expect(d.frames.find((f) => f.t === 'pong')).toMatchObject({ t: 'pong' });
+    });
+
     it('carries a pipe through a named route without ever seeing the hop on the daemon', async () => {
         const target = await startEchoTarget();
         const hop = await startSocks5Hop();
