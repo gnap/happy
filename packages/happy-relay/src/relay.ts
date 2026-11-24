@@ -261,8 +261,34 @@ type Egress = {
     closed: boolean;
 };
 
+type DaemonLane = 'control' | 'egress';
+
+/** The map key for one lane of a machine; the control lane keeps the bare tag. */
+function daemonKey(tag: string, lane: DaemonLane, slot = 0): string {
+    return lane === 'egress' ? `${tag}:egress:${slot}` : tag;
+}
+
+/**
+ * How many egress connections one machine may hold.
+ *
+ * A pool, not a single pipe: the data plane's head-of-line problem is solved by giving concurrent
+ * streams independent sockets. The bound is this relay's resource: every connection is a socket
+ * and a handshake, and a machine asking for more than this is misconfigured rather than busy.
+ */
+const EGRESS_POOL_MAX = 8;
+
 type Daemon = {
     tag: string;
+    /**
+     * Which of the machine's two connections this is.
+     *
+     * The directory, the App's HTTP and websocket routes and the egress pipes used to share one
+     * socket, and that is a queue with one head: a model request's context upload could sit in
+     * front of another stream's open for tens of seconds on a slow link. Splitting them keeps the
+     * control plane answerable while the data plane is busy. A daemon that predates the split
+     * registers without a lane, and its single connection is the control lane exactly as before.
+     */
+    lane: DaemonLane;
     ws: any;
     pending: Map<number, Pending>;
     /** Proxied sockets opened through `/r/<tag>/…`, keyed by the id this relay handed the daemon. */
@@ -590,30 +616,41 @@ export function startRelay(options: RelayOptions): RelayHandle {
                         return;
                     }
                     const tag = tagOfPublicKey(pub);
-                    // The signature proves key ownership, so a newer connection from the same key
-                    // legitimately replaces a stale one (daemon restart / NAT rebinding).
-                    const previous = daemons.get(tag);
-                    const daemon: Daemon = { tag, ws, pending: new Map(), clients: new Map(), hub: new Map(), sessions: [], reachable: null, egress: new Map(), nextId: 1 };
-                    daemons.set(tag, daemon);
+                    const lane: DaemonLane = msg.lane === 'egress' ? 'egress' : 'control';
+                    const slot = lane === 'egress' && Number.isInteger(msg.slot) && msg.slot >= 0 && msg.slot < EGRESS_POOL_MAX
+                        ? Number(msg.slot)
+                        : 0;
+                    const key = daemonKey(tag, lane, slot);
+                    // The signature proves key ownership, so a newer connection in the same lane
+                    // legitimately replaces a stale one (daemon restart / NAT rebinding). The other
+                    // lane is a different connection and is left alone.
+                    const previous = daemons.get(key);
+                    const daemon: Daemon = { tag, lane, ws, pending: new Map(), clients: new Map(), hub: new Map(), sessions: [], reachable: null, egress: new Map(), nextId: 1 };
+                    daemons.set(key, daemon);
                     data.tag = tag;
+                    data.lane = lane;
+                    data.slot = slot;
                     if (previous && previous.ws !== ws) {
                         teardown(previous);
                         try { previous.ws.close(4000, 'replaced'); } catch { /* gone */ }
                     }
                     // `features` is how a daemon learns what this relay can answer. A daemon that
-                    // sees "ping" may use the heartbeat; one that does not simply behaves as
-                    // before, so the frame stays additive.
-                    ws.send(JSON.stringify({ t: 'ok', tag, features: ['ping'] }));
-                    // Names only. A machine needs to know which routes exist so it can offer them
-                    // and refuse an unknown one early; what a route points at stays here.
-                    ws.send(JSON.stringify({ t: 'routes', names: [...routes.keys()] }));
-                    // A machine coming online is the event an App is waiting for, so it is pushed
-                    // rather than left for the client to notice on a timer.
-                    broadcastDirectory();
+                    // sees "ping" may use the heartbeat; one that sees "egress-lane" may keep its
+                    // data plane off the socket that carries the directory. Both stay additive.
+                    const features = lane === 'control' ? ['ping', 'egress-lane', 'egress-pool'] : ['ping'];
+                    ws.send(JSON.stringify({ t: 'ok', tag, lane, features }));
+                    if (lane === 'control') {
+                        // Names only. A machine needs to know which routes exist so it can offer
+                        // them and refuse an unknown one early; what a route points at stays here.
+                        ws.send(JSON.stringify({ t: 'routes', names: [...routes.keys()] }));
+                        // A machine coming online is the event an App is waiting for, so it is
+                        // pushed rather than left for the client to notice on a timer.
+                        broadcastDirectory();
+                    }
                     return;
                 }
 
-                const daemon = daemons.get(data.tag);
+                const daemon = daemons.get(daemonKey(data.tag, (data.lane as DaemonLane) ?? 'control', Number(data.slot) || 0));
                 if (!daemon || daemon.ws !== ws) return;
                 if (msg.t === 'http-res') {
                     const p = daemon.pending.get(msg.id);
@@ -737,11 +774,12 @@ export function startRelay(options: RelayOptions): RelayHandle {
                     return;
                 }
                 if (data.tag) {
-                    const daemon = daemons.get(data.tag);
+                    const key = daemonKey(data.tag, (data.lane as DaemonLane) ?? 'control', Number(data.slot) || 0);
+                    const daemon = daemons.get(key);
                     if (daemon && daemon.ws === ws) {
-                        daemons.delete(data.tag);
+                        daemons.delete(key);
                         teardown(daemon);
-                        broadcastDirectory();
+                        if (daemon.lane === 'control') broadcastDirectory();
                     }
                 }
             },
@@ -753,7 +791,9 @@ export function startRelay(options: RelayOptions): RelayHandle {
      * sessions, and where it says it can be reached.
      */
     function directory(): { tag: string; sessions: DirectorySession[]; reachable: unknown | null }[] {
-        return [...daemons.values()].map((daemon) => ({ tag: daemon.tag, sessions: daemon.sessions, reachable: daemon.reachable }));
+        return [...daemons.values()]
+            .filter((daemon) => daemon.lane === 'control')
+            .map((daemon) => ({ tag: daemon.tag, sessions: daemon.sessions, reachable: daemon.reachable }));
     }
 
     /**
@@ -1087,6 +1127,6 @@ export function startRelay(options: RelayOptions): RelayHandle {
             }
             server.stop(true);
         },
-        daemonCount: () => daemons.size,
+        daemonCount: () => [...daemons.values()].filter((daemon) => daemon.lane === 'control').length,
     };
 }

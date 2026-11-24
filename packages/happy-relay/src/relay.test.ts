@@ -6,7 +6,12 @@ import { startRelay, tagOfPublicKey, REGISTER_CONTEXT, type RelayHandle } from '
 let relay: RelayHandle | null = null;
 afterEach(() => { relay?.stop(); relay = null; });
 
-async function connectDaemon(port: number, pair = nacl.sign.keyPair(), sign = true) {
+async function connectDaemon(
+    port: number,
+    pair = nacl.sign.keyPair(),
+    sign = true,
+    lane?: { lane: 'egress'; slot: number },
+) {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/daemon`);
     const frames: any[] = [];
     const closed = new Promise<number>((r) => { ws.onclose = (e) => r(e.code); });
@@ -16,7 +21,12 @@ async function connectDaemon(port: number, pair = nacl.sign.keyPair(), sign = tr
             const sig = sign
                 ? nacl.sign.detached(Buffer.from(REGISTER_CONTEXT + msg.nonce), pair.secretKey)
                 : new Uint8Array(64);
-            ws.send(JSON.stringify({ t: 'register', pub: Buffer.from(pair.publicKey).toString('base64'), sig: Buffer.from(sig).toString('base64') }));
+            ws.send(JSON.stringify({
+                t: 'register',
+                pub: Buffer.from(pair.publicKey).toString('base64'),
+                sig: Buffer.from(sig).toString('base64'),
+                ...(lane ?? {}),
+            }));
         }
         frames.push(msg);
     };
@@ -649,6 +659,30 @@ describe('relay', () => {
      * speaks SOCKS5. The machine learns the route's name and nothing else, which is the whole
      * point — one place holds the address and its credentials.
      */
+    it('keeps a pool of egress lanes beside the control connection', async () => {
+        // Two connections, one machine. A lane carries pipes only, and registering one must not
+        // evict the control connection the App's routes depend on.
+        const target = await startEchoTarget();
+        try {
+            relay = startRelay({ port: 0 });
+            const pair = nacl.sign.keyPair();
+            const control = await connectDaemon(relay.port, pair);
+            await until(() => control.frames.some((f) => f.t === 'ok'));
+
+            const lane = await connectDaemon(relay.port, pair, true, { lane: 'egress', slot: 1 });
+            await until(() => lane.frames.some((f) => f.t === 'ok'));
+            expect(lane.frames.find((f) => f.t === 'ok').lane).toBe('egress');
+
+            lane.ws.send(JSON.stringify({ t: 'eg-open', id: 9, host: '127.0.0.1', port: target.port }));
+            await until(() => lane.frames.some((f) => f.t === 'eg-ok' || f.t === 'eg-err'));
+            expect(lane.frames.some((f) => f.t === 'eg-ok')).toBe(true);
+            // The lane registers as a second socket but the machine is still counted once.
+            expect(relay.daemonCount()).toBe(1);
+        } finally {
+            await target.close();
+        }
+    });
+
     it('answers a daemon heartbeat and advertises that it does', async () => {
         // The Bun client cannot observe control-frame pongs, so liveness has to be made of frames
         // it can read. The advertisement is what keeps an older relay from being pinged forever.
