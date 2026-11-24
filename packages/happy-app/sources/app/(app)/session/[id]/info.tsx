@@ -16,7 +16,7 @@ import { sessionRuntimeDisplay } from '@/utils/sessionRuntimeStatus';
 import { sessionIsRestarting } from '@/utils/sessionRestart';
 import * as Clipboard from 'expo-clipboard';
 import { Modal } from '@/modal';
-import { sessionKill, sessionDelete, sessionRestart } from '@/sync/ops';
+import { sessionArchive, sessionDelete, sessionRestart } from '@/sync/ops';
 import { useUnistyles } from 'react-native-unistyles';
 import { layout } from '@/components/layout';
 import { t } from '@/text';
@@ -242,7 +242,7 @@ function SessionInfoContent({ session }: { session: Session }) {
 
     // Use HappyAction for archiving - it handles errors automatically
     const [archivingSession, performArchive] = useHappyAction(async () => {
-        const result = await sessionKill(session.id, session.metadata?.machineId!);
+        const result = await sessionArchive(session.id, session.metadata?.machineId!);
         if (!result.success) {
             throw new HappyError(result.message || t('sessionInfo.failedToArchiveSession'), false);
         }

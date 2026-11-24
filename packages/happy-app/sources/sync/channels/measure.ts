@@ -59,6 +59,7 @@ const DAEMON_OPERATIONS: ReadonlySet<ChannelOperation> = new Set([
     'identity',
     'listSessions',
     'archive',
+    'delete',
 ]);
 
 /**
