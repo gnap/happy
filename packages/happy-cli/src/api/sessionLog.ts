@@ -60,28 +60,59 @@ export type SessionLogEntry = {
   subagent?: string;
   /** The tool call that started that sub-agent, for linking the stream to its card. */
   taskCall?: string;
+  /**
+   * The writer's identity and ordering stamp, mirrored as plaintext.
+   *
+   * `(site, n)` is already inside the ciphertext; this copy lets a reader notice a missing
+   * counter without decrypting a page. A gap within one `site` is the gap signal. Absent on
+   * entries written before the mirror existed, and on records whose writer does not stamp.
+   */
+  site?: string;
+  n?: number;
 };
 
 /**
- * The sub-agent identity a session envelope carries, if it is a sub-agent envelope.
+ * The stream identity a session record carries, written beside its ciphertext.
  *
- * Lives here rather than in the session client so the writer and the reader agree on what the
- * field means; the reader (the daemon) never sees the plaintext and only trusts the id stamped
- * beside the ciphertext.
+ * `subagent` / `taskCall` say which sub-agent stream an entry belongs to; `site` / `n` are the
+ * writer's own ordering stamp. Both are additive metadata for the reader: the daemon can filter
+ * and gap-check without opening the ciphertext, and every field is already inside it as well, so a
+ * record that arrived without these is not lost — it simply has no plaintext label.
+ *
+ * Session protocol payloads are `{role:'session', content: envelope}`; lifecycle envelopes wrap
+ * the same envelope one level deeper as `content.data`; legacy agent records carry their stamp in
+ * `content` and may also have a `data` object that is not an envelope. The content level is read
+ * first for that reason, with `data` as the fallback the lifecycle shape needs.
  */
-export function sessionLogIdentity(payload: unknown): { subagent?: string; taskCall?: string } {
+export function sessionLogIdentity(payload: unknown): {
+  subagent?: string;
+  taskCall?: string;
+  site?: string;
+  n?: number;
+} {
   if (!payload || typeof payload !== 'object') {
     return {};
   }
   const record = payload as { role?: unknown; content?: unknown };
-  const content = record.content && typeof record.content === 'object' ? record.content as Record<string, unknown> : null;
-  // Session protocol payloads are `{role:'session', content: envelope}`; lifecycle envelopes wrap
-  // the same envelope one level deeper as `content.data`.
-  const carrier = content ?? record as Record<string, unknown>;
-  const envelope = carrier.data && typeof carrier.data === 'object' ? carrier.data as Record<string, unknown> : carrier;
+  const content = record.content && typeof record.content === 'object'
+    ? record.content as Record<string, unknown>
+    : record as Record<string, unknown>;
+  const nested = content.data && typeof content.data === 'object' ? content.data as Record<string, unknown> : undefined;
+  const value = (key: string): unknown => content[key] ?? nested?.[key];
+  const text = (key: string): string | undefined => {
+    const found = value(key);
+    return typeof found === 'string' && found.length > 0 ? found : undefined;
+  };
+  const counter = value('n');
+  const n = typeof counter === 'number' && Number.isInteger(counter) && counter >= 0 ? counter : undefined;
+  const subagent = text('subagent');
+  const taskCall = text('taskCall');
+  const site = text('site');
   return {
-    ...(typeof envelope.subagent === 'string' ? { subagent: envelope.subagent } : {}),
-    ...(typeof envelope.taskCall === 'string' ? { taskCall: envelope.taskCall } : {}),
+    ...(subagent !== undefined ? { subagent } : {}),
+    ...(taskCall !== undefined ? { taskCall } : {}),
+    ...(site !== undefined ? { site } : {}),
+    ...(n !== undefined ? { n } : {}),
   };
 }
 
@@ -269,25 +300,15 @@ export function collapseSessionLogEntries(entries: SessionLogEntry[]): SessionLo
     if (index === undefined) {
       at.set(entry.localId, result.length);
       result.push(entry);
-    } else if (preferredEntry(entry, result[index])) {
+    } else {
       // Replaced in place: the surviving entry keeps the position of the first delivery, so the
-      // page stays in log order. The sub-agent tag survives from either copy: the writer stamps
-      // the outbound entry from the plaintext envelope, and the echoed copy has only ciphertext.
+      // page stays in log order. The joined stream identity survives from either copy: the writer
+      // stamps the outbound entry from the plaintext envelope, and the echoed copy has only
+      // ciphertext, so the preferred copy may be the one that cannot know these fields.
       const previous = result[index];
-      result[index] = {
-        ...entry,
-        ...(entry.subagent === undefined && previous.subagent !== undefined ? { subagent: previous.subagent } : {}),
-        ...(entry.taskCall === undefined && previous.taskCall !== undefined ? { taskCall: previous.taskCall } : {}),
-      };
-    } else if (result[index].subagent === undefined && entry.subagent !== undefined
-      || result[index].taskCall === undefined && entry.taskCall !== undefined) {
-      // The survivor is preferred but carries no tag; take the one from the copy being dropped.
-      const current = result[index];
-      result[index] = {
-        ...current,
-        ...(current.subagent === undefined && entry.subagent !== undefined ? { subagent: entry.subagent } : {}),
-        ...(current.taskCall === undefined && entry.taskCall !== undefined ? { taskCall: entry.taskCall } : {}),
-      };
+      const survivor = preferredEntry(entry, previous) ? entry : previous;
+      const other = survivor === entry ? previous : entry;
+      result[index] = withIdentityFrom(survivor, other);
     }
   }
   return result;
@@ -301,6 +322,23 @@ function preferredEntry(candidate: SessionLogEntry, current: SessionLogEntry): b
     return candidateAcknowledged;
   }
   return candidate.at >= current.at;
+}
+
+/**
+ * The preferred copy, with the plaintext identity only the other copy carries filled in.
+ *
+ * The two copies are the same record seen twice: one was written where the plaintext envelope was
+ * in hand, the other is the server's echo, which has ciphertext only. Neither is "more right" about
+ * the stream it belongs to, so the survivor takes whichever fields it is missing.
+ */
+function withIdentityFrom(preferred: SessionLogEntry, other: SessionLogEntry): SessionLogEntry {
+  return {
+    ...preferred,
+    ...(preferred.subagent === undefined && other.subagent !== undefined ? { subagent: other.subagent } : {}),
+    ...(preferred.taskCall === undefined && other.taskCall !== undefined ? { taskCall: other.taskCall } : {}),
+    ...(preferred.site === undefined && other.site !== undefined ? { site: other.site } : {}),
+    ...(preferred.n === undefined && other.n !== undefined ? { n: other.n } : {}),
+  };
 }
 
 /**
