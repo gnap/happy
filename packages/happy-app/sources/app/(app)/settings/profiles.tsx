@@ -11,7 +11,7 @@ import { layout } from '@/components/layout';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useWindowDimensions } from 'react-native';
 import { AIBackendProfile } from '@/sync/settings';
-import { getBuiltInProfile, DEFAULT_PROFILES } from '@/sync/profileUtils';
+import { compatibilityForAgent, getBuiltInProfile, DEFAULT_PROFILES } from '@/sync/profileUtils';
 import { ProfileEditForm } from '@/components/ProfileEditForm';
 import { randomUUID } from 'expo-crypto';
 
@@ -61,7 +61,7 @@ function ProfileManager({ onProfileSelect, selectedProfileId }: ProfileManagerPr
             name: '',
             anthropicConfig: {},
             environmentVariables: [],
-            compatibility: { claude: true, codex: true, cursor: true, gemini: true },
+            compatibility: compatibilityForAgent('claude'),
             isBuiltIn: false,
             createdAt: Date.now(),
             updatedAt: Date.now(),

@@ -4806,6 +4806,78 @@ class Sync {
                     // Don't crash on settings sync errors, just log
                 }
             }
+        } else if (updateData.body.t === 'new-machine') {
+            const machineUpdate = updateData.body;
+            const machineId = machineUpdate.machineId;
+
+            // This event is the only machine notification that carries the wrapped per-machine
+            // data key. `update-machine` cannot be decrypted without it, so a client that ignores
+            // this leaves a newly registered machine unnamed until the next full `/v1/machines`
+            // fetch — which only happens on resume or a long reconnect.
+            let dataKey: Uint8Array | null = null;
+            if (machineUpdate.dataEncryptionKey) {
+                dataKey = await this.encryption.decryptEncryptionKey(machineUpdate.dataEncryptionKey);
+            }
+            if (dataKey === null && !this.encryption.getMachineEncryption(machineId)) {
+                log.log(`🖥️ new-machine ${machineId}: no key yet, refetching the machine list`);
+                this.machinesSync.invalidate();
+                return;
+            }
+            if (dataKey) {
+                this.machineDataKeys.set(machineId, dataKey);
+                saveWrappedMachineKeys({
+                    ...loadWrappedMachineKeys(),
+                    [machineId]: machineUpdate.dataEncryptionKey!,
+                });
+            }
+            await this.encryption.initializeMachines(new Map([[machineId, dataKey]]));
+
+            const machineEncryption = this.encryption.getMachineEncryption(machineId);
+            if (!machineEncryption) {
+                this.machinesSync.invalidate();
+                return;
+            }
+
+            // Keep whatever the row already had (a reconnect can race the two events); the event
+            // supplies the rest.
+            const previous = storage.getState().machines[machineId];
+            const machine: Machine = {
+                id: machineId,
+                seq: machineUpdate.seq,
+                createdAt: machineUpdate.createdAt,
+                updatedAt: machineUpdate.updatedAt,
+                active: machineUpdate.active,
+                activeAt: machineUpdate.activeAt,
+                metadata: previous?.metadata ?? null,
+                metadataVersion: previous?.metadataVersion ?? 0,
+                daemonState: previous?.daemonState ?? null,
+                daemonStateVersion: previous?.daemonStateVersion ?? 0,
+            };
+            if (machineUpdate.metadata) {
+                try {
+                    machine.metadata = await machineEncryption.decryptMetadata(machineUpdate.metadataVersion, machineUpdate.metadata);
+                    machine.metadataVersion = machineUpdate.metadataVersion;
+                } catch (error) {
+                    console.error(`Failed to decrypt machine metadata for ${machineId}:`, error);
+                }
+            }
+            if (machineUpdate.daemonState) {
+                try {
+                    machine.daemonState = await machineEncryption.decryptDaemonState(
+                        machineUpdate.daemonStateVersion ?? 0,
+                        machineUpdate.daemonState,
+                    );
+                    machine.daemonStateVersion = machineUpdate.daemonStateVersion ?? 0;
+                } catch (error) {
+                    console.error(`Failed to decrypt machine daemonState for ${machineId}:`, error);
+                }
+            }
+
+            storage.getState().applyRelayEndpoint(machineId, parseRelayEndpoint(machineId, machine.daemonState));
+            storage.getState().applyLanEndpoint(machineId, parseLanEndpoints(machineId, machine.daemonState));
+            storage.getState().applyMachines([machine]);
+            // A new machine means new endpoints to consider for the daemon sockets.
+            this.reconcileDaemonSockets();
         } else if (updateData.body.t === 'update-machine') {
             const machineUpdate = updateData.body;
             const machineId = machineUpdate.machineId;  // Changed from .id to .machineId
@@ -4828,10 +4900,13 @@ class Sync {
             // Get machine-specific encryption (might not exist if machine wasn't initialized on this device)
             const machineEncryption = this.encryption.getMachineEncryption(machineId);
             if (!machineEncryption) {
-                // Machine was likely registered from another device; skip decrypting this update
+                // Machine was likely registered from another device. The wrapped key rides on
+                // `new-machine` (which may have been missed) and on `/v1/machines`, never on this
+                // event — fetching is the only way to learn the name.
                 if (__DEV__) {
-                    console.warn(`Sync: Skipping update-machine for ${machineId} (no encryption key on this device)`);
+                    console.warn(`Sync: update-machine for ${machineId} without a key — refetching the machine list`);
                 }
+                this.machinesSync.invalidate();
                 return;
             }
 
@@ -4857,6 +4932,13 @@ class Sync {
                 } catch (error) {
                     console.error(`Failed to decrypt machine daemonState for ${machineId}:`, error);
                 }
+            }
+
+            // A machine row without metadata has no name to show. The update never carries the
+            // metadata unless it changed, so ask for the full list once instead of drawing an id
+            // until the next resume.
+            if (!updatedMachine.metadata && !machineUpdate.metadata) {
+                this.machinesSync.invalidate();
             }
 
             storage.getState().applyRelayEndpoint(machineId, parseRelayEndpoint(machineId, updatedMachine.daemonState));

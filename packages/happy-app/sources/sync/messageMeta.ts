@@ -1,8 +1,8 @@
 import type { Session } from './storageTypes';
 import type { PermissionModeKey } from '@/components/PermissionModeSelector';
 import type { AIBackendProfile } from './settings';
-import { getProfileEnvironmentVariables } from './settings';
-import { getBuiltInProfile } from './profileUtils';
+import { getProfileEnvironmentVariables, validateProfileForAgent } from './settings';
+import { agentKindFromFlavor, getBuiltInProfile } from './profileUtils';
 
 function isSandboxEnabled(metadata: Session['metadata'] | null | undefined): boolean {
     const sandbox = metadata?.sandbox;
@@ -20,15 +20,39 @@ export function resolveProfileById(
 }
 
 export function resolveMessageProfileEnv(
-    session: Pick<Session, 'profileId'>,
+    session: Pick<Session, 'profileId'> & { metadata?: { flavor?: string | null } | null },
     customProfiles: AIBackendProfile[],
 ): Record<string, string> | undefined {
-    const profile = resolveProfileById(session.profileId, customProfiles);
+    const profile = profileForSession(session, customProfiles);
     if (!profile) {
         return undefined;
     }
     const env = getProfileEnvironmentVariables(profile);
     return Object.keys(env).length > 0 ? env : undefined;
+}
+
+/**
+ * The profile a message should carry settings from, or null when this session's agent is not one
+ * the profile supports.
+ *
+ * The picker filters by agent, but a stored id can outlive that choice: the profile may be edited
+ * after the session was created, or a session's agent may differ from the one it was created for.
+ * A profile that is not for this agent must not leak its environment into the message — that is
+ * what sent a Codex-only profile's CODEX_HOME to a Claude session.
+ */
+function profileForSession(
+    session: Pick<Session, 'profileId'> & { metadata?: { flavor?: string | null } | null },
+    customProfiles: AIBackendProfile[],
+): AIBackendProfile | null {
+    const profile = resolveProfileById(session.profileId, customProfiles);
+    if (!profile) {
+        return null;
+    }
+    const agent = agentKindFromFlavor(session.metadata?.flavor);
+    if (agent && !validateProfileForAgent(profile, agent)) {
+        return null;
+    }
+    return profile;
 }
 
 /**
@@ -42,10 +66,10 @@ export function resolveMessageProfileEnv(
  * the current route", which would let a relay choice outlive the profile that made it.
  */
 export function resolveMessageProxyViaRelay(
-    session: Pick<Session, 'profileId'>,
+    session: Pick<Session, 'profileId'> & { metadata?: { flavor?: string | null } | null },
     customProfiles: AIBackendProfile[],
 ): boolean | undefined {
-    const profile = resolveProfileById(session.profileId, customProfiles);
+    const profile = profileForSession(session, customProfiles);
     if (!profile) {
         return undefined;
     }

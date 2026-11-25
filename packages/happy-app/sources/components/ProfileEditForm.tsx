@@ -5,7 +5,12 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
 import { t } from '@/text';
 import { AIBackendProfile } from '@/sync/settings';
-import { getBuiltInProfileDocumentation } from '@/sync/profileUtils';
+import {
+    agentChoiceOf,
+    compatibilityForAgent,
+    getBuiltInProfileDocumentation,
+    type ProfileAgentChoice,
+} from '@/sync/profileUtils';
 import { EnvironmentVariablesList } from '@/components/EnvironmentVariablesList';
 import { Switch } from '@/components/Switch';
 import { useAllMachines } from '@/sync/storage';
@@ -37,6 +42,30 @@ export function ProfileEditForm({
 
     const [name, setName] = React.useState(profile.name || '');
 
+    /**
+     * The one CLI this profile is for.
+     *
+     * A profile's environment is written for a particular CLI — Anthropic variables for Claude,
+     * CODEX_HOME and a provider key for Codex — so "supports several" only ever meant one of them
+     * would be handed settings written for another. Existing multi-agent profiles open on their
+     * first agent and are narrowed when saved.
+     */
+    const [agent, setAgent] = React.useState<ProfileAgentChoice>(() => agentChoiceOf(profile));
+    const [agentPickerOpen, setAgentPickerOpen] = React.useState(false);
+    const agentOptions = React.useMemo(() => ([
+        { value: 'claude' as const, label: t('sessionInfo.aiProviderName.claude') },
+        { value: 'codex' as const, label: t('sessionInfo.aiProviderName.codex') },
+        { value: 'cursor' as const, label: t('sessionInfo.aiProviderName.cursor') },
+        { value: 'gemini' as const, label: t('sessionInfo.aiProviderName.gemini') },
+    ]), []);
+    const selectedAgentLabel = agentOptions.find((option) => option.value === agent)?.label ?? '';
+
+    // A Codex endpoint is stated as URL/key/model, not as a hand-managed CODEX_HOME. Happy writes
+    // the home itself for the session; these three are the only things a person has to know.
+    const [codexBaseUrl, setCodexBaseUrl] = React.useState(profile.codexConfig?.baseUrl ?? '');
+    const [codexApiKey, setCodexApiKey] = React.useState(profile.codexConfig?.apiKey ?? '');
+    const [codexModel, setCodexModel] = React.useState(profile.codexConfig?.model ?? '');
+
     // Off unless the profile opted in. When on, all of this profile's traffic leaves through the
     // relay; with a SOCKS5 hop in the environment, the relay connects to that hop first.
     const [proxyViaRelay, setProxyViaRelay] = React.useState(profile.proxyViaRelay ?? false);
@@ -58,10 +87,21 @@ export function ProfileEditForm({
     const handleSave = () => {
         if (!name.trim()) return;
         const route = proxyRoute.trim();
+        // The endpoint belongs to the agent that reads it. Switching a profile to another agent
+        // drops it rather than leaving a key behind that nothing will ever use.
+        const codexConfig = agent === 'codex' && (codexBaseUrl.trim() || codexApiKey.trim() || codexModel.trim())
+            ? {
+                ...(codexBaseUrl.trim() ? { baseUrl: codexBaseUrl.trim() } : {}),
+                ...(codexApiKey.trim() ? { apiKey: codexApiKey.trim() } : {}),
+                ...(codexModel.trim() ? { model: codexModel.trim() } : {}),
+            }
+            : undefined;
         onSave({
             ...profile,
             name: name.trim(),
             environmentVariables,
+            codexConfig,
+            compatibility: compatibilityForAgent(agent),
             proxyViaRelay,
             proxyRoute: route ? route : undefined,
             updatedAt: Date.now(),
@@ -113,6 +153,101 @@ export function ProfileEditForm({
                                 <Ionicons name="open-outline" size={12} color={theme.colors.button.primary.tint} />
                             </Pressable>
                         )}
+                    </View>
+                )}
+
+                {/* Supported agents */}
+                {!profile.isBuiltIn && (
+                    <View>
+                        <Text style={formStyles.sectionTitle}>
+                            {t('profiles.profileAgent')}
+                        </Text>
+                        <Text style={formStyles.switchDescription}>
+                            {t('profiles.profileAgentDescription')}
+                        </Text>
+                        <View style={{ height: 8 }} />
+                        <View style={formStyles.routeFieldBlock}>
+                            <Pressable
+                                style={formStyles.routeField}
+                                onPress={() => setAgentPickerOpen((open) => !open)}
+                            >
+                                <Text style={formStyles.routeFieldText}>
+                                    {selectedAgentLabel}
+                                </Text>
+                                <Ionicons
+                                    name={agentPickerOpen ? 'chevron-up' : 'chevron-down'}
+                                    size={18}
+                                    color={theme.colors.textSecondary}
+                                />
+                            </Pressable>
+                            {agentPickerOpen && (
+                                <View style={formStyles.routeList}>
+                                    {agentOptions.map((option) => {
+                                        const selected = option.value === agent;
+                                        return (
+                                            <Pressable
+                                                key={option.value}
+                                                style={[formStyles.routeOption, selected && formStyles.routeOptionActive]}
+                                                onPress={() => {
+                                                    setAgent(option.value);
+                                                    setAgentPickerOpen(false);
+                                                }}
+                                            >
+                                                <Text style={formStyles.routeOptionText}>
+                                                    {option.label}
+                                                </Text>
+                                                {selected && (
+                                                    <Ionicons name="checkmark" size={18} color={theme.colors.button.primary.tint} />
+                                                )}
+                                            </Pressable>
+                                        );
+                                    })}
+                                </View>
+                            )}
+                        </View>
+                    </View>
+                )}
+
+                {/* Codex endpoint — the home is managed by Happy, so only the endpoint is asked for */}
+                {!profile.isBuiltIn && agent === 'codex' && (
+                    <View>
+                        <Text style={formStyles.sectionTitle}>
+                            {t('sessionInfo.aiProviderName.codex')}
+                        </Text>
+                        <Text style={formStyles.switchDescription}>
+                            {t('profiles.codexConfigDescription')}
+                        </Text>
+                        <View style={{ height: 8 }} />
+                        <Text style={formStyles.sectionTitle}>{t('profiles.baseURL')}</Text>
+                        <TextInput
+                            style={formStyles.textInput}
+                            value={codexBaseUrl}
+                            onChangeText={setCodexBaseUrl}
+                            autoCapitalize="none"
+                            autoCorrect={false}
+                            keyboardType="url"
+                        />
+                        <Text style={formStyles.sectionTitle}>{t('profiles.authToken')}</Text>
+                        <TextInput
+                            style={formStyles.textInput}
+                            value={codexApiKey}
+                            onChangeText={setCodexApiKey}
+                            placeholder={t('profiles.enterToken')}
+                            placeholderTextColor={theme.colors.input.placeholder}
+                            autoCapitalize="none"
+                            autoCorrect={false}
+                            secureTextEntry
+                        />
+                        <Text style={formStyles.sectionTitle}>{t('profiles.model')}</Text>
+                        <TextInput
+                            style={formStyles.textInput}
+                            value={codexModel}
+                            onChangeText={setCodexModel}
+                            placeholder={t('profiles.defaultModel')}
+                            placeholderTextColor={theme.colors.input.placeholder}
+                            autoCapitalize="none"
+                            autoCorrect={false}
+                        />
                     </View>
                 )}
 

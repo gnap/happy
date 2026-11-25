@@ -1051,6 +1051,9 @@ export const ca: TranslationStructure = {
         proxyRouteNone: 'Directe',
 
         profileName: 'Nom del perfil',
+        profileAgent: 'Agent',
+        profileAgentDescription: 'Per a quin CLI és aquest perfil',
+        codexConfigDescription: 'Happy crea una configuració gestionada de Codex per a aquesta sessió; no cal definir CODEX_HOME.',
         enterName: 'Introdueix el nom del perfil',
         baseURL: 'URL base',
         authToken: 'Token d\'autenticació',

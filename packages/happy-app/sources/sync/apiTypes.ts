@@ -29,6 +29,29 @@ export const ApiUpdateNewSessionSchema = z.object({
     updatedAt: z.number(),
 });
 
+/**
+ * A machine registering for the first time.
+ *
+ * This is the only machine event that carries the wrapped per-machine data key, so a client that
+ * drops it cannot decrypt that machine's metadata — and `update-machine` alone leaves the row
+ * unnamed until the next `/v1/machines` fetch. The server emits it user-scoped, before the
+ * matching update-machine.
+ */
+export const ApiNewMachineSchema = z.object({
+    t: z.literal('new-machine'),
+    machineId: z.string(),
+    seq: z.number(),
+    metadata: z.string(),
+    metadataVersion: z.number(),
+    daemonState: z.string().nullish(),
+    daemonStateVersion: z.number().nullish(),
+    dataEncryptionKey: z.string().nullish(),
+    active: z.boolean(),
+    activeAt: z.number(),
+    createdAt: z.number(),
+    updatedAt: z.number(),
+});
+
 export const ApiDeleteSessionSchema = z.object({
     t: z.literal('delete-session'),
     sid: z.string(), // Session ID
@@ -120,6 +143,7 @@ export const ApiUpdateSchema = z.union([
     ApiUpdateSessionStateSchema,
     ApiUpdateAccountSchema,
     ApiUpdateMachineStateSchema,
+    ApiNewMachineSchema,
     ApiNewArtifactSchema,
     ApiUpdateArtifactSchema,
     ApiDeleteArtifactSchema,
