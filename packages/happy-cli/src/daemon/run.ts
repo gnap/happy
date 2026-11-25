@@ -50,7 +50,7 @@ import { readSessionUid } from '@/api/sessionUid';
 import { validatePath } from '@/modules/common/pathSecurity';
 import { c as createTar } from 'tar';
 import { run as runRipgrep } from '@/modules/ripgrep/index';
-import { collapseSessionLogEntries, readSessionLogPage } from '@/api/sessionLog';
+import { collapseSessionLogEntries, listSessionSubagents, readSessionLogPage } from '@/api/sessionLog';
 import { decodeBase64, encodeBase64, libsodiumEncryptForPublicKey } from '@/api/encryption';
 import { startLanDiscovery, type LanDiscoveryHandle } from './lanDiscovery';
 import { ENDPOINT_PROTOCOL_VERSION, startEndpointPublisher, type EndpointPublisherHandle, type LanEndpoint } from './lanEndpoints';
@@ -3637,7 +3637,14 @@ export async function startDaemon(): Promise<void> {
               const dataEncryptionKey = new Uint8Array(wrapped.length + 1);
               dataEncryptionKey.set([0], 0); // version byte, matching api.ts
               dataEncryptionKey.set(wrapped, 1);
-              const page = readSessionLogPage({ tag, site: machineId, since: query.since, before: query.before, maxEntries: query.maxEntries });
+              const page = readSessionLogPage({
+                tag,
+                site: machineId,
+                since: query.since,
+                before: query.before,
+                maxEntries: query.maxEntries,
+                subagent: query.subagent,
+              });
               return {
                 tag,
                 dataEncryptionKey: encodeBase64(dataEncryptionKey),
@@ -3651,6 +3658,17 @@ export async function startDaemon(): Promise<void> {
                 hasOlder: page.hasOlder,
                 reset: page.reset,
               };
+            },
+            listSubagents: (address) => {
+              // Same tag resolution as the history read above: a stream is listed from the log the
+              // tag files, so a session the server has not named is still listable.
+              const tag = 'tag' in address
+                ? address.tag
+                : sessionTagOf(address.sessionId, pidToTrackedSession.values(), sessions);
+              if (!tag) {
+                return null;
+              }
+              return listSessionSubagents({ tag, site: machineId });
             },
             getToolContent: async ({ sessionId, callId }) => {
               // The session's own directory, which the daemon pinned at spawn and the persisted

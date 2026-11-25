@@ -49,7 +49,41 @@ export type SessionLogEntry = {
   at: number;
   /** base64 ciphertext, stored verbatim. */
   c: string;
+  /**
+   * The sub-agent this entry belongs to, when it is not the main thread.
+   *
+   * Plaintext on purpose: the reader pages a sub-agent's stream on its own, and the daemon cannot
+   * filter by an id that only exists inside the ciphertext. It is an opaque worker id, not content:
+   * the text, the prompt and the result all stay encrypted. Absent on entries written before this
+   * field existed and on every main-thread entry.
+   */
+  subagent?: string;
+  /** The tool call that started that sub-agent, for linking the stream to its card. */
+  taskCall?: string;
 };
+
+/**
+ * The sub-agent identity a session envelope carries, if it is a sub-agent envelope.
+ *
+ * Lives here rather than in the session client so the writer and the reader agree on what the
+ * field means; the reader (the daemon) never sees the plaintext and only trusts the id stamped
+ * beside the ciphertext.
+ */
+export function sessionLogIdentity(payload: unknown): { subagent?: string; taskCall?: string } {
+  if (!payload || typeof payload !== 'object') {
+    return {};
+  }
+  const record = payload as { role?: unknown; content?: unknown };
+  const content = record.content && typeof record.content === 'object' ? record.content as Record<string, unknown> : null;
+  // Session protocol payloads are `{role:'session', content: envelope}`; lifecycle envelopes wrap
+  // the same envelope one level deeper as `content.data`.
+  const carrier = content ?? record as Record<string, unknown>;
+  const envelope = carrier.data && typeof carrier.data === 'object' ? carrier.data as Record<string, unknown> : carrier;
+  return {
+    ...(typeof envelope.subagent === 'string' ? { subagent: envelope.subagent } : {}),
+    ...(typeof envelope.taskCall === 'string' ? { taskCall: envelope.taskCall } : {}),
+  };
+}
 
 function logWarning(message: string, meta: Record<string, unknown>): void {
   try {
@@ -237,8 +271,23 @@ export function collapseSessionLogEntries(entries: SessionLogEntry[]): SessionLo
       result.push(entry);
     } else if (preferredEntry(entry, result[index])) {
       // Replaced in place: the surviving entry keeps the position of the first delivery, so the
-      // page stays in log order.
-      result[index] = entry;
+      // page stays in log order. The sub-agent tag survives from either copy: the writer stamps
+      // the outbound entry from the plaintext envelope, and the echoed copy has only ciphertext.
+      const previous = result[index];
+      result[index] = {
+        ...entry,
+        ...(entry.subagent === undefined && previous.subagent !== undefined ? { subagent: previous.subagent } : {}),
+        ...(entry.taskCall === undefined && previous.taskCall !== undefined ? { taskCall: previous.taskCall } : {}),
+      };
+    } else if (result[index].subagent === undefined && entry.subagent !== undefined
+      || result[index].taskCall === undefined && entry.taskCall !== undefined) {
+      // The survivor is preferred but carries no tag; take the one from the copy being dropped.
+      const current = result[index];
+      result[index] = {
+        ...current,
+        ...(current.subagent === undefined && entry.subagent !== undefined ? { subagent: entry.subagent } : {}),
+        ...(current.taskCall === undefined && entry.taskCall !== undefined ? { taskCall: entry.taskCall } : {}),
+      };
     }
   }
   return result;
@@ -324,6 +373,15 @@ export type SessionLogQuery = {
   since?: string;
   /** Read the entries up to this boundary. Omit both to read the newest page. */
   before?: string;
+  /**
+   * Read one sub-agent's stream instead of the whole session's.
+   *
+   * The page is the same log, filtered by the plaintext id beside each entry; anchors are still
+   * byte boundaries, so both directions and `hasOlder`/`hasNewer` keep working. A reader walking a
+   * filtered stream may see an empty page when a long run of other entries lies between two
+   * matching ones — the anchors still move, so the next read continues rather than repeating.
+   */
+  subagent?: string;
   maxBytes?: number;
   /**
    * How many entries a page may carry, newest first for a tail read.
@@ -372,9 +430,9 @@ export function readSessionLogPage(query: SessionLogQuery): SessionLogPage {
 
   const before = parseAnchor(query.before);
   if (before !== null || (query.since === undefined && query.before === undefined)) {
-    return readBackwards(dir, names, indices, before, maxBytes, maxEntries);
+    return readBackwards(dir, names, indices, before, maxBytes, maxEntries, query.subagent);
   }
-  return readForwards(dir, names, indices, since, reset, maxBytes, maxEntries);
+  return readForwards(dir, names, indices, since, reset, maxBytes, maxEntries, query.subagent);
 }
 
 function readForwards(
@@ -385,6 +443,7 @@ function readForwards(
   reset: boolean,
   maxBytes: number,
   maxEntries?: number,
+  subagent?: string,
 ): SessionLogPage {
   const firstIndex = indices[0];
   const from = reset || since === null ? firstIndex : since.segment;
@@ -395,7 +454,9 @@ function readForwards(
   let cut = false;
   let torn = false;
   let firstLine: { segment: number; start: number } | null = null;
+  let firstScanned: { segment: number; start: number } | null = null;
   let lastLine: { segment: number; end: number } | null = null;
+  let lastScanned: { segment: number; end: number } | null = null;
 
   for (const name of names) {
     const index = segmentIndexOf(name);
@@ -412,38 +473,50 @@ function readForwards(
       if (index === from && line.end <= fromByte) {
         continue;
       }
+      let entry: SessionLogEntry;
+      try {
+        entry = JSON.parse(line.text) as SessionLogEntry;
+      } catch {
+        torn = true; // Torn middle: stop *before* it so the next read retries this line.
+        break;
+      }
+      // A filtered stream still consumes the entries it does not want: the anchor has to move
+      // past them, or the same range is asked for again forever. They cost no page bytes because
+      // they are never sent.
+      if (subagent !== undefined && entry.subagent !== subagent) {
+        firstScanned ??= { segment: index, start: line.start };
+        lastScanned = { segment: index, end: line.end };
+        continue;
+      }
       const size = line.end - line.start;
       if (entries.length > 0 && (bytes + size > maxBytes || (maxEntries !== undefined && entries.length >= maxEntries))) {
         cut = true;
         break;
       }
-      try {
-        entries.push(JSON.parse(line.text) as SessionLogEntry);
-      } catch {
-        torn = true; // Torn middle: stop *before* it so the next read retries this line.
-        break;
-      }
+      entries.push(entry);
       bytes += size;
-      if (firstLine === null) {
-        firstLine = { segment: index, start: line.start };
-      }
+      firstLine ??= { segment: index, start: line.start };
+      firstScanned ??= { segment: index, start: line.start };
       lastLine = { segment: index, end: line.end };
+      lastScanned = { segment: index, end: line.end };
     }
   }
 
   // A page that began at the very start of the log has nothing before it; anything else has the
   // entries the reader already holds, which is all `hasOlder` means here.
   const startedAt = reset || since === null ? { segment: firstIndex, byte: 0 } : since;
-  const anchor = lastLine
-    ? formatAnchor({ segment: lastLine.segment, byte: lastLine.end })
-    : formatAnchor(startedAt);
+  // The cursor belongs after the last line that was read, including the ones a filter skipped:
+  // an empty filtered page still has to say how far it got, or it never gets further.
+  const endAnchor = lastLine ?? lastScanned;
+  const anchor = endAnchor ? formatAnchor({ segment: endAnchor.segment, byte: endAnchor.end }) : formatAnchor(startedAt);
+  const olderAnchor = firstLine ?? firstScanned;
   const beganAtStart = startedAt.segment === firstIndex && startedAt.byte === 0;
   return {
     entries,
     cursor: anchor,
-    older: firstLine ? formatAnchor({ segment: firstLine.segment, byte: firstLine.start }) : anchor,
+    older: olderAnchor ? formatAnchor({ segment: olderAnchor.segment, byte: olderAnchor.start }) : anchor,
     hasNewer: cut || torn,
-    hasOlder: !beganAtStart && entries.length > 0,
+    hasOlder: !beganAtStart && (entries.length > 0 || lastScanned !== null),
     reset,
   };
 }
@@ -455,6 +528,7 @@ function readBackwards(
   before: Anchor | null,
   maxBytes: number,
   maxEntries?: number,
+  subagent?: string,
 ): SessionLogPage {
   const lastIndex = indices[indices.length - 1];
   // No boundary means the newest page: start at the end of the last segment.
@@ -464,6 +538,7 @@ function readBackwards(
   let bytes = 0;
   let cut = false;
   let exhausted = false;
+  let firstScanned: { segment: number; byte: number } | null = null;
 
   for (let at = indices.length - 1; at >= 0 && !cut; at -= 1) {
     const index = indices[at];
@@ -478,19 +553,26 @@ function readBackwards(
     const lines = segmentLines(buffer).filter((line) => line.end <= limit);
     for (let i = lines.length - 1; i >= 0; i -= 1) {
       const line = lines[i];
-      const size = line.end - line.start;
-      if (pages.length > 0 && (bytes + size > maxBytes || (maxEntries !== undefined && pages.length >= maxEntries))) {
-        cut = true;
-        break;
-      }
       let entry: SessionLogEntry;
       try {
         entry = JSON.parse(line.text) as SessionLogEntry;
       } catch {
         continue; // Stepped over, not stopped at: an older page must stay reachable past it.
       }
+      // Entries the filter does not want are consumed too — `older` has to walk past them, or a
+      // sub-agent stream whose neighbours are dense never reaches its own older entries.
+      if (subagent !== undefined && entry.subagent !== subagent) {
+        firstScanned = { segment: index, byte: line.start };
+        continue;
+      }
+      const size = line.end - line.start;
+      if (pages.length > 0 && (bytes + size > maxBytes || (maxEntries !== undefined && pages.length >= maxEntries))) {
+        cut = true;
+        break;
+      }
       pages.push({ entry, start: line.start, end: line.end, segment: index });
       bytes += size;
+      firstScanned = { segment: index, byte: line.start };
     }
     if (!cut && at === 0) {
       exhausted = true;
@@ -503,10 +585,13 @@ function readBackwards(
   const anchor = last
     ? formatAnchor({ segment: last.segment, byte: last.end })
     : formatAnchor({ segment: from.segment, byte: from.byte === Number.MAX_SAFE_INTEGER ? 0 : from.byte });
+  const olderAnchor = first
+    ? { segment: first.segment, byte: first.start }
+    : firstScanned;
   return {
     entries: pages.map((page) => page.entry),
     cursor: anchor,
-    older: first ? formatAnchor({ segment: first.segment, byte: first.start }) : anchor,
+    older: olderAnchor ? formatAnchor(olderAnchor) : anchor,
     hasNewer: before !== null && hasNewerThan(dir, names, indices, from),
     hasOlder: cut || !exhausted,
     reset: false,
@@ -533,6 +618,66 @@ function hasNewerThan(dir: string, names: string[], indices: number[], anchor: A
  */
 export function readSessionLog(tag: string, site: string | undefined): SessionLogEntry[] {
   return readSessionLogPage({ tag, site, since: '0:0', maxBytes: Number.MAX_SAFE_INTEGER }).entries;
+}
+
+/** One sub-agent's stream, as the session's log knows it. */
+export type SessionSubagentSummary = {
+  subagent: string;
+  taskCall?: string;
+  /** How many log entries this stream has. */
+  entries: number;
+  /** Earliest and latest write times; see `at` on `SessionLogEntry` for why these are not order. */
+  firstAt: number;
+  lastAt: number;
+};
+
+/**
+ * Every sub-agent this session's log has entries for, oldest stream first.
+ *
+ * A scan rather than an index: the log is bounded by its segments and this is asked once, when a
+ * reader opens the list, not on the message path. Entries without an id are main-thread traffic
+ * and are not listed. The `taskCall` is taken from the first entry that carries one, so a stream
+ * started before its task call was known still gets linked as soon as any copy says which call it
+ * belongs to.
+ */
+export function listSessionSubagents(query: { tag: string; site: string | undefined }): SessionSubagentSummary[] {
+  const dir = sessionLogDir(query.tag, query.site);
+  const bySubagent = new Map<string, SessionSubagentSummary>();
+  for (const name of listSegments(dir)) {
+    const buffer = readSegment(dir, name);
+    if (buffer === null) {
+      continue;
+    }
+    for (const line of segmentLines(buffer)) {
+      let entry: SessionLogEntry;
+      try {
+        entry = JSON.parse(line.text) as SessionLogEntry;
+      } catch {
+        continue;
+      }
+      if (entry.subagent === undefined) {
+        continue;
+      }
+      const existing = bySubagent.get(entry.subagent);
+      if (existing === undefined) {
+        bySubagent.set(entry.subagent, {
+          subagent: entry.subagent,
+          ...(entry.taskCall !== undefined ? { taskCall: entry.taskCall } : {}),
+          entries: 1,
+          firstAt: entry.at,
+          lastAt: entry.at,
+        });
+        continue;
+      }
+      existing.entries += 1;
+      existing.firstAt = Math.min(existing.firstAt, entry.at);
+      existing.lastAt = Math.max(existing.lastAt, entry.at);
+      if (existing.taskCall === undefined && entry.taskCall !== undefined) {
+        existing.taskCall = entry.taskCall;
+      }
+    }
+  }
+  return [...bySubagent.values()].sort((a, b) => a.firstAt - b.firstAt);
 }
 
 /**
