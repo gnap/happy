@@ -19,10 +19,10 @@ export function resolveCodexExecutionPolicy(
             // Codex native modes
             case 'default': return 'untrusted';                    // Ask for non-trusted commands
             case 'read-only': return 'never';                      // Never ask, read-only enforced by sandbox
-            case 'safe-yolo': return 'on-failure';                 // Auto-run, ask only on failure
-            case 'yolo': return 'on-failure';                      // Auto-run, ask only on failure
+            case 'safe-yolo': return 'never';                      // Workspace sandbox enforces safety; do not prompt
+            case 'yolo': return 'never';                           // Full YOLO: never interrupt for approvals
             // Defensive fallback for Claude-specific modes (backward compatibility)
-            case 'bypassPermissions': return 'on-failure';         // Full access: map to yolo behavior
+            case 'bypassPermissions': return 'never';              // Full access: map to yolo behavior
             case 'acceptEdits': return 'on-request';               // Let model decide (closest to auto-approve edits)
             case 'plan': return 'untrusted';                       // Conservative: ask for non-trusted
             default: return 'untrusted';                           // Safe fallback
@@ -45,4 +45,19 @@ export function resolveCodexExecutionPolicy(
     })();
 
     return { approvalPolicy, sandbox };
+}
+
+/**
+ * Whether an approval Codex still surfaces should be answered without the user.
+ *
+ * `on-failure` no longer exists on the app-server wire; the full-access modes run with approval
+ * policy `never`, so anything that still asks is a sandbox escalation or an MCP elicitation —
+ * except under `safe-yolo`, where asking is exactly what the mode promises.
+ */
+export function shouldAutoApproveCodexApproval(
+    permissionMode: import('@/api/types').PermissionMode,
+    sandboxManagedByHappy: boolean,
+): boolean {
+    if (sandboxManagedByHappy) return true;
+    return permissionMode === 'yolo' || permissionMode === 'bypassPermissions';
 }

@@ -31,7 +31,7 @@ import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
 import type { ApiSessionClient } from '@/api/apiSession';
 import { getUserMessageText } from '@/api/types';
 import type { UserMessage } from '@/api/types';
-import { resolveCodexExecutionPolicy } from './executionPolicy';
+import { resolveCodexExecutionPolicy, shouldAutoApproveCodexApproval } from './executionPolicy';
 import { mapCodexMcpMessageToSessionEnvelopes, mapCodexProcessorMessageToSessionEnvelopes } from './utils/sessionProtocolMapper';
 
 type ReadyEventOptions = {
@@ -514,6 +514,11 @@ export async function runCodex(opts: {
     // permission handler the App already drives (agent state + the permission RPC), and hand
     // back the decision in the wire vocabulary our handler speaks.
     client.setApprovalHandler(async (params) => {
+        const activePermissionMode = currentPermissionMode ?? 'default';
+        if (shouldAutoApproveCodexApproval(activePermissionMode, client.sandboxEnabled)) {
+            logger.debug(`[Codex] Auto-approving ${params.type} approval in ${activePermissionMode} mode`);
+            return 'approved';
+        }
         const toolName = params.type === 'exec'
             ? 'CodexBash'
             : params.type === 'patch'
@@ -734,7 +739,7 @@ export async function runCodex(opts: {
                             });
                             logger.debug('[Codex] Resumed thread', storedThreadId);
                         } catch (error) {
-                            logger.debug('[Codex] Resume failed; starting a new thread', error);
+                            logger.debug('[Codex] Resume failed; starting a new thread', error instanceof Error ? error.message : error);
                         }
                     }
                     if (!client.hasActiveThread()) {
@@ -764,7 +769,7 @@ export async function runCodex(opts: {
                     logger.debug('[Codex] Turn aborted');
                 }
             } catch (error) {
-                logger.warn('Error in codex session:', error);
+                logger.warn('Error in codex session:', error instanceof Error ? error.message : error);
                 const isAbortError = error instanceof Error && error.name === 'AbortError';
                 
                 if (isAbortError) {
