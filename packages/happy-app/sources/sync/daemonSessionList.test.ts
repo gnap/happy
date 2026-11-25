@@ -45,6 +45,25 @@ describe('daemonSessionRows', () => {
         });
     });
 
+    it('keys a scheduled row by its lineage uid, not the CLI\'s private tag', () => {
+        const rows = daemonSessionRows([report({
+            happySessionId: undefined,
+            sessionUid: 'uid-1',
+            isAlive: false,
+            phase: 'Scheduling',
+            generation: 1,
+            reason: 'spawn-pending',
+        })], 10);
+
+        expect(Object.keys(rows)).toEqual(['uid-1']);
+        expect(rows['uid-1']).toMatchObject({
+            tag: 'tag-1',
+            sessionUid: 'uid-1',
+            phase: 'Scheduling',
+            reason: 'spawn-pending',
+        });
+    });
+
     it('drops a row with neither name, which nothing could address', () => {
         expect(daemonSessionRows([report({ happySessionId: undefined, tag: undefined })], 10)).toEqual({});
     });

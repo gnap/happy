@@ -46,7 +46,7 @@ import { decideReconcile, nextReconcileProgress, type ReconcileProgress, type Re
 import { BUILD_VERSION } from '../version';
 import type { ApiMachineClient } from '@/api/apiMachine';
 import { readSessionKey } from '@/api/sessionKeyPersistence';
-import { readSessionUid } from '@/api/sessionUid';
+import { readSessionUid, resolveSessionUid } from '@/api/sessionUid';
 import { validatePath } from '@/modules/common/pathSecurity';
 import { c as createTar } from 'tar';
 import { run as runRipgrep } from '@/modules/ripgrep/index';
@@ -434,6 +434,11 @@ export async function startDaemon(): Promise<void> {
 
     /** Record the desired state before the process is launched. */
     const expectSpawn = (spec: PendingSpawnSpec): void => {
+      // Mint the lineage's public name before any process exists. The session process resolves the
+      // same write-once file when it starts its metadata, so this is the uid it will use — and it
+      // means a scheduled row can be named by something other than the CLI's private tag from the
+      // moment it is listed. A failed write still leaves the row keyed the older way.
+      resolveSessionUid(spec.tag);
       pendingSpawns.set(spec.tag, spec);
       armPendingSpawnExpiry(spec.tag, PENDING_SPAWN_GRACE_MS);
       persistNow();
