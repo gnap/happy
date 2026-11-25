@@ -3,7 +3,7 @@ import React from "react";
 import { ApiClient } from '@/api/api';
 import { CodexAppServerClient } from './codexAppServerClient';
 import { readProfileCodexConfig, writeProfileCodexHome } from './profileCodexHome';
-import { codexModelOptions, currentTierCode, resolveCodexModel } from './modelTiers';
+import { codexModelOptions, currentTierCode, resolveCodexModel, resolveCodexModelIfExplicit } from './modelTiers';
 import { configuration } from '@/configuration';
 import { CodexPermissionHandler } from './utils/permissionHandler';
 import { ReasoningProcessor } from './utils/reasoningProcessor';
@@ -32,6 +32,7 @@ import type { ApiSessionClient } from '@/api/apiSession';
 import { getUserMessageText } from '@/api/types';
 import type { UserMessage } from '@/api/types';
 import { resolveCodexExecutionPolicy, shouldAutoApproveCodexApproval } from './executionPolicy';
+import { applyNetworkProxyPolicy, networkProxySettled, reassertNetworkProxy, resetNetworkProxyPolicy } from '@/utils/networkProxy';
 import { mapCodexMcpMessageToSessionEnvelopes, mapCodexProcessorMessageToSessionEnvelopes } from './utils/sessionProtocolMapper';
 
 type ReadyEventOptions = {
@@ -95,43 +96,76 @@ export async function runCodex(opts: {
     const profileCodex = readProfileCodexConfig(process.env);
     if (profileCodex) {
         const previousHome = process.env.CODEX_HOME;
+        if (profileCodex.auth) {
+            // The auth file is the whole credential. A key or endpoint left beside it would put
+            // Codex back on the profile provider and never read the login.
+            delete process.env.CODEX_API_KEY;
+            delete process.env.CODEX_BASE_URL;
+        }
         const home = writeProfileCodexHome(configuration.happyHomeDir, sessionTag, {
             ...profileCodex,
             // A profile may name a tier (“sol”) rather than a version; the file Codex reads
-            // needs the concrete model either way.
-            ...(profileCodex.model ? { model: resolveCodexModel(profileCodex.model) } : {}),
+            // needs the concrete model either way. An auth file names no provider and carries no
+            // model — the turn sends one when a person chose it.
+            ...(!profileCodex.auth && profileCodex.model ? { model: resolveCodexModel(profileCodex.model) } : {}),
         });
         process.env.CODEX_HOME = home;
-        logger.info(`[codex] profile endpoint ${profileCodex.baseUrl ?? '(default)'} — config at ${home}${previousHome && previousHome !== home ? ` (replaces CODEX_HOME=${previousHome})` : ''}`);
+        logger.info(profileCodex.auth
+            ? `[codex] ChatGPT login — auth at ${home}${previousHome && previousHome !== home ? ` (replaces CODEX_HOME=${previousHome})` : ''}`
+            : `[codex] profile endpoint ${profileCodex.baseUrl ?? '(default)'} — config at ${home}${previousHome && previousHome !== home ? ` (replaces CODEX_HOME=${previousHome})` : ''}`);
     }
+
+    // The profile's route (or relay switch) has to be in this process's environment before the
+    // app-server is spawned: the app-server is what calls the model, and it inherits here.
+    applyNetworkProxyPolicy({}, { label: sessionTag });
 
     // A profile can also arrive with a user message (the App sends it every time). Codex reads its
     // provider at process start, so a change means rewriting the managed home and reconnecting the
     // app-server. The signature is over the endpoint itself: a profile edit that changes nothing
     // Codex consumes must not restart it.
-    const CODEX_PROFILE_KEYS = ['CODEX_BASE_URL', 'CODEX_API_KEY', 'CODEX_MODEL'] as const;
-    const profileEnvSignature = (env: Record<string, string | undefined>): string =>
-        CODEX_PROFILE_KEYS.map((key) => `${key}=${env[key] ?? ''}`).join('\0');
+    const CODEX_PROFILE_KEYS = ['CODEX_BASE_URL', 'CODEX_API_KEY', 'CODEX_MODEL', 'CODEX_AUTH_JSON', 'CODEX_AUTH_SAVED_AT'] as const;
+    const profileEnvSignature = (env: Record<string, string | undefined>, viaRelay?: boolean): string =>
+        [
+            ...CODEX_PROFILE_KEYS.map((key) => `${key}=${env[key] ?? ''}`),
+            `viaRelay=${viaRelay === undefined ? '' : viaRelay ? '1' : '0'}`,
+        ].join('\0');
     let pendingProfileEnv: Record<string, string> | undefined;
+    let pendingProxyViaRelay: boolean | undefined;
     let appliedProfileKeys: string[] = [];
-    let appliedProfileSignature = profileEnvSignature(process.env);
+    let appliedProfileSignature = profileEnvSignature(process.env, process.env.HAPPY_PROXY_VIA_RELAY === '1');
 
-    const applyProfileEnv = async (env: Record<string, string>): Promise<void> => {
-        // A key the previous profile set and this one omits must not linger in the process.
-        for (const key of appliedProfileKeys) {
-            if (!(key in env)) delete process.env[key];
+    const applyProfileEnv = async (env: Record<string, string>, viaRelay?: boolean): Promise<void> => {
+        // A key the previous profile set and this one omits must not linger in the process. A
+        // message that carries only a relay choice has no environment of its own and must not
+        // erase the profile the process already has.
+        if (Object.keys(env).length > 0) {
+            for (const key of appliedProfileKeys) {
+                if (!(key in env)) delete process.env[key];
+            }
+            for (const [key, value] of Object.entries(env)) process.env[key] = value;
+            appliedProfileKeys = Object.keys(env);
         }
-        for (const [key, value] of Object.entries(env)) process.env[key] = value;
-        appliedProfileKeys = Object.keys(env);
 
+        // Resolve the profile's route before the app-server is restarted, so the process it spawns
+        // inherits the proxy this profile asked for.
+        applyNetworkProxyPolicy(env, { viaRelay, label: sessionTag });
+        await networkProxySettled();
+
+        if (Object.keys(env).length === 0) return;
         const next = readProfileCodexConfig(process.env);
         if (!next) return;
+        if (next.auth) {
+            delete process.env.CODEX_API_KEY;
+            delete process.env.CODEX_BASE_URL;
+        }
         const home = writeProfileCodexHome(configuration.happyHomeDir, sessionTag, {
             ...next,
-            ...(next.model ? { model: resolveCodexModel(next.model) } : {}),
+            ...(!next.auth && next.model ? { model: resolveCodexModel(next.model) } : {}),
         });
         process.env.CODEX_HOME = home;
-        logger.info(`[codex] profile endpoint changed — config at ${home}`);
+        logger.info(next.auth
+            ? `[codex] ChatGPT login applied — auth at ${home}`
+            : `[codex] profile endpoint changed — config at ${home}`);
     };
 
     const api = await ApiClient.create(opts.credentials);
@@ -253,6 +287,11 @@ export async function runCodex(opts: {
         const profileEnv = message.meta?.environmentVariables as Record<string, string> | undefined;
         if (profileEnv) {
             pendingProfileEnv = profileEnv;
+        }
+        // The relay switch is a profile statement too; a profile with no SOCKS5 hop still routes
+        // everything through the relay when it is on.
+        if (typeof message.meta?.proxyViaRelay === 'boolean') {
+            pendingProxyViaRelay = message.meta.proxyViaRelay;
         }
         // Resolve permission mode (accept all modes, will be mapped in switch statement)
         let messagePermissionMode = currentPermissionMode;
@@ -709,20 +748,28 @@ export async function runCodex(opts: {
                     sandboxManagedByHappy,
                 );
 
-                if (pendingProfileEnv) {
-                    const desiredSignature = profileEnvSignature({ ...process.env, ...pendingProfileEnv });
+                if (pendingProfileEnv || pendingProxyViaRelay !== undefined) {
+                    const desiredSignature = profileEnvSignature(
+                        { ...process.env, ...(pendingProfileEnv ?? {}) },
+                        pendingProxyViaRelay ?? (process.env.HAPPY_PROXY_VIA_RELAY === '1'),
+                    );
                     if (desiredSignature !== appliedProfileSignature) {
-                        await applyProfileEnv(pendingProfileEnv);
+                        await applyProfileEnv(pendingProfileEnv ?? {}, pendingProxyViaRelay);
                         appliedProfileSignature = desiredSignature;
-                        // The provider is read when the app-server starts; restart it so the new
-                        // profile's endpoint and key are the ones this turn uses.
+                        // The provider and the proxy are read when the app-server starts; restart
+                        // it so the new profile's endpoint, key and route are the ones this turn
+                        // uses.
                         await client.disconnect();
                         await client.connect();
                         logger.debug('[Codex] app-server reconnected for a profile change');
                     }
                 }
 
-                const model = resolveCodexModel(message.mode.model);
+                // With a ChatGPT login the reachable models are the plan's, not the tier table's
+                // defaults: send only a model a person named, otherwise let Codex choose.
+                const model = readProfileCodexConfig(process.env)?.auth
+                    ? resolveCodexModelIfExplicit(message.mode.model)
+                    : resolveCodexModel(message.mode.model);
                 publishModelCatalog(message.mode.model);
 
                 if (!client.hasActiveThread()) {
@@ -760,6 +807,11 @@ export async function runCodex(opts: {
                     ? message.message + '\n\n' + CHANGE_TITLE_INSTRUCTION
                     : message.message;
                 first = false;
+                // A daemon restart empties the registrations that point at a route; this turn must
+                // not inherit that. The app-server itself makes the request, over the process
+                // environment this call re-asserts.
+                reassertNetworkProxy();
+                await networkProxySettled();
                 const result = await client.sendTurnAndWait(prompt, {
                     model,
                     approvalPolicy: executionPolicy.approvalPolicy,
@@ -830,6 +882,8 @@ export async function runCodex(opts: {
         logger.debug('[codex]: client.disconnect begin');
         await client.disconnect();
         logger.debug('[codex]: client.disconnect done');
+        // Put back the process environment and tell the daemon this session's route is gone.
+        await resetNetworkProxyPolicy();
         stopSocketClient();
         // Stop Happy MCP server
         logger.debug('[codex]: happyServer.stop');

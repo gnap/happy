@@ -1,3 +1,4 @@
+mod codex_login;
 mod mdns;
 
 #[tauri::command]
@@ -52,10 +53,17 @@ pub fn run() {
     .plugin(tauri_plugin_http::init())
     .plugin(tauri_plugin_websocket::init())
     .plugin(tauri_plugin_connector::init())
+    .manage(codex_login::CodexLogin::default())
     .invoke_handler(tauri::generate_handler![
       debug_log,
       open_external_url,
-      mdns::mdns_browse
+      mdns::mdns_browse,
+      codex_login::codex_login_preflight,
+      codex_login::codex_login_start,
+      codex_login::codex_login_finish,
+      codex_login::codex_login_cancel,
+      codex_login::codex_login_open_window,
+      codex_login::codex_login_window_close
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {
