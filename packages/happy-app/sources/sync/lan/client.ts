@@ -18,7 +18,7 @@
 import { hmac_sha256 } from '@/encryption/hmac_sha256';
 import { encodeUTF8 } from '@/encryption/text';
 import { encodeBase64 } from '@/encryption/base64';
-import type { LanHistory, LanIdentity, LanSessionSummary } from './types';
+import type { LanHistory, LanIdentity, LanSessionSummary, LanSubagentSummary } from './types';
 
 /** A challenge is worthless once the daemon's nonce expires; don't hang on a wedged host. */
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -457,14 +457,17 @@ export async function fetchHistory(
     baseUrl: string,
     token: string,
     sessionId: string,
-    page: { since: string } | { before: string } | Record<string, never> = {}
+    page: { since?: string; before?: string; subagent?: string } = {}
 ): Promise<LanHistory | null> {
     const params = new URLSearchParams();
-    if ('since' in page && page.since) {
+    if (page.since) {
         params.set('since', page.since);
     }
-    if ('before' in page && page.before) {
+    if (page.before) {
         params.set('before', page.before);
+    }
+    if (page.subagent) {
+        params.set('subagent', page.subagent);
     }
     // A page is read to be shown, and the reader decrypts at most this many entries anyway: asking
     // for more is paying for bytes and parse work that the caller throws away (measured: 546
@@ -482,6 +485,47 @@ export async function fetchHistory(
         return throwAnswer(response, 'history request failed');
     }
     return (await response.json()) as LanHistory;
+}
+
+/**
+ * The sub-agent streams this machine's log holds for a session.
+ *
+ * A listing, not a stream: one stream is read through `fetchHistory` with `subagent` set, so it
+ * gets the same byte anchors and paging as the main conversation. Null is the 404 of a machine
+ * with no log for the session — or a build from before the split — and the caller treats both as
+ * "this machine cannot answer that".
+ */
+export async function fetchSessionSubagents(
+    baseUrl: string,
+    token: string,
+    sessionId: string,
+): Promise<LanSubagentSummary[] | null> {
+    const response = await request(
+        `${baseUrl}/lan/sessions/${encodeURIComponent(sessionId)}/subagents`,
+        { token, timeoutMs: historyTimeoutFor(baseUrl) },
+    );
+    if (response.status === 404) {
+        return null;
+    }
+    if (!response.ok) {
+        return throwAnswer(response, 'sub-agent listing failed');
+    }
+    const body = (await response.json()) as { subagents?: unknown };
+    if (!Array.isArray(body.subagents)) {
+        return null;
+    }
+    return (body.subagents as Array<Record<string, unknown>>)
+        .filter((item) => typeof item?.subagent === 'string'
+            && typeof item.entries === 'number'
+            && typeof item.firstAt === 'number'
+            && typeof item.lastAt === 'number')
+        .map((item) => ({
+            subagent: item.subagent as string,
+            ...(typeof item.taskCall === 'string' ? { taskCall: item.taskCall } : {}),
+            entries: item.entries as number,
+            firstAt: item.firstAt as number,
+            lastAt: item.lastAt as number,
+        }));
 }
 
 /**

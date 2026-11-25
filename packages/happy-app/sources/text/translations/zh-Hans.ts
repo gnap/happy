@@ -318,6 +318,9 @@ export const zhHans: TranslationStructure = {
     session: {
         inputPlaceholder: '输入消息...',
         peerMessage: '来自另一个 Claude 会话',
+        subagents: "子代理",
+        subagentStream: "子代理",
+        noSubagents: "还没有子代理",
         encrypting: '连接中…',
         backgroundTasks: '后台任务',
         activityScheduled: '定时任务',
@@ -382,6 +385,7 @@ export const zhHans: TranslationStructure = {
         failedToCopyMetadata: '复制元数据失败',
         failedToKillSession: '终止会话失败',
         failedToArchiveSession: '归档会话失败',
+        archiveUnsupported: "这台机器的版本不支持归档会话。",
         connectionStatus: '连接状态',
         channelAuto: '自动',
         channelServer: '公网服务器',

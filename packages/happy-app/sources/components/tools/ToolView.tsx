@@ -16,6 +16,7 @@ import { parseToolUseError } from '@/utils/toolErrorParser';
 import { formatMCPTitle } from './views/MCPToolView';
 import { askUserQuestionAnswers } from './askUserQuestionResult';
 import { toolErrorMessage } from './toolErrorText';
+import { sync } from '@/sync/sync';
 import { t } from '@/text';
 
 interface ToolViewProps {
@@ -37,10 +38,35 @@ export const ToolView = ((props: ToolViewProps) => {
     const handlePress = React.useCallback(() => {
         if (onPress) {
             onPress();
-        } else if (sessionId && messageId) {
+            return;
+        }
+        // A sub-agent's card opens its own stream, not the inline transcript inside the message
+        // detail: the stream is read from the machine's log and paged on its own. The card knows
+        // the tool call, not the worker id, so the listing is what maps one to the other; when
+        // nothing maps (an older machine, or a call that never started a stream) the detail page
+        // is where this card always went.
+        if ((tool.name === 'Task' || tool.name === 'Agent') && sessionId && tool.callId) {
+            void (async () => {
+                try {
+                    const subagents = await sync.listSessionSubagents(sessionId);
+                    const match = subagents?.find((item) => item.taskCall === tool.callId);
+                    if (match) {
+                        router.push(`/session/${sessionId}/agent/${match.subagent}`);
+                        return;
+                    }
+                } catch {
+                    // Fall through: the detail page still has whatever this build can show.
+                }
+                if (messageId) {
+                    router.push(`/session/${sessionId}/message/${messageId}`);
+                }
+            })();
+            return;
+        }
+        if (sessionId && messageId) {
             router.push(`/session/${sessionId}/message/${messageId}`);
         }
-    }, [onPress, sessionId, messageId, router]);
+    }, [onPress, sessionId, messageId, router, tool.name, tool.callId]);
 
     // Enable pressable if either onPress is provided or we have navigation params
     const isPressable = !!(onPress || (sessionId && messageId));
@@ -219,7 +245,12 @@ export const ToolView = ((props: ToolViewProps) => {
                 // Try to use a specific tool view component first
                 const SpecificToolView = getToolViewComponent(tool.name);
                 if (SpecificToolView) {
-                    const hasChildren = (props.messages && props.messages.length > 0);
+                    // A sub-agent's messages live in their own stream now. The chat card is the
+                    // header — status, title, spinner — and pressing it opens that stream; drawing
+                    // the transcript inline as well is the mixing this split exists to undo. The
+                    // message detail page still has the inline view for a reader who asks for it.
+                    const isSubagentCard = tool.name === 'Task' || tool.name === 'Agent';
+                    const hasChildren = !isSubagentCard && (props.messages && props.messages.length > 0);
                     // Suppress the content area when there are no children tool calls
                     // to display, unless the tool has an error to show.  Workflow/Agent
                     // cards without sub-agents would otherwise render an empty padded

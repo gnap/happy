@@ -163,6 +163,34 @@ export type LanSessionLogEntry = {
     dir: 'in' | 'out';
     at: number;
     c: string;
+    /**
+     * The sub-agent this entry belongs to, when it is not the main thread.
+     *
+     * Plaintext metadata beside the ciphertext, added by a CLI that splits a session's streams.
+     * Absent on a main-thread entry and on every entry from an older machine — a reader treats
+     * both as "this entry is not part of a sub-agent stream".
+     */
+    subagent?: string;
+    /** The tool call that started that sub-agent. */
+    taskCall?: string;
+    /**
+     * The writer's identity and counter, mirrored beside the ciphertext.
+     *
+     * `(site, n)` is also inside the ciphertext; this copy is what makes a gap detectable while
+     * paging a stream without decrypting the page. A missing counter within one `site` is the
+     * signal, and it is only actionable when the surrounding entries carry one.
+     */
+    site?: string;
+    n?: number;
+};
+
+/** One sub-agent stream this machine's log holds for a session. */
+export type LanSubagentSummary = {
+    subagent: string;
+    taskCall?: string;
+    entries: number;
+    firstAt: number;
+    lastAt: number;
 };
 
 export type LanHistory = {

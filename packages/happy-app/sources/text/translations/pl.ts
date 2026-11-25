@@ -327,6 +327,9 @@ export const pl: TranslationStructure = {
     session: {
         inputPlaceholder: 'Wpisz wiadomość...',
         peerMessage: 'Z innej sesji Claude',
+        subagents: "Subagenci",
+        subagentStream: "Subagent",
+        noSubagents: "Nie ma jeszcze subagentów",
         encrypting: 'nawiązywanie połączenia…',
         backgroundTasks: 'Zadania w tle',
         activityScheduled: 'Zaplanowane',
@@ -391,6 +394,7 @@ export const pl: TranslationStructure = {
         failedToCopyMetadata: 'Nie udało się skopiować metadanych',
         failedToKillSession: 'Nie udało się zakończyć sesji',
         failedToArchiveSession: 'Nie udało się zarchiwizować sesji',
+        archiveUnsupported: "Ta wersja maszyny nie obsługuje archiwizowania sesji.",
         connectionStatus: 'Status połączenia',
         channelAuto: 'Automatycznie',
         channelServer: 'Serwer',
