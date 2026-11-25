@@ -3427,7 +3427,15 @@ class Sync {
             return;
         }
         this.lastNetworkChangeHandledAt = now;
+        // A device that moved networks has left its LAN, and the relay is the channel it still
+        // has. Both halves of that channel ride the interface that changed — the hub's socket and
+        // the per-machine streams through it — and either can read as connected while nothing
+        // flows. Prove them now instead of waiting for a beat timeout, and read the directory
+        // again: the resolver needs the machine's row there even before a stream comes back.
+        this.relayHub?.probeAfterResume();
+        this.connections.probeAfterResume();
         this.reconcileDaemonSockets();
+        log.log(`🔁 network ${reason}: relay hub and machine sockets probed (${Object.keys(storage.getState().relayDirectory).length} machine(s) in the directory)`);
         // A network change invalidating every session causes a fetch storm that delays the
         // session the user is actually looking at. Use the scheduler instead.
         this.readScheduler.markStale();
