@@ -83,7 +83,7 @@ import { UserProfile } from './friendTypes';
 import { resolveMessageModeMeta, resolveMessageProfileEnv, resolveMessageProxyViaRelay } from './messageMeta';
 import { loadMessageCache, saveMessageCache, clearMessageCache, clearAllMessageCaches, preloadSessionCacheDB, getCachedLastSeq } from './cache/messageCache';
 import { mergePageIntoWindow } from './messageIdentity';
-import type { SessionMessageGap } from './messageGaps';
+import { findMessageGaps, type SessionMessageGap } from './messageGaps';
 import { MAX_CACHED_MESSAGES } from './cache/limits';
 import { preloadSessionsListCache, loadSessionsListCache, saveSessionsListCache, clearSessionsListCache } from './cache/sessionsListCache';
 import { olderAfterSeq } from './cacheSegment';
@@ -4285,6 +4285,13 @@ class Sync {
 
                 log.log(`💬 fetchOlderMessages: got ${normalizedMessages.length} older messages for ${sessionId}, newOldestSeq=${newOldestSeq}, hasMore=${newHasOlderMessages}`);
 
+                if (normalizedMessages.length > 1) {
+                    const gaps = findMessageGaps(normalizedMessages);
+                    if (gaps.length > 0) {
+                        this.backfillMessageGaps(sessionId, gaps);
+                    }
+                }
+
                 storage.getState().applyOlderMessages(sessionId, normalizedMessages, newOldestSeq, newHasOlderMessages);
 
                 // Persist updated cache, with the window this page established.
@@ -4412,6 +4419,12 @@ class Sync {
                     return;
                 }
                 this.daemonLinks.set(sessionId, { ...link, older: read.older, hasOlder: read.hasOlder });
+                if (read.messages.length > 1) {
+                    const gaps = findMessageGaps(read.messages);
+                    if (gaps.length > 0) {
+                        this.backfillMessageGaps(sessionId, gaps);
+                    }
+                }
                 const oldestSeq = read.messages.length > 0
                     ? minSeqOf(read.messages)
                     : getSessionMessages(sessionId)?.oldestSeq ?? 0;
@@ -8186,6 +8199,16 @@ class Sync {
             this.lanSessionKeys.set(sessionId, read.sessionKey);
             void this.encryption.initializeSessions(new Map([[sessionId, read.sessionKey]]));
         }
+        // A page is a contiguous run of the writer's records, not of the display window: the
+        // window is bounded and routes sub-agent messages to their own streams, so holes in it are
+        // expected. A hole *inside one page* is a record that did not arrive, and it is checked
+        // here on what the channel actually sent.
+        if (read.messages.length > 1) {
+            const gaps = findMessageGaps(read.messages);
+            if (gaps.length > 0) {
+                this.backfillMessageGaps(sessionId, gaps);
+            }
+        }
         // The producer mints the localId and every channel carries it; an echo that arrives without
         // one is the same message sent earlier from this device, and must not become a second
         // identity. The server path already re-attaches it — this is the same rule here.
@@ -8242,9 +8265,6 @@ class Sync {
 
     private applyMessages = (sessionId: string, messages: NormalizedMessage[]) => {
         const result = storage.getState().applyMessages(sessionId, messages);
-        if (result.gaps.length > 0) {
-            this.backfillMessageGaps(sessionId, result.gaps);
-        }
         let m: Message[] = [];
         for (let messageId of result.changed) {
             const message = getSessionMessages(sessionId)?.messagesMap[messageId];
