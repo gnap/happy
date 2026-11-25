@@ -447,16 +447,47 @@ describe('sessionLogIdentity', () => {
         expect(sessionLogIdentity({ role: 'session', content: { id: 'e' } })).toEqual({});
         expect(sessionLogIdentity('ciphertext')).toEqual({});
     });
+
+    it('mirrors the writer stamp from a session envelope', () => {
+        expect(sessionLogIdentity({
+            role: 'session',
+            content: { id: 'e', sid: 'tag-1', site: 'machine-1', n: 7 },
+        })).toEqual({ site: 'machine-1', n: 7 });
+    });
+
+    it('mirrors the writer stamp from an agent record, even when it carries a data object', () => {
+        // The legacy agent shapes keep `(sid, site, n)` on `content` beside `data`; reading only
+        // `data` would miss the stamp on every cursor event.
+        expect(sessionLogIdentity({
+            role: 'agent',
+            content: { id: 'e', type: 'event', data: { text: 'x' }, site: 'machine-1', n: 9 },
+        })).toEqual({ site: 'machine-1', n: 9 });
+    });
+
+    it('ignores a counter that is not a non-negative integer', () => {
+        expect(sessionLogIdentity({ role: 'session', content: { site: 'm', n: -1 } })).toEqual({ site: 'm' });
+        expect(sessionLogIdentity({ role: 'session', content: { site: 'm', n: 1.5 } })).toEqual({ site: 'm' });
+    });
 });
 
 describe('collapseSessionLogEntries tags', () => {
-    it('keeps the sub-agent tag from the copy it drops', () => {
-        // The outbound copy is the only one whose plaintext carried the id; the echo is preferred
-        // because it has the server id, and it must not erase what it could not know.
-        const outbound = { ...entry(1), subagent: 'a', taskCall: 'call-a' };
+    it('keeps the stream identity from the copy it drops', () => {
+        // The outbound copy is the only one whose plaintext carried the id and the writer stamp;
+        // the echo is preferred because it has the server id, and it must not erase what it could
+        // not know.
+        const outbound = { ...entry(1), subagent: 'a', taskCall: 'call-a', site: 'machine-1', n: 3 };
         const echo = { ...entry(2, 'in'), localId: outbound.localId, id: 'server-1' };
         expect(collapseSessionLogEntries([outbound, echo])).toEqual([
-            { ...echo, subagent: 'a', taskCall: 'call-a' },
+            { ...echo, subagent: 'a', taskCall: 'call-a', site: 'machine-1', n: 3 },
         ]);
+    });
+});
+
+describe('writer stamp mirror', () => {
+    it('keeps site and n beside the ciphertext through a write and a read', () => {
+        const tag = tagFor('stamp-mirror');
+        appendSessionLog(tag, SITE, { ...entry(1), site: 'machine-1', n: 4 });
+
+        expect(readSessionLog(tag, SITE)).toEqual([{ ...entry(1), site: 'machine-1', n: 4 }]);
     });
 });
