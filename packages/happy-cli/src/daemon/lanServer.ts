@@ -290,7 +290,22 @@ export type LanServerOptions = {
    * the CLI owns the tag. A client that knows only the tag can still read, which is what keeps
    * a session reachable while it is waiting for the server.
    */
-  getHistory: (address: LanSessionAddress, query: { since?: string; before?: string; maxEntries?: number; subagent?: string }) => LanHistory | null;
+  getHistory: (address: LanSessionAddress, query: {
+    since?: string;
+    before?: string;
+    maxEntries?: number;
+    subagent?: string;
+    /**
+     * A bounded repair by the log's own coordinates: the writer's stream, counters `[fromN, toN]`.
+     *
+     * This is the off-server addressing. The machine filters its plaintext `(site, n)` mirror, so
+     * a reader that knows what it is missing neither needs the server's sequence nor decrypts a
+     * page to find out. When present, the page fields (`cursor`, `hasOlder`) do not apply.
+     */
+    site?: string;
+    fromN?: number;
+    toN?: number;
+  }) => LanHistory | null;
   /**
    * The sub-agent streams this machine's log holds for a session, or null when it has none.
    *
@@ -773,6 +788,30 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
   });
 
   /**
+   * The bounded-repair coordinates a history request names, when it names any.
+   *
+   * `undefined` is "no range, read a page"; `null` is a range this route cannot serve — a half
+   * specification or a number that is not a counter. Falling back to a page for the second case
+   * would answer a different question than the one asked, so the route refuses instead.
+   */
+  const rangeQuery = (
+    query: { site?: string; from_n?: string; to_n?: string },
+  ): { site: string; fromN: number; toN: number } | null | undefined => {
+    if (query.site === undefined && query.from_n === undefined && query.to_n === undefined) {
+      return undefined;
+    }
+    if (typeof query.site !== 'string' || query.site.length === 0) {
+      return null;
+    }
+    const fromN = Number.parseInt(query.from_n ?? '', 10);
+    const toN = Number.parseInt(query.to_n ?? '', 10);
+    if (!Number.isInteger(fromN) || !Number.isInteger(toN) || fromN < 0 || toN < fromN) {
+      return null;
+    }
+    return { site: query.site, fromN, toN };
+  };
+
+  /**
    * The same history, addressed by the tag the CLI owns rather than the id the server issued.
    *
    * This is what keeps a session reachable while it is waiting out a server stall: it has a tag
@@ -784,12 +823,23 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       return reply.code(401).send({ error: 'unauthorized' });
     }
     const { tag } = request.params as { tag: string };
-    const { since, before, subagent } = request.query as { since?: string; before?: string; subagent?: string };
+    const { since, before, subagent, site, from_n, to_n } = request.query as {
+      since?: string;
+      before?: string;
+      subagent?: string;
+      site?: string;
+      from_n?: string;
+      to_n?: string;
+    };
     const { limit } = request.query as { limit?: string };
     const maxEntries = limit !== undefined
       ? Math.min(500, Math.max(1, Number.parseInt(limit, 10) || 0)) || undefined
       : undefined;
-    const history = opts.getHistory({ tag }, { since, before, maxEntries, subagent });
+    const range = rangeQuery({ site, from_n, to_n });
+    if (range === null) {
+      return reply.code(400).send({ error: 'site, from_n and to_n must name one writer range' });
+    }
+    const history = opts.getHistory({ tag }, { since, before, maxEntries, subagent, ...range });
     if (!history) {
       logger.debug(`[lan] history 404 tag=${tag} since=${since ?? '-'} before=${before ?? '-'} subagent=${subagent ?? '-'}`);
       return reply.code(404).send({ error: 'no local history for that tag' });
@@ -1162,9 +1212,21 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     const { sessionId } = request.params as { sessionId: string };
     // No anchor at all means "the newest page": a reader that has just opened a session wants the
     // end of the log, not the beginning.
-    const { since, before, limit, subagent } = request.query as { since?: string; before?: string; limit?: string; subagent?: string };
+    const { since, before, limit, subagent, site, from_n, to_n } = request.query as {
+      since?: string;
+      before?: string;
+      limit?: string;
+      subagent?: string;
+      site?: string;
+      from_n?: string;
+      to_n?: string;
+    };
     const maxEntries = limit !== undefined ? Math.min(500, Math.max(1, Number.parseInt(limit, 10) || 0)) || undefined : undefined;
-    const history = opts.getHistory({ sessionId }, { since, before, maxEntries, subagent });
+    const range = rangeQuery({ site, from_n, to_n });
+    if (range === null) {
+      return reply.code(400).send({ error: 'site, from_n and to_n must name one writer range' });
+    }
+    const history = opts.getHistory({ sessionId }, { since, before, maxEntries, subagent, ...range });
     if (!history) {
       // 404 rather than an empty list: the client should retry later, not record "no history".
       logger.debug(`[lan] history 404 ${sessionId} since=${since ?? '-'} before=${before ?? '-'} subagent=${subagent ?? '-'}`);
