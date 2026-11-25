@@ -3,7 +3,7 @@ import React from "react";
 import { ApiClient } from '@/api/api';
 import { CodexAppServerClient } from './codexAppServerClient';
 import { readProfileCodexConfig, writeProfileCodexHome } from './profileCodexHome';
-import { codexModelOptions, currentTierCode, resolveCodexModel, resolveCodexModelIfExplicit } from './modelTiers';
+import { codexModelOptions, currentTierCode, resolveCodexModel } from './modelTiers';
 import { configuration } from '@/configuration';
 import { CodexPermissionHandler } from './utils/permissionHandler';
 import { ReasoningProcessor } from './utils/reasoningProcessor';
@@ -765,11 +765,11 @@ export async function runCodex(opts: {
                     }
                 }
 
-                // With a ChatGPT login the reachable models are the plan's, not the tier table's
-                // defaults: send only a model a person named, otherwise let Codex choose.
-                const model = readProfileCodexConfig(process.env)?.auth
-                    ? resolveCodexModelIfExplicit(message.mode.model)
-                    : resolveCodexModel(message.mode.model);
+                // The tier keys the App offers name the plan's own models: `model/list` on a
+                // ChatGPT login returns gpt-6.2-sol / gpt-6.2-astra / gpt-6.1-terra — the same
+                // slugs this table maps to. Sending the selected tier is what lets a person move
+                // off a model the backend says is at capacity.
+                const model = resolveCodexModel(message.mode.model);
                 publishModelCatalog(message.mode.model);
 
                 if (!client.hasActiveThread()) {
