@@ -173,6 +173,15 @@ export type LanSessionLogEntry = {
     subagent?: string;
     /** The tool call that started that sub-agent. */
     taskCall?: string;
+    /**
+     * The writer's identity and counter, mirrored beside the ciphertext.
+     *
+     * `(site, n)` is also inside the ciphertext; this copy is what makes a gap detectable while
+     * paging a stream without decrypting the page. A missing counter within one `site` is the
+     * signal, and it is only actionable when the surrounding entries carry one.
+     */
+    site?: string;
+    n?: number;
 };
 
 /** One sub-agent stream this machine's log holds for a session. */

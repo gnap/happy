@@ -6676,7 +6676,9 @@ class Sync {
         const byKey = new Map<string, { summary: LanSessionSummary; machineId: string; via: DaemonRoute }>();
         for (const answer of fresh) {
             for (const summary of answer.sessions) {
-                const key = summary.happySessionId ?? summary.tag;
+                // The uid is the public name a scheduled row has before the server issues an id;
+                // the tag is the fallback for a machine that predates publishing one.
+                const key = summary.happySessionId ?? summary.sessionUid ?? summary.tag;
                 if (!key) continue;
                 byKey.set(key, preferDaemonSessionAnswer(byKey.get(key), {
                     summary,
