@@ -264,7 +264,7 @@ export type ReviewDecision =
 
 // --- Shared enums ---
 
-export type ApprovalPolicy = "untrusted" | "on-failure" | "on-request" | "never";
+export type ApprovalPolicy = "untrusted" | "on-request" | "granular" | "never";
 export type SandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 // Mirrors codex-rs `protocol/src/openai_models.rs` ReasoningEffort. `max` and
 // `ultra` are on the wire and in the model registry — gpt-5.6 sol/terra list
