@@ -57,6 +57,16 @@ const BODY_LIMIT_BYTES = 4096;
  */
 const CONTROL_BODY_LIMIT_BYTES = 256 * 1024;
 
+/**
+ * The restart route's ceiling.
+ *
+ * It carries the caller's profile environment, and a Codex login's `auth.json` is kilobytes of
+ * base64; the global 4KB is enough for a nonce, not for a credential. Like the control route, this
+ * one is behind a token and an account proof before its body is parsed, so the larger ceiling is
+ * about size. The caller treats a 413 as this machine refusing the restart, which it is not.
+ */
+const RESTART_BODY_LIMIT_BYTES = 256 * 1024;
+
 const PROOF_CONTEXT = 'v1.proof';
 const TOKEN_CONTEXT = 'v1.token';
 
@@ -790,7 +800,7 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
    * tell "this machine says no" from "this machine cannot be asked": the second is what sends it
    * to the server instead, and a refusal must not read as a reason to ask someone else.
    */
-  app.post('/lan/sessions/:sessionId/restart', async (request, reply) => {
+  app.post('/lan/sessions/:sessionId/restart', { bodyLimit: RESTART_BODY_LIMIT_BYTES }, async (request, reply) => {
     if (!requireToken(request)) {
       return reply.code(401).send({ error: 'unauthorized' });
     }
