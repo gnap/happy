@@ -31,7 +31,7 @@ import { InvalidateSync } from '@/utils/sync';
 import axios from 'axios';
 import { resolveSessionLastSeq } from './sessionLastSeq';
 import { loadOutbox, outboxPath, pruneOutboxes, saveOutbox } from './outboxPersistence';
-import { appendSessionLog, pruneSessionLogs, sessionLogDir, type SessionLogEntry } from './sessionLog';
+import { appendSessionLog, pruneSessionLogs, sessionLogDir, sessionLogIdentity, type SessionLogEntry } from './sessionLog';
 import { rememberSessionMetadata } from './sessionBinding';
 import {
     buildAgentMessagePayload,
@@ -354,6 +354,15 @@ export class ApiSessionClient extends EventEmitter {
     private serverMetadataReceived = false;
     private routedMessageIds = new Set<string>();
     private routedA2ASessionEnvelopeIds = new Set<string>();
+    /**
+     * The sub-agent identity of a message this session wrote, by local id.
+     *
+     * The outbound entry can be stamped from the plaintext envelope; the server's echo of it is
+     * only ciphertext, so the same id is looked up here when the `in` copy is logged. Bounded:
+     * an echo arrives within seconds, and an id older than a couple of thousand writes is one
+     * the log will simply carry untagged.
+     */
+    private logIdentityByLocalId = new Map<string, { subagent?: string; taskCall?: string }>();
     /** Trigger ids already drained; blocks fetch/reconnect replay from re-opening the inbox. */
     private consumedA2ATriggerIds = new Set<string>();
     private a2aInboxStateSyncTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1086,6 +1095,7 @@ export class ApiSessionClient extends EventEmitter {
                 dir: 'in',
                 at: Date.now(),
                 c: incoming.ct,
+                ...(incoming.localId ? this.logIdentityByLocalId.get(incoming.localId) ?? {} : {}),
             }));
             this.announceLogGrowth();
         }
@@ -1773,6 +1783,20 @@ export class ApiSessionClient extends EventEmitter {
             content: encrypted,
             localId: resolvedLocalId
         });
+        // The sub-agent id is plaintext metadata for the log only: the reader pages a sub-agent's
+        // stream separately, and the daemon cannot filter by a value that exists only inside the
+        // ciphertext. Remembered by local id so the server's echo of this message — which carries
+        // none of the plaintext — is stamped with the same tag when it is logged below.
+        const identity = sessionLogIdentity(content);
+        if (identity.subagent !== undefined || identity.taskCall !== undefined) {
+            this.logIdentityByLocalId.set(resolvedLocalId, identity);
+            if (this.logIdentityByLocalId.size > 2048) {
+                const oldest = this.logIdentityByLocalId.keys().next().value;
+                if (oldest !== undefined) {
+                    this.logIdentityByLocalId.delete(oldest);
+                }
+            }
+        }
         // Built once and handed to both stores, so a LAN reader can never be given an entry that
         // differs from the one on disk — including its timestamp.
         const entry: SessionLogEntry = {
@@ -1781,6 +1805,7 @@ export class ApiSessionClient extends EventEmitter {
             dir: 'out',
             at: Date.now(),
             c: encrypted,
+            ...identity,
         };
         // Same synchronous block and the same ciphertext string as the outbox push, so the two
         // stores can never disagree about what the bytes were.
