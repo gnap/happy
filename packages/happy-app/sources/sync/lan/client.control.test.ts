@@ -53,6 +53,15 @@ describe('sessionControlAt', () => {
 });
 
 describe('deleteSessionAt', () => {
+    it('tells the machine which client version is calling', async () => {
+        // Plaintext observation, so a machine can say whether a legacy route is still in use.
+        const calls = stub({ status: 200 });
+        await deleteSessionAt(base, 't1', 'sess-1');
+        const version = calls[0].init.headers['x-happy-client-version'];
+        expect(typeof version).toBe('string');
+        expect(version.length).toBeGreaterThan(0);
+    });
+
     it('posts the deletion to the canonical route, with the account proof it was given', async () => {
         const calls = stub({ status: 200 });
         expect(await deleteSessionAt(base, 't1', 'sess-1', { 'x-happy-proof-signature': 'sig' })).toBe(true);
