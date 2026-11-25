@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, Pressable, ScrollView, TextInput, ViewStyle, Linking, Platform } from 'react-native';
+import { ActivityIndicator, View, Text, Pressable, ScrollView, TextInput, ViewStyle, Linking, Platform } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 import { Typography } from '@/constants/Typography';
@@ -15,6 +15,46 @@ import { EnvironmentVariablesList } from '@/components/EnvironmentVariablesList'
 import { Switch } from '@/components/Switch';
 import { useAllMachines } from '@/sync/storage';
 import { collectProxyRoutes, DIRECT_ROUTE } from '@/sync/proxyRoutes';
+import { isRunningInTauri } from '@/utils/platform';
+import {
+    codexLoginCancel,
+    codexLoginCloseWindow,
+    codexLoginFinish,
+    codexLoginOpenWindow,
+    codexLoginPreflight,
+    codexLoginStart,
+} from '@/sync/codexLogin';
+
+/**
+ * Who the login belongs to, for the status line only.
+ *
+ * The access token is a JWT and carries the account and plan; decoding it here is a display
+ * convenience, never a verification — the profile stores the file and Codex decides whether it is
+ * still good.
+ */
+function claimsOfCodexAuth(authJson: string): { accountId?: string; email?: string; planType?: string } {
+    try {
+        const tokens = JSON.parse(authJson)?.tokens as { account_id?: unknown; access_token?: unknown } | undefined;
+        const claims: { accountId?: string; email?: string; planType?: string } = {};
+        if (typeof tokens?.account_id === 'string' && tokens.account_id) claims.accountId = tokens.account_id;
+        if (typeof tokens?.access_token !== 'string') return claims;
+        const encoded = tokens.access_token.split('.')[1];
+        if (!encoded) return claims;
+        const normalized = encoded.replace(/-/g, '+').replace(/_/g, '/');
+        const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+        const payload = JSON.parse(atob(padded)) as {
+            email?: unknown;
+            'https://api.openai.com/auth'?: { chatgpt_account_id?: unknown; chatgpt_plan_type?: unknown };
+        };
+        if (typeof payload.email === 'string') claims.email = payload.email;
+        const auth = payload['https://api.openai.com/auth'];
+        if (typeof auth?.chatgpt_account_id === 'string') claims.accountId ??= auth.chatgpt_account_id;
+        if (typeof auth?.chatgpt_plan_type === 'string') claims.planType = auth.chatgpt_plan_type;
+        return claims;
+    } catch {
+        return {};
+    }
+}
 
 export interface ProfileEditFormProps {
     profile: AIBackendProfile;
@@ -84,15 +124,90 @@ export function ProfileEditForm({
     // The list stays collapsed until asked for: it is a choice, not a menu to read every time.
     const [routePickerOpen, setRoutePickerOpen] = React.useState(false);
 
+    // A ChatGPT login is the alternative to an endpoint: one credential file instead of a URL and
+    // key. The sign-in runs in the desktop app because only it can put the provider's page and the
+    // CLI on the same route out of this machine.
+    const [codexAuth, setCodexAuth] = React.useState(profile.codexConfig?.auth);
+    const [codexAuthMethod, setCodexAuthMethod] = React.useState<'apiKey' | 'chatgpt'>(
+        profile.codexConfig?.auth ? 'chatgpt' : 'apiKey',
+    );
+    const [codexAuthMethodOpen, setCodexAuthMethodOpen] = React.useState(false);
+    const [codexLogin, setCodexLogin] = React.useState<{
+        phase: 'idle' | 'starting' | 'waiting' | 'error';
+        code?: string;
+        message?: string;
+    }>({ phase: 'idle' });
+    const codexLoginCancelled = React.useRef(false);
+    const canSignInToCodex = Platform.OS === 'web' && isRunningInTauri();
+
+    const cancelCodexLogin = React.useCallback(async () => {
+        codexLoginCancelled.current = true;
+        await codexLoginCancel().catch(() => {});
+        await codexLoginCloseWindow().catch(() => {});
+        setCodexLogin({ phase: 'idle' });
+    }, []);
+
+    const startCodexLogin = React.useCallback(async () => {
+        if (codexLogin.phase === 'starting' || codexLogin.phase === 'waiting') return;
+        codexLoginCancelled.current = false;
+        setCodexLogin({ phase: 'starting' });
+        // The route is the whole safety story here: the CLI's polling and the page must leave this
+        // machine the same way, or the account looks like it is being used from two places at once.
+        const route = proxyRoute.trim() || DIRECT_ROUTE;
+        try {
+            const preflight = await codexLoginPreflight(route);
+            if (!preflight.ok) {
+                setCodexLogin({ phase: 'error', message: preflight.error ?? t('profiles.codexLoginFailed') });
+                return;
+            }
+            const started = await codexLoginStart(route);
+            if (codexLoginCancelled.current) {
+                await codexLoginCancel().catch(() => {});
+                return;
+            }
+            setCodexLogin({ phase: 'waiting', code: started.code });
+            await codexLoginOpenWindow(started.url, started.proxyUrl, started.code);
+            const result = await codexLoginFinish();
+            if (codexLoginCancelled.current) return;
+            setCodexAuth({
+                authJson: result.authJson,
+                savedAt: result.savedAt,
+                ...claimsOfCodexAuth(result.authJson),
+            });
+            setCodexLogin({ phase: 'idle' });
+        } catch (error) {
+            if (codexLoginCancelled.current) {
+                setCodexLogin({ phase: 'idle' });
+                return;
+            }
+            // A failure after the CLI started (the page would not open, the wait broke) must not
+            // leave it polling behind a dialog nobody can complete.
+            await codexLoginCancel().catch(() => {});
+            setCodexLogin({
+                phase: 'error',
+                message: error instanceof Error ? error.message : String(error),
+            });
+        } finally {
+            await codexLoginCloseWindow().catch(() => {});
+        }
+    }, [codexLogin.phase, proxyRoute]);
+
     const handleSave = () => {
         if (!name.trim()) return;
         const route = proxyRoute.trim();
         // The endpoint belongs to the agent that reads it. Switching a profile to another agent
         // drops it rather than leaving a key behind that nothing will ever use.
-        const codexConfig = agent === 'codex' && (codexBaseUrl.trim() || codexApiKey.trim() || codexModel.trim())
+        // The selected method decides what is stored: a login file, or an endpoint and key. The
+        // other one is dropped, so a profile never carries two credentials that disagree.
+        const storedAuth = codexAuthMethod === 'chatgpt' ? codexAuth : undefined;
+        const codexConfig = agent === 'codex' && (storedAuth || codexBaseUrl.trim() || codexApiKey.trim() || codexModel.trim())
             ? {
-                ...(codexBaseUrl.trim() ? { baseUrl: codexBaseUrl.trim() } : {}),
-                ...(codexApiKey.trim() ? { apiKey: codexApiKey.trim() } : {}),
+                ...(storedAuth
+                    ? { auth: storedAuth }
+                    : {
+                        ...(codexBaseUrl.trim() ? { baseUrl: codexBaseUrl.trim() } : {}),
+                        ...(codexApiKey.trim() ? { apiKey: codexApiKey.trim() } : {}),
+                    }),
                 ...(codexModel.trim() ? { model: codexModel.trim() } : {}),
             }
             : undefined;
@@ -208,7 +323,7 @@ export function ProfileEditForm({
                     </View>
                 )}
 
-                {/* Codex endpoint — the home is managed by Happy, so only the endpoint is asked for */}
+                {/* Codex credential — a ChatGPT login or an endpoint; the home is managed by Happy */}
                 {!profile.isBuiltIn && agent === 'codex' && (
                     <View>
                         <Text style={formStyles.sectionTitle}>
@@ -218,26 +333,141 @@ export function ProfileEditForm({
                             {t('profiles.codexConfigDescription')}
                         </Text>
                         <View style={{ height: 8 }} />
-                        <Text style={formStyles.sectionTitle}>{t('profiles.baseURL')}</Text>
-                        <TextInput
-                            style={formStyles.textInput}
-                            value={codexBaseUrl}
-                            onChangeText={setCodexBaseUrl}
-                            autoCapitalize="none"
-                            autoCorrect={false}
-                            keyboardType="url"
-                        />
-                        <Text style={formStyles.sectionTitle}>{t('profiles.authToken')}</Text>
-                        <TextInput
-                            style={formStyles.textInput}
-                            value={codexApiKey}
-                            onChangeText={setCodexApiKey}
-                            placeholder={t('profiles.enterToken')}
-                            placeholderTextColor={theme.colors.input.placeholder}
-                            autoCapitalize="none"
-                            autoCorrect={false}
-                            secureTextEntry
-                        />
+
+                        <Text style={formStyles.sectionTitle}>{t('profiles.codexAuthMethod')}</Text>
+                        <Text style={formStyles.switchDescription}>{t('profiles.codexAuthMethodDescription')}</Text>
+                        <View style={formStyles.routeFieldBlock}>
+                            <Pressable
+                                style={formStyles.routeField}
+                                onPress={() => setCodexAuthMethodOpen((open) => !open)}
+                            >
+                                <Text style={formStyles.routeFieldText}>
+                                    {codexAuthMethod === 'chatgpt'
+                                        ? t('profiles.codexAuthMethodChatGPT')
+                                        : t('profiles.codexAuthMethodApiKey')}
+                                </Text>
+                                <Ionicons
+                                    name={codexAuthMethodOpen ? 'chevron-up' : 'chevron-down'}
+                                    size={18}
+                                    color={theme.colors.textSecondary}
+                                />
+                            </Pressable>
+                            {codexAuthMethodOpen && (
+                                <View style={formStyles.routeList}>
+                                    {(['apiKey', 'chatgpt'] as const).map((method) => {
+                                        const selected = codexAuthMethod === method;
+                                        return (
+                                            <Pressable
+                                                key={method}
+                                                style={[formStyles.routeOption, selected && formStyles.routeOptionActive]}
+                                                onPress={() => {
+                                                    setCodexAuthMethod(method);
+                                                    setCodexAuthMethodOpen(false);
+                                                }}
+                                            >
+                                                <Text style={formStyles.routeOptionText}>
+                                                    {method === 'chatgpt'
+                                                        ? t('profiles.codexAuthMethodChatGPT')
+                                                        : t('profiles.codexAuthMethodApiKey')}
+                                                </Text>
+                                                {selected && (
+                                                    <Ionicons name="checkmark" size={18} color={theme.colors.button.primary.tint} />
+                                                )}
+                                            </Pressable>
+                                        );
+                                    })}
+                                </View>
+                            )}
+                        </View>
+
+                        {codexAuthMethod === 'chatgpt' ? (
+                            canSignInToCodex ? (
+                            <View style={formStyles.codexAuthBox}>
+                                {codexAuth ? (
+                                    <>
+                                        <Text style={formStyles.codexAuthText}>{t('profiles.codexSignedIn')}</Text>
+                                        {(codexAuth.email || codexAuth.planType) && (
+                                            <Text style={formStyles.codexAuthText}>
+                                                {[codexAuth.email, codexAuth.planType].filter(Boolean).join(' · ')}
+                                            </Text>
+                                        )}
+                                        <View style={{ height: 8 }} />
+                                        <Pressable
+                                            style={formStyles.codexAuthButton}
+                                            onPress={() => setCodexAuth(undefined)}
+                                        >
+                                            <Ionicons name="log-out-outline" size={16} color={theme.colors.button.primary.tint} />
+                                            <Text style={formStyles.codexAuthButtonText}>{t('profiles.codexSignOut')}</Text>
+                                        </Pressable>
+                                    </>
+                                ) : codexLogin.phase === 'waiting' ? (
+                                    <>
+                                        <Text style={formStyles.codexAuthText}>{t('profiles.codexEnterCode')}</Text>
+                                        {codexLogin.code && <Text style={formStyles.codexAuthCode}>{codexLogin.code}</Text>}
+                                        <Text style={formStyles.codexAuthText}>{t('profiles.codexWaiting')}</Text>
+                                        <View style={{ height: 8 }} />
+                                        <Pressable
+                                            style={formStyles.codexAuthButton}
+                                            onPress={async () => { await cancelCodexLogin(); }}
+                                        >
+                                            <Ionicons name="close-outline" size={16} color={theme.colors.button.primary.tint} />
+                                            <Text style={formStyles.codexAuthButtonText}>{t('common.cancel')}</Text>
+                                        </Pressable>
+                                    </>
+                                ) : (
+                                    <>
+                                        <Text style={formStyles.codexAuthText}>{t('profiles.codexLoginDescription')}</Text>
+                                        <View style={{ height: 8 }} />
+                                        <Pressable
+                                            style={formStyles.codexAuthButton}
+                                            onPress={startCodexLogin}
+                                            disabled={codexLogin.phase === 'starting'}
+                                        >
+                                            {codexLogin.phase === 'starting'
+                                                ? <ActivityIndicator size="small" color={theme.colors.button.primary.tint} />
+                                                : <Ionicons name="log-in-outline" size={16} color={theme.colors.button.primary.tint} />}
+                                            <Text style={formStyles.codexAuthButtonText}>{t('profiles.codexSignIn')}</Text>
+                                        </Pressable>
+                                    </>
+                                )}
+                                {codexLogin.phase === 'error' && codexLogin.message && (
+                                    <Text style={formStyles.codexAuthError}>
+                                        {t('profiles.codexLoginFailed')}: {codexLogin.message}
+                                    </Text>
+                                )}
+                                {codexLogin.phase === 'error' && codexLogin.message?.includes('403') && (
+                                    <Text style={formStyles.codexAuthError}>
+                                        {t('profiles.codexLoginEgressBlocked')}
+                                    </Text>
+                                )}
+                            </View>
+                            ) : (
+                                <Text style={formStyles.switchDescription}>{t('profiles.codexDesktopOnly')}</Text>
+                            )
+                        ) : (
+                            <>
+                                <Text style={formStyles.sectionTitle}>{t('profiles.baseURL')}</Text>
+                                <TextInput
+                                    style={formStyles.textInput}
+                                    value={codexBaseUrl}
+                                    onChangeText={setCodexBaseUrl}
+                                    autoCapitalize="none"
+                                    autoCorrect={false}
+                                    keyboardType="url"
+                                />
+                                <Text style={formStyles.sectionTitle}>{t('profiles.authToken')}</Text>
+                                <TextInput
+                                    style={formStyles.textInput}
+                                    value={codexApiKey}
+                                    onChangeText={setCodexApiKey}
+                                    placeholder={t('profiles.enterToken')}
+                                    placeholderTextColor={theme.colors.input.placeholder}
+                                    autoCapitalize="none"
+                                    autoCorrect={false}
+                                    secureTextEntry
+                                />
+                            </>
+                        )}
                         <Text style={formStyles.sectionTitle}>{t('profiles.model')}</Text>
                         <TextInput
                             style={formStyles.textInput}
@@ -382,6 +612,48 @@ const formStyles = StyleSheet.create((theme) => ({
         marginBottom: theme.margins.md,
         borderWidth: 1,
         borderColor: theme.colors.textSecondary,
+    },
+    codexAuthBox: {
+        backgroundColor: theme.colors.surfaceHigh,
+        borderRadius: theme.borderRadius.md,
+        padding: theme.margins.sm,
+        marginBottom: theme.margins.md,
+        borderWidth: 1,
+        borderColor: theme.colors.textSecondary,
+    },
+    codexAuthText: {
+        fontSize: 13,
+        color: theme.colors.text,
+        lineHeight: 18,
+        ...Typography.default(),
+    },
+    codexAuthCode: {
+        fontSize: 20,
+        letterSpacing: 2,
+        color: theme.colors.text,
+        marginVertical: 6,
+        ...Typography.default('semiBold'),
+    },
+    codexAuthButton: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        alignSelf: 'flex-start',
+        gap: 6,
+        backgroundColor: theme.colors.button.primary.background,
+        borderRadius: theme.borderRadius.md,
+        paddingHorizontal: 12,
+        paddingVertical: 8,
+    },
+    codexAuthButtonText: {
+        fontSize: 13,
+        color: theme.colors.button.primary.tint,
+        ...Typography.default('semiBold'),
+    },
+    codexAuthError: {
+        fontSize: 12,
+        color: theme.colors.textDestructive,
+        marginTop: 8,
+        ...Typography.default(),
     },
     docsBox: {
         backgroundColor: theme.colors.surfaceHigh,

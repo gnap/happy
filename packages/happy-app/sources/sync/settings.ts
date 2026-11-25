@@ -1,4 +1,5 @@
 import * as z from 'zod';
+import { encodeBase64 } from '@/encryption/base64';
 
 //
 // Configuration Profile Schema (for environment variable profiles)
@@ -70,19 +71,28 @@ const TogetherAIConfigSchema = z.object({
     model: z.string().optional(),
 });
 
+/** The `auth.json` a ChatGPT sign-in produced, kept so sessions can use the login headlessly. */
+const CodexAuthSchema = z.object({
+    authJson: z.string().min(1),
+    savedAt: z.number(),
+    accountId: z.string().optional(),
+    email: z.string().optional(),
+    planType: z.string().optional(),
+});
+
 /**
- * A Codex endpoint, written the way a person thinks about it: a URL, a key, and optionally a
- * model.
+ * A Codex credential, written the way a person thinks about it: either an endpoint (URL, key,
+ * optional model) or a ChatGPT login.
  *
- * Codex itself reads these from a `config.toml` inside `CODEX_HOME`, not from environment
- * variables. The profile therefore states them as data, and Happy materialises a small managed
- * home for the session; the environment variables below are the wire between the two, not
- * something the user is meant to set by hand.
+ * Codex itself reads these from `CODEX_HOME`, not from environment variables. The profile states
+ * them as data, and Happy materialises a small managed home for the session; the environment
+ * variables below are the wire between the two, not something the user is meant to set by hand.
  */
 const CodexConfigSchema = z.object({
     baseUrl: z.string().optional(),
     apiKey: z.string().optional(),
     model: z.string().optional(),
+    auth: CodexAuthSchema.optional(),
 });
 
 // Tmux configuration schema
@@ -294,8 +304,18 @@ export function getProfileEnvironmentVariables(profile: AIBackendProfile): Recor
     // Codex endpoint. Generic names on the wire: the CLI reads them to write the session's
     // managed `$CODEX_HOME/config.toml`, and the key is what that config's provider points at.
     if (profile.codexConfig) {
-        if (profile.codexConfig.baseUrl) envVars.CODEX_BASE_URL = profile.codexConfig.baseUrl;
-        if (profile.codexConfig.apiKey) envVars.CODEX_API_KEY = profile.codexConfig.apiKey;
+        // A login is the whole credential and travels base64; an endpoint/key beside it would
+        // take Codex off the login, so only one of the two is ever sent.
+        if (profile.codexConfig.auth?.authJson) {
+            const raw = profile.codexConfig.auth.authJson;
+            const bytes = new Uint8Array(raw.length);
+            for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i) & 0xff;
+            envVars.CODEX_AUTH_JSON = encodeBase64(bytes);
+            envVars.CODEX_AUTH_SAVED_AT = String(profile.codexConfig.auth.savedAt);
+        } else {
+            if (profile.codexConfig.baseUrl) envVars.CODEX_BASE_URL = profile.codexConfig.baseUrl;
+            if (profile.codexConfig.apiKey) envVars.CODEX_API_KEY = profile.codexConfig.apiKey;
+        }
         if (profile.codexConfig.model) envVars.CODEX_MODEL = profile.codexConfig.model;
     }
 

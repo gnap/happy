@@ -83,6 +83,31 @@ export function resolveCodexModel(requested?: string | null): string {
     return modelForTier('sol');
 }
 
+/**
+ * The model to send when the account's own default should decide unless a person named one.
+ *
+ * A ChatGPT login has no tier-to-version table of its own: the models it can reach are the plan's,
+ * and the defaults in this file name builds from a different provider. So in that mode only an
+ * explicit choice — a real slug, or a tier whose `CODEX_MODEL_<TIER>` / `CODEX_MODEL` is set — is
+ * sent; otherwise the model is omitted and Codex picks its default.
+ */
+export function resolveCodexModelIfExplicit(requested?: string | null): string | undefined {
+    // A tier name alone means "this file's default build", which belongs to another provider; in a
+    // ChatGPT login it must not be sent unless the machine mapped that tier to a real model.
+    const defaultSlug = (): string | undefined => {
+        const configured = nonEmpty(process.env.CODEX_MODEL);
+        if (!configured || asTier(configured)) return undefined;
+        return configured;
+    };
+    const value = nonEmpty(requested);
+    if (value) {
+        const tier = asTier(value);
+        if (!tier) return value;
+        return nonEmpty(process.env[`CODEX_MODEL_${tier.toUpperCase()}`]) ?? defaultSlug();
+    }
+    return defaultSlug();
+}
+
 /** What the App's model picker shows: stable tier keys, display names, and descriptions. */
 export function codexModelOptions(): Array<{ code: string; value: string; description?: string }> {
     return CODEX_MODEL_TIERS.map((tier) => ({
