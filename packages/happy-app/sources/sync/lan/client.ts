@@ -549,6 +549,17 @@ export type RestartAsk = {
      * waits, so the request still works — it simply answers later.
      */
     expectAccepted?: boolean;
+    /**
+     * The profile's environment as it is *now*, sent with the ask.
+     *
+     * The daemon can recover the last user message's profile, but that is the profile as it was
+     * when the message was sent. A person edits a profile and restarts without sending anything;
+     * the restarted process would then boot with the old route or the old credentials until the
+     * next message. The caller that holds the current profile is the App, so it says so here.
+     */
+    environmentVariables?: Record<string, string>;
+    /** The profile's relay switch, for the same reason as the environment above. */
+    proxyViaRelay?: boolean;
 };
 
 /**
@@ -559,14 +570,28 @@ export type RestartAsk = {
  */
 export function restartAskBody(
     ask: RestartAsk | undefined
-): { requiresDesktop?: boolean; generation?: number; expect?: 'accepted' } | null {
+): {
+    requiresDesktop?: boolean;
+    generation?: number;
+    expect?: 'accepted';
+    environmentVariables?: Record<string, string>;
+    proxyViaRelay?: boolean;
+} | null {
     if (ask === undefined) {
         return null;
     }
-    const body: { requiresDesktop?: boolean; generation?: number; expect?: 'accepted' } = {
+    const body: {
+        requiresDesktop?: boolean;
+        generation?: number;
+        expect?: 'accepted';
+        environmentVariables?: Record<string, string>;
+        proxyViaRelay?: boolean;
+    } = {
         ...(ask.requiresDesktop !== undefined ? { requiresDesktop: ask.requiresDesktop } : {}),
         ...(ask.generation !== undefined ? { generation: ask.generation } : {}),
         ...(ask.expectAccepted ? { expect: 'accepted' as const } : {}),
+        ...(ask.environmentVariables !== undefined ? { environmentVariables: ask.environmentVariables } : {}),
+        ...(ask.proxyViaRelay !== undefined ? { proxyViaRelay: ask.proxyViaRelay } : {}),
     };
     return Object.keys(body).length > 0 ? body : null;
 }
