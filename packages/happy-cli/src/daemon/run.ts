@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import * as tmp from 'tmp';
 
 import { ApiClient } from '@/api/api';
-import { TrackedSession, type SessionLifecycleResult, type RestartSessionResult } from './types';
+import { TrackedSession, type SessionLifecycleResult, type RestartSessionResult, type RestartProfileAsk } from './types';
 import { MachineMetadata, DaemonState, Metadata } from '@/api/types';
 import { SpawnSessionOptions, SpawnSessionResult } from '@/modules/common/registerCommonHandlers';
 import { appendResumeAfterSeqCliArgs } from '@/utils/resumeAfterSeq';
@@ -2559,6 +2559,13 @@ export async function startDaemon(): Promise<void> {
        * outcome. The RPC route uses `accept` because waiting out a webhook exceeds its timeout.
        */
       mode: 'wait' | 'accept' = 'wait',
+      /**
+       * The profile the caller says the new process should boot with.
+       *
+       * The App is the only party holding the profile as it is *now*; the recovery below can only
+       * read the last user message, which predates a restart asked for right after an edit.
+       */
+      profile?: RestartProfileAsk,
     ): Promise<RestartSessionResult> => {
       // The id's generation as any of this machine's records know it. The store is written when a
       // spawn registers; the tracked process carries it earlier, and the disposed map later.
@@ -2683,7 +2690,7 @@ export async function startDaemon(): Promise<void> {
       // told "accepted" must not be answered before the machine has taken responsibility.
       const work = (async (): Promise<RestartSessionResult> => {
         try {
-          const result = await performRestart(sessionId, sandboxConfig, requiresDesktop, nextGeneration);
+          const result = await performRestart(sessionId, sandboxConfig, requiresDesktop, nextGeneration, profile);
           // Only a restart that happened arms the repeat window and moves the record: one that
           // failed has nothing for a repeat ask to be a repeat of, and a bumped generation would
           // make the retry look like it had already happened.
@@ -2768,7 +2775,7 @@ export async function startDaemon(): Promise<void> {
     };
 
     // Kill existing process and spawn a new one reconnecting to the same server session
-    const performRestart = async (sessionId: string, sandboxConfig?: any, requiresDesktop?: boolean, generation?: number): Promise<{ success: boolean; newSessionId?: string; generation?: number; error?: string }> => {
+    const performRestart = async (sessionId: string, sandboxConfig?: any, requiresDesktop?: boolean, generation?: number, profile?: RestartProfileAsk): Promise<{ success: boolean; newSessionId?: string; generation?: number; error?: string }> => {
       logger.debug(`[DAEMON RUN] Restart session: ${sessionId}`);
       const persistedState = await readDaemonState();
 
@@ -2869,10 +2876,16 @@ export async function startDaemon(): Promise<void> {
       // restart. Every value here is optional -- null just means the child spawns with the
       // daemon's baseline env and learns the profile from the next user message -- so giving
       // up early costs nothing that the unbounded wait was buying.
-      const recoveredProfile = await Promise.race([
-        fetchSessionProfileMeta(sessionId),
-        delay(PROFILE_META_DEADLINE_MS).then(() => null),
-      ]);
+      //
+      // The caller's own copy wins. A restart is asked for after an edit and before any message
+      // exists to carry the new environment; the last message would hand the child the old route
+      // and the old credentials, which is exactly the injection gap this closes.
+      const recoveredProfile = profile && (profile.environmentVariables !== undefined || profile.proxyViaRelay !== undefined)
+        ? profile
+        : await Promise.race([
+            fetchSessionProfileMeta(sessionId),
+            delay(PROFILE_META_DEADLINE_MS).then(() => null),
+          ]);
       // RPC-provided sandboxConfig takes priority; falls back to session metadata
       const perSessionSandbox = sandboxConfig ?? found.happySessionMetadataFromLocalWebhook?.sandbox ?? undefined;
       const result = await spawnSession({
