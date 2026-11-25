@@ -29,6 +29,7 @@ import { logger } from '@/ui/logger';
 import type { SessionLogEntry } from '@/api/sessionLog';
 import type { SessionLifecycleResult } from './types';
 import type { SessionCondition, SessionDesiredLifecycle, SessionDivergence, SessionPhase } from './sessionStatus';
+import { legacyLifecycleEnabled } from './legacySurface';
 
 /** How long an issued bearer token stays valid. Short because it travels over cleartext. */
 const TOKEN_TTL_MS = 90_000;
@@ -1051,6 +1052,11 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     if (!requireToken(request)) {
       return reply.code(401).send({ error: 'unauthorized' });
     }
+    if (!legacyLifecycleEnabled()) {
+      // Exactly what a build that never had the path would answer. The canonical v2 route is
+      // untouched; this is only the pre-v2 surface being switched off.
+      return reply.code(404).send({ error: 'this daemon does not serve the legacy archive route' });
+    }
     if (!opts.deleteSession) {
       return reply.code(404).send({ error: 'this daemon does not delete sessions' });
     }
@@ -1058,6 +1064,12 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     if (!requireAccountProof(request, { operation: 'archive', target: sessionId })) {
       return reply.code(403).send({ error: 'account proof required' });
     }
+    // A removal gate needs evidence, not a guess. The version arrives in the clear on every LAN
+    // request; this line is what says whether any current client still depends on the old path.
+    const legacyClient = typeof request.headers['x-happy-client-version'] === 'string'
+      ? String(request.headers['x-happy-client-version'])
+      : 'unknown';
+    logger.warn(`[lan] legacy archive route used for ${sessionId} by client ${legacyClient} from=${clientAddress(request)}`);
     const result = opts.deleteSession(sessionId);
     logger.debug(`[lan] delete (legacy archive path) ${sessionId} from=${clientAddress(request)} applied=${result.applied} known=${result.known}`);
     if (!result.applied) {
