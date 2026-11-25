@@ -23,6 +23,35 @@ import type { LanHistory, LanIdentity, LanSessionSummary, LanSubagentSummary } f
 /** A challenge is worthless once the daemon's nonce expires; don't hang on a wedged host. */
 const REQUEST_TIMEOUT_MS = 10_000;
 
+let resolvedClientVersion: string | null = null;
+
+/**
+ * The App's version, sent in the clear on every LAN request.
+ *
+ * Observation, not authorization: a machine logs which client used a legacy route, so a removal
+ * can be gated on evidence rather than a guess. Session metadata is ciphertext — the machine
+ * cannot read it — which is why this cannot ride there.
+ *
+ * Loaded lazily and defensively: this module also runs where the native Expo modules are not
+ * installed (tests, web tooling), and a version header must never be why a LAN request fails.
+ */
+function clientVersion(): string {
+    if (resolvedClientVersion !== null) {
+        return resolvedClientVersion;
+    }
+    try {
+        const Constants = require('expo-constants').default;
+        const version = Constants?.expoConfig?.version;
+        const build = Constants?.nativeBuildVersion
+            ?? Constants?.expoConfig?.ios?.buildNumber
+            ?? Constants?.expoConfig?.android?.versionCode;
+        resolvedClientVersion = `${version ?? 'unknown'}${build !== undefined && build !== null ? `-${build}` : ''}`;
+    } catch {
+        resolvedClientVersion = 'unknown';
+    }
+    return resolvedClientVersion;
+}
+
 /**
  * What a *read* through the public relay is allowed, where a read crosses three hops — this device
  * to the relay, the relay's own socket to the daemon, the daemon's server — and the daemon may be
@@ -83,6 +112,7 @@ async function request(
             signal: controller.signal,
             headers: {
                 ...(rest.headers ?? {}),
+                'x-happy-client-version': clientVersion(),
                 ...(token ? { authorization: `Bearer ${token}` } : {}),
             },
         });
