@@ -13,6 +13,7 @@ import { SpawnSessionOptions, SpawnSessionResult } from '@/modules/common/regist
 import type { RestartSessionResult } from './types';
 import { extractA2aText, extractA2aTitle } from '@/a2a/parse';
 import { sendA2aMessage } from './sendA2aMessage';
+import { legacyLifecycleEnabled } from './legacySurface';
 
 export function startDaemonControlServer({
   getChildren,
@@ -375,7 +376,10 @@ export function startDaemonControlServer({
       schema: {
         body: z.object({ sessionId: z.string() }),
         response: {
-          200: z.object({ success: z.boolean() })
+          200: z.object({ success: z.boolean() }),
+          // The legacy route answers this once its surface is switched off, exactly as a build
+          // that predates it would.
+          404: z.object({ error: z.string() }),
         }
       }
     } as const;
@@ -399,9 +403,14 @@ export function startDaemonControlServer({
     // The name the `happy daemon archive-session` command has always used. It has always meant a
     // deletion, so it stays one until that command is renamed; the route is the compatibility
     // surface, not a second operation.
-    typed.post('/archive-session', sessionActionBody, async (request) => {
+    typed.post('/archive-session', sessionActionBody, async (request, reply) => {
+      if (!legacyLifecycleEnabled()) {
+        return reply.code(404).send({ error: 'this daemon does not serve the legacy archive-session route' });
+      }
       const { sessionId } = request.body;
-      logger.debug(`[CONTROL SERVER] Delete session request (legacy archive-session route): ${sessionId}`);
+      // The command that has always used this route is local; there is no client version to read.
+      // A removal gate counts the line and treats it as "an old caller is still here".
+      logger.warn(`[CONTROL SERVER] Legacy archive-session route used (delete semantics): ${sessionId}`);
       const result = deleteSession(sessionId);
       return { success: result.applied };
     });

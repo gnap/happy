@@ -649,6 +649,46 @@ describe('lanServer read-only API', () => {
             expect(res.status).toBe(401);
             expect(deleted).toEqual([]);
         });
+
+        it('answers 404 when the legacy surface is switched off', async () => {
+            process.env.HAPPY_LEGACY_LIFECYCLE = '0';
+            try {
+                deleteHandler = (sessionId) => {
+                    deleted.push(sessionId);
+                    return { applied: true, known: true };
+                };
+                await start();
+                const token = await getToken();
+
+                const res = await fetch(url('/lan/sessions/sess-1/archive'), signed('/lan/sessions/sess-1/archive', { token }));
+
+                // Exactly what a build that never had the path answers; the handler is not called.
+                expect(res.status).toBe(404);
+                expect(deleted).toEqual([]);
+            } finally {
+                delete process.env.HAPPY_LEGACY_LIFECYCLE;
+            }
+        });
+
+        it('leaves the canonical path alone while the legacy surface is off', async () => {
+            process.env.HAPPY_LEGACY_LIFECYCLE = '0';
+            try {
+                deleteHandler = (sessionId) => {
+                    deleted.push(sessionId);
+                    return { applied: true, known: true };
+                };
+                await start();
+                const token = await getToken();
+
+                const path = '/lan/v2/sessions/sess-1/delete';
+                const res = await fetch(url(path), signed(path, { token }));
+
+                expect(res.status).toBe(200);
+                expect(deleted).toEqual(['sess-1']);
+            } finally {
+                delete process.env.HAPPY_LEGACY_LIFECYCLE;
+            }
+        });
     });
 
     describe('the v2 lifecycle routes', () => {

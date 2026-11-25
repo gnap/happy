@@ -16,6 +16,7 @@ import { localRouteNames } from '@/daemon/proxy/routes';
 import { isBun, isNode } from '@/utils/runtime';
 import { RpcHandlerManager } from './rpc/RpcHandlerManager';
 import type { SessionLifecycleResult, RestartSessionResult, RestartProfileAsk } from '../daemon/types';
+import { legacyLifecycleEnabled } from '../daemon/legacySurface';
 
 /** How long a best-effort daemon-state write may take before the caller moves on. */
 const DAEMON_STATE_WRITE_TIMEOUT_MS = 2000;
@@ -295,18 +296,26 @@ export class ApiMachineClient {
         });
 
         // The name older Apps call. It has always meant a deletion, so the compatibility surface
-        // is the RPC name, never a second operation behind it.
-        this.rpcHandlerManager.registerHandler('killSession', (params: any) => {
-            const { sessionId } = params || {};
+        // is the RPC name, never a second operation behind it. With the legacy surface switched
+        // off the method is simply not registered, which is what an older build of this daemon
+        // looked like too; `deleteSession` above is untouched.
+        if (legacyLifecycleEnabled()) {
+            this.rpcHandlerManager.registerHandler('killSession', (params: any) => {
+                const { sessionId } = params || {};
 
-            if (!sessionId) {
-                throw new Error('Session ID is required');
-            }
+                if (!sessionId) {
+                    throw new Error('Session ID is required');
+                }
 
-            const result = deleteSession(sessionId);
-            logger.debug(`[API MACHINE] killSession (legacy deleteSession): ${sessionId} — applied=${result.applied} known=${result.known}`);
-            return lifecycleAnswer(sessionId, 'delete', result);
-        });
+                // Reached over the server socket, whose params are ciphertext: the method name is
+                // all that is readable, so the client's version is unknown here. A removal gate
+                // counts this line by time, not by version.
+                logger.warn(`[API MACHINE] Legacy killSession RPC used (delete semantics): ${sessionId} — client version unknown`);
+                const result = deleteSession(sessionId);
+                logger.debug(`[API MACHINE] killSession (legacy deleteSession): ${sessionId} — applied=${result.applied} known=${result.known}`);
+                return lifecycleAnswer(sessionId, 'delete', result);
+            });
+        }
 
         this.rpcHandlerManager.registerHandler('archiveSession', (params: any) => {
             const { sessionId } = params || {};
