@@ -1,7 +1,7 @@
-import type { CodexSessionConfig } from './types';
+import type { ApprovalPolicy, SandboxMode } from './codexAppServerTypes';
 
-type CodexApprovalPolicy = NonNullable<CodexSessionConfig['approval-policy']>;
-type CodexSandboxMode = NonNullable<CodexSessionConfig['sandbox']>;
+type CodexApprovalPolicy = ApprovalPolicy;
+type CodexSandboxMode = SandboxMode;
 
 export function resolveCodexExecutionPolicy(
     permissionMode: import('@/api/types').PermissionMode,

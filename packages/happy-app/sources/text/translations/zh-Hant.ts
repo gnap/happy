@@ -514,6 +514,10 @@ export const zhHant: TranslationStructure = {
             auto: '自動',
         },
         codexModel: {
+            sol: 'Sol',
+            astra: 'Astra',
+            terra: 'Terra',
+            luna: 'Luna',
             title: 'CODEX 模型',
             gpt5CodexLow: 'gpt-5-codex low',
             gpt5CodexMedium: 'gpt-5-codex medium',

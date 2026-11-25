@@ -78,15 +78,20 @@ export function getClaudeModelModes(): ModelMode[] {
     ];
 }
 
+/**
+ * Codex model tiers, not model versions.
+ *
+ * Codex names a build by version (gpt-6.2-sol); that version moves. The stable choice is the
+ * tier, and the CLI maps it to the build configured on the machine (CODEX_MODEL_SOL, …), so a
+ * new Codex release does not need an App update. Active sessions get the same list from
+ * `metadata.models`, published by the CLI; this is the pre-session fallback.
+ */
 export function getCodexModelModes(translate: Translate): ModelMode[] {
     return [
-        { key: 'gpt-5-codex-high', name: translate('agentInput.codexModel.gpt5CodexHigh'), description: null },
-        { key: 'gpt-5-codex-medium', name: translate('agentInput.codexModel.gpt5CodexMedium'), description: null },
-        { key: 'gpt-5-codex-low', name: translate('agentInput.codexModel.gpt5CodexLow'), description: null },
-        { key: 'gpt-5-minimal', name: translate('agentInput.codexModel.gpt5Minimal'), description: null },
-        { key: 'gpt-5-low', name: translate('agentInput.codexModel.gpt5Low'), description: null },
-        { key: 'gpt-5-medium', name: translate('agentInput.codexModel.gpt5Medium'), description: null },
-        { key: 'gpt-5-high', name: translate('agentInput.codexModel.gpt5High'), description: null },
+        { key: 'sol', name: translate('agentInput.codexModel.sol'), description: null },
+        { key: 'astra', name: translate('agentInput.codexModel.astra'), description: null },
+        { key: 'terra', name: translate('agentInput.codexModel.terra'), description: null },
+        { key: 'luna', name: translate('agentInput.codexModel.luna'), description: null },
     ];
 }
 
@@ -277,7 +282,7 @@ export function resolveCurrentOption<T extends ModeOption>(
 
 export function getDefaultModelKey(flavor: AgentFlavor): string {
     if (flavor === 'codex') {
-        return 'gpt-5-codex-high';
+        return 'sol';
     }
     if (flavor === 'cursor' || flavor === 'cursor-acp' || flavor === 'acp-cursor') {
         return 'auto';
