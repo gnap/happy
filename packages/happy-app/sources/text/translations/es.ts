@@ -316,6 +316,9 @@ export const es: TranslationStructure = {
     session: {
         inputPlaceholder: 'Escriba un mensaje ...',
         peerMessage: 'De otra sesión de Claude',
+        subagents: "Subagentes",
+        subagentStream: "Subagente",
+        noSubagents: "Aún no hay subagentes",
         encrypting: 'estableciendo conexión…',
         backgroundTasks: 'Tareas en segundo plano',
         activityScheduled: 'Programado',
@@ -380,6 +383,7 @@ export const es: TranslationStructure = {
         failedToCopyMetadata: 'Falló al copiar metadatos',
         failedToKillSession: 'Falló al terminar sesión',
         failedToArchiveSession: 'Falló al archivar sesión',
+        archiveUnsupported: "La versión de esta máquina no admite archivar sesiones.",
         connectionStatus: 'Estado de conexión',
         channelAuto: 'Automático',
         channelServer: 'Servidor',

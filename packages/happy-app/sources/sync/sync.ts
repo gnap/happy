@@ -42,7 +42,7 @@ import { AsyncLock } from '@/utils/lock';
 import { voiceHooks } from '@/realtime/hooks/voiceHooks';
 import { Message } from './typesMessage';
 import { EncryptionCache } from './encryption/encryptionCache';
-import { fetchIdentity, LanRequestError, archiveSessionAt, deleteSessionAt, deleteSessionAtLegacy, restartAskBody, restartSessionAt, sessionControlAt, type LanRestartVerdict, type RestartAsk } from './lan/client';
+import { fetchIdentity, LanRequestError, archiveSessionAt, deleteSessionAt, deleteSessionAtLegacy, fetchSessionSubagents, restartAskBody, restartSessionAt, sessionControlAt, type LanRestartVerdict, type RestartAsk } from './lan/client';
 import { accountProofHeaders } from '@/auth/accountProof';
 import { getLanCredential } from './lan/credentials';
 import { readSessionOverLan, listSessionsOverLan, toNormalizedMessages, type LanConnection, type LanSessionRead } from './lan/sessionChannel';
@@ -69,7 +69,7 @@ import type { ChannelReason } from './channels/types';
 import { FetchSlots } from './fetchSlots';
 import { DaemonConnections, type DaemonTarget } from './lan/daemonConnections';
 import { judgeDaemonPage, pageMovedTheLog, planDaemonRead } from './lan/windowPlan';
-import type { DaemonRoute, LanSessionLogEntry, LanSessionSummary, SessionChannel } from './lan/types';
+import type { DaemonRoute, LanSessionLogEntry, LanSessionSummary, LanSubagentSummary, SessionChannel } from './lan/types';
 import { parseLanEndpoints, parseRelayEndpoint } from './lan/relay';
 import { fetchWithTimeout } from '@/utils/fetchWithTimeout';
 import { systemPrompt } from './prompt/systemPrompt';
@@ -521,6 +521,26 @@ class Sync {
     private lastSessionWakeAt = new Map<string, number>();
     /** How many times a single outgoing message has been answered with "no process". One retry. */
     private deliveryWakeAttempts = new Map<string, number>();
+    /**
+     * The newest roster revision heard from each machine.
+     *
+     * A listing is a snapshot, and two reads can overlap: the answer captured before a change can
+     * arrive after one that already includes it. The revision is the daemon's own counter (the
+     * lifecycle log's), so an answer below the last one seen is not a new fact — it is an older
+     * statement about the same machine, and applying it would move rows back to what they said
+     * before the change. It is skipped and asked for again instead.
+     */
+    private readonly lastRosterRevision = new Map<string, number>();
+    /**
+     * How many answers in a row from one machine came in below its last revision.
+     *
+     * The counter is meant to be monotonic, but a machine whose lifecycle log was recreated (or
+     * that was rebuilt with a fresh home) starts it over. Treating that as stale forever would
+     * mean never reading that machine again, so after a few consecutive older answers the lower
+     * number is accepted as the new baseline.
+     */
+    private readonly staleRosterAnswers = new Map<string, number>();
+    private static readonly ROSTER_STALE_ANSWER_LIMIT = 3;
     private static readonly SESSION_WAKE_WINDOW_MS = 20_000;
 
     /** How long a LAN send waits for the session's verdict before it is treated as lost. */
@@ -5302,6 +5322,54 @@ class Sync {
     private daemonVersionChecks = new Set<string>();
 
     /**
+     * The sub-agent streams the owning machine's log holds for a session.
+     *
+     * Asked of the machine, not the server: the server has no notion of a sub-agent stream, and a
+     * build that predates the split answers 404. Null covers both — the screen shows an empty list
+     * rather than an error, because there is nothing the person could do about either.
+     */
+    async listSessionSubagents(sessionId: string): Promise<LanSubagentSummary[] | null> {
+        const outcome = await this.carrySessionAction<LanSubagentSummary[]>(sessionId, {
+            operation: 'read',
+            path: `/lan/sessions/${encodeURIComponent(sessionId)}/subagents`,
+            run: (baseUrl, token) => fetchSessionSubagents(baseUrl, token, sessionId),
+        });
+        return outcome.kind === 'done' ? outcome.value : null;
+    }
+
+    /**
+     * One page of a sub-agent's own stream.
+     *
+     * The same read path as the main conversation, with the daemon filtering its log by the
+     * sub-agent id; the page's anchors are its own, so older pages of this stream are walked
+     * without touching the session's window. Null is "no page" for any reason, like the main read.
+     */
+    async readSubagentPage(
+        sessionId: string,
+        subagentId: string,
+        page: { kind: 'tail' } | { kind: 'follow'; cursor: string } | { kind: 'older'; before: string },
+    ): Promise<LanSessionRead | null> {
+        const machineId = getSession(sessionId)?.metadata?.machineId;
+        const machineKey = machineId ? this.getMachineKey(machineId) : null;
+        if (!machineId || !machineKey) {
+            return null;
+        }
+        const link = this.daemonLinks.get(sessionId);
+        const attempt = await readSessionOverLan({
+            sessionId,
+            machineId,
+            accountPublicKey: this.encryption.contentDataKey,
+            machineKey,
+            encryption: this.encryption,
+            page,
+            subagent: subagentId,
+            connection: link?.connection ?? this.lanMachineConnections.get(machineId),
+            candidates: this.readCandidates(machineId, this.readRoutes(sessionId, machineId)),
+        });
+        return attempt.kind === 'read' ? attempt.read : null;
+    }
+
+    /**
      * One read over whichever daemon route this session is on.
      *
      * Null is "this attempt produced no page", for any reason at all. Why is the daemon's own
@@ -6558,6 +6626,44 @@ class Sync {
             log.log('📡 fetchSessions: server unreachable, and no daemon answered on the LAN or the relay');
             return 0;
         }
+        // An answer is a snapshot at the daemon's revision. The same machine can be asked over
+        // two channels at once, and the slower answer may have been captured before the faster
+        // one; the counter is what tells them apart. Only answers at or above what this App has
+        // already seen are applied, and anything older is a reason to ask again — the daemon has
+        // already moved past the state it sent.
+        const fresh: typeof answers = [];
+        let staleAnswer = false;
+        for (const answer of answers) {
+            if (typeof answer.revision === 'number') {
+                const previous = this.lastRosterRevision.get(answer.machineId);
+                if (previous !== undefined && answer.revision < previous) {
+                    const strikes = (this.staleRosterAnswers.get(answer.machineId) ?? 0) + 1;
+                    if (strikes < Sync.ROSTER_STALE_ANSWER_LIMIT) {
+                        this.staleRosterAnswers.set(answer.machineId, strikes);
+                        staleAnswer = true;
+                        log.log(`📡 fetchSessions: ${answer.machineId} via ${answer.via} answered revision ${answer.revision}, older than ${previous}; skipping`);
+                        continue;
+                    }
+                    // The machine keeps answering below what this App heard: its log was recreated,
+                    // and holding the old counter would mean never reading it again. The lower
+                    // number becomes the new baseline.
+                    log.log(`📡 fetchSessions: ${answer.machineId} answered revision ${answer.revision} ${strikes} times below ${previous}; accepting it as a reset`);
+                    this.staleRosterAnswers.delete(answer.machineId);
+                    this.lastRosterRevision.set(answer.machineId, answer.revision);
+                } else {
+                    this.staleRosterAnswers.delete(answer.machineId);
+                    this.lastRosterRevision.set(answer.machineId, answer.revision);
+                }
+            }
+            fresh.push(answer);
+        }
+        if (fresh.length === 0) {
+            // Every answer was captured before a state this App already holds. Applying none of
+            // them is the point; the daemon already has the newer state, so one more read gets it.
+            if (staleAnswer) this.refreshRosterSoon();
+            return 0;
+        }
+        if (staleAnswer) this.refreshRosterSoon();
         // One answer per session, from the machine that owns it. Every daemon imports every server
         // session, so the same id arrives from many machines — and an importer's copy says
         // `origin: 'server'` and `isAlive: false`, because it is not running there. Letting that
@@ -6568,7 +6674,7 @@ class Sync {
         // named it. The tag is what makes a scheduled spawn visible at all: it is the one name the
         // machine can mint itself, and the same tag is what the row keeps when it registers.
         const byKey = new Map<string, { summary: LanSessionSummary; machineId: string; via: DaemonRoute }>();
-        for (const answer of answers) {
+        for (const answer of fresh) {
             for (const summary of answer.sessions) {
                 const key = summary.happySessionId ?? summary.tag;
                 if (!key) continue;

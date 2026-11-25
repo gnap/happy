@@ -16,7 +16,7 @@ import { useDraft } from '@/hooks/useDraft';
 import { Modal } from '@/modal';
 import { gitStatusSync } from '@/sync/gitStatusSync';
 import { sessionAbort } from '@/sync/ops';
-import { storage, useIsDataReady, useLocalSetting, useRealtimeStatus, useSessionDesktop, useSessionMessages, useSessionOnline, useSessionUsage, useSetting } from '@/sync/storage';
+import { storage, useIsDataReady, useLocalSetting, useRealtimeStatus, useSessionDesktop, useSessionMessages, useSessionOnline, useSessionRuntimeEntry, useSessionUsage, useSetting } from '@/sync/storage';
 import { useSession } from '@/sync/storage';
 import { Session } from '@/sync/storageTypes';
 import { sync } from '@/sync/sync';
@@ -69,6 +69,15 @@ export const SessionView = React.memo((props: { id: string }) => {
     const isTablet = useIsTablet();
     /** Whether anything is reaching this session — the only part the header draws. */
     const isSessionOnline = useSessionOnline(sessionId, session?.metadata?.machineId);
+    /**
+     * What the owning machine says it is doing with the session.
+     *
+     * A restart is the one state in which nothing is reaching the session and it is still on its
+     * way: the old process is being replaced, so every channel reads "not live" while the screen
+     * should not dim. The machine knows it; the restarted session may have no socket yet, so this
+     * is the only party that can say so.
+     */
+    const sessionRuntime = useSessionRuntimeEntry(sessionId);
 
     // The other half of tap-to-screen: the press log is the tap, this is the screen being on it.
     useFocusEffect(React.useCallback(() => {
@@ -112,8 +121,16 @@ export const SessionView = React.memo((props: { id: string }) => {
 
         // Normal state - show session info
         // The same question the status line below asks, so the header and the input bar cannot
-        // disagree about whether this session is being reached.
-        const isLive = isSessionOnline || sessionIsRestarting(session);
+        // disagree about whether this session is being reached. The machine's own phase is the
+        // current answer; `restartingAt` is the part an older machine can say, read only when it
+        // has no projection to speak with — the two never contradict each other, one is just all
+        // an older build knows how to say.
+        const runtimeInFlight = sessionRuntime?.phase === 'Scheduling'
+            || sessionRuntime?.phase === 'Starting'
+            || sessionRuntime?.phase === 'Restarting';
+        const isLive = isSessionOnline
+            || runtimeInFlight
+            || (sessionRuntime?.phase === undefined && sessionIsRestarting(session));
         return {
             title: getSessionName(session),
             subtitle: session.metadata?.path ? formatPathRelativeToHome(session.metadata.path, session.metadata?.homeDir) : undefined,
@@ -124,7 +141,7 @@ export const SessionView = React.memo((props: { id: string }) => {
             flavor: session.metadata?.flavor || null,
             tintColor: isLive ? '#000' : '#8E8E93'
         };
-    }, [session, sessionUsage?.model, waitingForFirstData, sessionId, router, isSessionOnline]);
+    }, [session, sessionUsage?.model, waitingForFirstData, sessionId, router, isSessionOnline, sessionRuntime?.phase]);
 
     return (
         <>

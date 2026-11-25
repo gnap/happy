@@ -244,7 +244,13 @@ function SessionInfoContent({ session }: { session: Session }) {
     const [archivingSession, performArchive] = useHappyAction(async () => {
         const result = await sessionArchive(session.id, session.metadata?.machineId!);
         if (!result.success) {
-            throw new HappyError(result.message || t('sessionInfo.failedToArchiveSession'), false);
+            throw new HappyError(
+                result.message
+                    ?? (result.reason === 'unsupported'
+                        ? t('sessionInfo.archiveUnsupported')
+                        : t('sessionInfo.failedToArchiveSession')),
+                false,
+            );
         }
         // Success - navigate back
         router.back();
@@ -641,6 +647,11 @@ function SessionInfoContent({ session }: { session: Session }) {
                             onPress={handleDeleteSession}
                         />
                     )}
+                    <Item
+                        title={t('session.subagents')}
+                        icon={<Ionicons name="git-branch-outline" size={29} color="#5856D6" />}
+                        onPress={() => router.push(`/session/${session.id}/agents`)}
+                    />
                     <Item
                         title={t('sessionInfo.rebuildMessageCache')}
                         subtitle={t('sessionInfo.rebuildMessageCacheSubtitle')}
