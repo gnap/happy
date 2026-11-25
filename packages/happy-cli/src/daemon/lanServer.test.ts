@@ -277,6 +277,8 @@ afterEach(async () => {
     archiveHandler = undefined;
     subagentsHandler = undefined;
     lastSubagentsAddress = undefined;
+    lastQuery = undefined;
+    lastAddress = undefined;
     toolContentHandler = undefined;
     sessionFileHandler = undefined;
     sessionFolderHandler = undefined;
@@ -776,6 +778,33 @@ describe('lanServer read-only API', () => {
             await fetch(url('/lan/sessions/sess-1/history?subagent=sub-1&since=1:2'), authorized(token));
 
             expect(lastQuery).toEqual({ since: '1:2', before: undefined, maxEntries: undefined, subagent: 'sub-1' });
+        });
+
+        it('passes a bounded repair range through, by the writer\'s own counters', async () => {
+            await start();
+            const token = await getToken();
+
+            await fetch(url('/lan/sessions/sess-1/history?site=machine-1&from_n=2&to_n=4'), authorized(token));
+
+            expect(lastQuery).toEqual({
+                since: undefined,
+                before: undefined,
+                maxEntries: undefined,
+                subagent: undefined,
+                site: 'machine-1',
+                fromN: 2,
+                toN: 4,
+            });
+        });
+
+        it('refuses a half-specified range instead of quietly reading a page', async () => {
+            await start();
+            const token = await getToken();
+
+            const res = await fetch(url('/lan/sessions/sess-1/history?site=machine-1&from_n=2'), authorized(token));
+
+            expect(res.status).toBe(400);
+            expect(lastQuery).toBeUndefined();
         });
     });
 

@@ -50,7 +50,7 @@ import { readSessionUid, resolveSessionUid } from '@/api/sessionUid';
 import { validatePath } from '@/modules/common/pathSecurity';
 import { c as createTar } from 'tar';
 import { run as runRipgrep } from '@/modules/ripgrep/index';
-import { collapseSessionLogEntries, listSessionSubagents, readSessionLogPage } from '@/api/sessionLog';
+import { collapseSessionLogEntries, listSessionSubagents, readSessionLogPage, readSessionLogRange } from '@/api/sessionLog';
 import { decodeBase64, encodeBase64, libsodiumEncryptForPublicKey } from '@/api/encryption';
 import { startLanDiscovery, type LanDiscoveryHandle } from './lanDiscovery';
 import { ENDPOINT_PROTOCOL_VERSION, startEndpointPublisher, type EndpointPublisherHandle, type LanEndpoint } from './lanEndpoints';
@@ -3642,6 +3642,29 @@ export async function startDaemon(): Promise<void> {
               const dataEncryptionKey = new Uint8Array(wrapped.length + 1);
               dataEncryptionKey.set([0], 0); // version byte, matching api.ts
               dataEncryptionKey.set(wrapped, 1);
+              // A bounded repair addressed by our own coordinates: the writer's counters. It
+              // reads the plaintext `(site, n)` mirror beside each ciphertext, so the answer
+              // neither depends on the server's sequence nor needs a page of decryption to find
+              // the missing entries. The page fields do not describe a range and are left empty.
+              if (query.fromN !== undefined && query.toN !== undefined && query.site !== undefined) {
+                const entries = readSessionLogRange({
+                  tag,
+                  site: machineId,
+                  fromN: query.fromN,
+                  toN: query.toN,
+                  maxEntries: query.maxEntries,
+                });
+                return {
+                  tag,
+                  dataEncryptionKey: encodeBase64(dataEncryptionKey),
+                  entries,
+                  cursor: '',
+                  older: '',
+                  hasNewer: false,
+                  hasOlder: false,
+                  reset: false,
+                };
+              }
               const page = readSessionLogPage({
                 tag,
                 site: machineId,
