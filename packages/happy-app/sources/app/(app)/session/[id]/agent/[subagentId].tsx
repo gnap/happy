@@ -31,8 +31,15 @@ export default React.memo(() => {
     const reducerRef = React.useRef<ReducerState | null>(null);
     const byId = React.useRef(new Map<string, Message>());
     const olderRef = React.useRef<string | null>(null);
+    /** Where the newest page ended, for the slow follow read while this screen is open. */
+    const cursorRef = React.useRef<string | null>(null);
+    const pollingRef = React.useRef(false);
 
-    const apply = React.useCallback((read: NonNullable<Awaited<ReturnType<typeof sync.readSubagentPage>>>) => {
+    const apply = React.useCallback((
+        read: NonNullable<Awaited<ReturnType<typeof sync.readSubagentPage>>>,
+        /** A follow page only adds newer entries; the older anchor belongs to the window. */
+        updateOlder: boolean,
+    ) => {
         reducerRef.current ??= createReducer();
         const result = reducer(reducerRef.current, read.messages, null);
         for (const message of result.messages) {
@@ -40,8 +47,11 @@ export default React.memo(() => {
         }
         // Newest first: the list is inverted, the same way the chat draws its window.
         setMessages([...byId.current.values()].sort((a, b) => b.createdAt - a.createdAt));
-        olderRef.current = read.older;
-        setHasOlder(read.hasOlder);
+        cursorRef.current = read.cursor;
+        if (updateOlder) {
+            olderRef.current = read.older;
+            setHasOlder(read.hasOlder);
+        }
     }, []);
 
     React.useEffect(() => {
@@ -49,6 +59,7 @@ export default React.memo(() => {
         reducerRef.current = createReducer();
         byId.current.clear();
         olderRef.current = null;
+        cursorRef.current = null;
         setMessages([]);
         setHasOlder(false);
         setLoaded(false);
@@ -58,7 +69,7 @@ export default React.memo(() => {
                 return;
             }
             if (read) {
-                apply(read);
+                apply(read, true);
             }
             setLoaded(true);
         })();
@@ -75,12 +86,41 @@ export default React.memo(() => {
         try {
             const read = await sync.readSubagentPage(sessionId, subagentId, { kind: 'older', before: olderRef.current });
             if (read) {
-                apply(read);
+                apply(read, true);
             }
         } finally {
             setLoadingOlder(false);
         }
     }, [apply, hasOlder, loadingOlder, sessionId, subagentId]);
+
+    /**
+     * A slow follow read while the screen is open.
+     *
+     * Deliberately not a socket: a sub-agent's timeliness is minutes, not milliseconds, and the
+     * main conversation already pays for the live channel. One request every few seconds is
+     * enough to keep a running stream from looking frozen, and it stops with the screen.
+     */
+    React.useEffect(() => {
+        const tick = async () => {
+            const cursor = cursorRef.current;
+            if (pollingRef.current || cursor === null) {
+                return;
+            }
+            pollingRef.current = true;
+            try {
+                const read = await sync.readSubagentPage(sessionId, subagentId, { kind: 'follow', cursor });
+                if (read) {
+                    apply(read, false);
+                }
+            } catch {
+                // The next tick is the retry; a failed poll says nothing about the stream.
+            } finally {
+                pollingRef.current = false;
+            }
+        };
+        const timer = setInterval(() => { void tick(); }, 7000);
+        return () => clearInterval(timer);
+    }, [apply, sessionId, subagentId]);
 
     return (
         <>
