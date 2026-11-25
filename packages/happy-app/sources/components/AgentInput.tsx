@@ -474,10 +474,15 @@ export const AgentInput = React.memo(React.forwardRef<MultiTextInputHandle, Agen
     );
     const currentProfile = React.useMemo(() => {
         if (!props.profileId) return null;
-        const customProfile = customProfiles.find(p => p.id === props.profileId);
-        if (customProfile) return customProfile;
-        return getBuiltInProfile(props.profileId);
-    }, [customProfiles, props.profileId]);
+        const profile = customProfiles.find(p => p.id === props.profileId)
+            ?? getBuiltInProfile(props.profileId);
+        // A stored profile can outlive the choice that made sense for it — edited later, or the
+        // session's agent changed. Showing it as active would also mean its env keeps going out.
+        if (profile && props.agentType && !validateProfileForAgent(profile, props.agentType)) {
+            return null;
+        }
+        return profile;
+    }, [customProfiles, props.profileId, props.agentType]);
     const showProfileControls = !!props.onProfileChange && availableProfiles.length > 0;
     const hasActiveProfile = !!props.profileId && !!currentProfile;
     const [showProfileOverlay, setShowProfileOverlay] = React.useState(false);

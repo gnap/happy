@@ -1,4 +1,68 @@
-import { AIBackendProfile, validateProfileForAgent } from './settings';
+import { AIBackendProfile, effectiveProfileAgent, validateProfileForAgent } from './settings';
+
+/** The agent names a profile's `compatibility` map is keyed by. */
+export type ProfileAgent = 'claude' | 'codex' | 'cursor' | 'cursor-acp' | 'gemini';
+
+/** The agents a profile can be assigned to. Cursor covers `cursor-acp`; a profile serves one. */
+export const PROFILE_AGENTS = ['claude', 'codex', 'cursor', 'gemini'] as const;
+export type ProfileAgentChoice = typeof PROFILE_AGENTS[number];
+
+/**
+ * A single agent, expressed as the compatibility map the rest of the system reads.
+ *
+ * A profile's environment is written for one CLI — Anthropic variables for Claude, CODEX_HOME and
+ * a provider key for Codex — so "supports several agents" was never a real choice, only a way to
+ * send one CLI's settings to another. The map stays for wire compatibility and built-in profiles;
+ * the editor and every new profile state exactly one.
+ */
+export function compatibilityForAgent(agent: ProfileAgentChoice): AIBackendProfile['compatibility'] {
+    return {
+        claude: agent === 'claude',
+        codex: agent === 'codex',
+        cursor: agent === 'cursor',
+        gemini: agent === 'gemini',
+    };
+}
+
+/** Which single agent a profile is for, for an editor that can only show one. */
+export function agentChoiceOf(profile: AIBackendProfile): ProfileAgentChoice {
+    const enabled = PROFILE_AGENTS.filter((agent) => profile.compatibility[agent]);
+    if (enabled.length === 1) {
+        return enabled[0];
+    }
+    const effective = effectiveProfileAgent(profile);
+    if (effective) {
+        return effective;
+    }
+    return enabled[0] ?? 'claude';
+}
+
+/**
+ * The profile-compatibility key for a session's provider flavor.
+ *
+ * A session's flavor and a profile's compatibility map use different vocabularies — `gpt` and
+ * `openai` both mean Codex, and `acp-cursor` shares Cursor's row — so every reader that gates a
+ * profile on an agent converts through here instead of guessing at the strings.
+ */
+export function agentKindFromFlavor(flavor: string | null | undefined): ProfileAgent | undefined {
+    switch (flavor) {
+        case 'claude':
+            return 'claude';
+        case 'codex':
+        case 'gpt':
+        case 'openai':
+            return 'codex';
+        case 'gemini':
+            return 'gemini';
+        case 'cursor':
+            return 'cursor';
+        case 'cursor-acp':
+        case 'acp-cursor':
+            return 'cursor-acp';
+        default:
+            return undefined;
+    }
+}
 
 /**
  * Documentation and expected values for built-in profiles.

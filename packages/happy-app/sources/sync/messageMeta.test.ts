@@ -133,4 +133,49 @@ describe('resolveMessageProfileEnv', () => {
         const env = resolveMessageProfileEnv({ profileId: 'llm-center-test' }, [llmCenterProfile]);
         expect(env).not.toHaveProperty('HAPPY_PROXY_ROUTE');
     });
+
+    describe('agent compatibility', () => {
+        const codexOnlyProfile: AIBackendProfile = {
+            ...llmCenterProfile,
+            id: 'codex-only',
+            environmentVariables: [
+                { name: 'CODEX_HOME', value: '/tmp/codex-home' },
+                { name: 'MODELBEST_API_KEY', value: 'sk-test' },
+            ],
+            compatibility: { claude: false, codex: true, cursor: false, gemini: false },
+            proxyViaRelay: true,
+        };
+
+        it('withholds a profile from an agent it does not support', () => {
+            expect(resolveMessageProfileEnv(
+                { profileId: 'codex-only', metadata: { flavor: 'claude' } },
+                [codexOnlyProfile],
+            )).toBeUndefined();
+            expect(resolveMessageProxyViaRelay(
+                { profileId: 'codex-only', metadata: { flavor: 'claude' } },
+                [codexOnlyProfile],
+            )).toBeUndefined();
+        });
+
+        it('sends it to the agent it names, including the gpt/openai spellings', () => {
+            const expected = { CODEX_HOME: '/tmp/codex-home', MODELBEST_API_KEY: 'sk-test' };
+            for (const flavor of ['codex', 'gpt', 'openai']) {
+                expect(resolveMessageProfileEnv(
+                    { profileId: 'codex-only', metadata: { flavor } },
+                    [codexOnlyProfile],
+                )).toEqual(expected);
+            }
+            expect(resolveMessageProxyViaRelay(
+                { profileId: 'codex-only', metadata: { flavor: 'codex' } },
+                [codexOnlyProfile],
+            )).toBe(true);
+        });
+
+        it('keeps the choice when the session does not name an agent', () => {
+            expect(resolveMessageProfileEnv(
+                { profileId: 'codex-only', metadata: null },
+                [codexOnlyProfile],
+            )).toEqual({ CODEX_HOME: '/tmp/codex-home', MODELBEST_API_KEY: 'sk-test' });
+        });
+    });
 });

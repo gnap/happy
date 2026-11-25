@@ -2,6 +2,8 @@ import { render } from "ink";
 import React from "react";
 import { ApiClient } from '@/api/api';
 import { CodexMcpClient } from './codexMcpClient';
+import { readProfileCodexConfig, writeProfileCodexHome } from './profileCodexHome';
+import { configuration } from '@/configuration';
 import { CodexPermissionHandler } from './utils/permissionHandler';
 import { ReasoningProcessor } from './utils/reasoningProcessor';
 import { DiffProcessor } from './utils/diffProcessor';
@@ -86,6 +88,17 @@ export async function runCodex(opts: {
 
     // Set backend for offline warnings (before any API calls)
     connectionState.setBackend('Codex');
+
+    // A profile states its Codex endpoint as data; Codex reads a config file. Materialise the
+    // home here, under Happy's own directory, so the person never manages CODEX_HOME by hand.
+    // `CODEX_API_KEY` stays in the process environment: the config only names it.
+    const profileCodex = readProfileCodexConfig(process.env);
+    if (profileCodex) {
+        const previousHome = process.env.CODEX_HOME;
+        const home = writeProfileCodexHome(configuration.happyHomeDir, sessionTag, profileCodex);
+        process.env.CODEX_HOME = home;
+        logger.info(`[codex] profile endpoint ${profileCodex.baseUrl ?? '(default)'} — config at ${home}${previousHome && previousHome !== home ? ` (replaces CODEX_HOME=${previousHome})` : ''}`);
+    }
 
     const api = await ApiClient.create(opts.credentials);
 

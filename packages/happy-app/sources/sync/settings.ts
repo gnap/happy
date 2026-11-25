@@ -70,6 +70,21 @@ const TogetherAIConfigSchema = z.object({
     model: z.string().optional(),
 });
 
+/**
+ * A Codex endpoint, written the way a person thinks about it: a URL, a key, and optionally a
+ * model.
+ *
+ * Codex itself reads these from a `config.toml` inside `CODEX_HOME`, not from environment
+ * variables. The profile therefore states them as data, and Happy materialises a small managed
+ * home for the session; the environment variables below are the wire between the two, not
+ * something the user is meant to set by hand.
+ */
+const CodexConfigSchema = z.object({
+    baseUrl: z.string().optional(),
+    apiKey: z.string().optional(),
+    model: z.string().optional(),
+});
+
 // Tmux configuration schema
 const TmuxConfigSchema = z.object({
     sessionName: z.string().optional(),
@@ -103,6 +118,7 @@ export const AIBackendProfileSchema = z.object({
     openaiConfig: OpenAIConfigSchema.optional(),
     azureOpenAIConfig: AzureOpenAIConfigSchema.optional(),
     togetherAIConfig: TogetherAIConfigSchema.optional(),
+    codexConfig: CodexConfigSchema.optional(),
 
     // Tmux configuration
     tmuxConfig: TmuxConfigSchema.optional(),
@@ -148,10 +164,66 @@ export const AIBackendProfileSchema = z.object({
 export type AIBackendProfile = z.infer<typeof AIBackendProfileSchema>;
 
 // Helper functions for profile validation and compatibility
+type ProfileAgentKey = 'claude' | 'codex' | 'cursor' | 'gemini';
+const PROFILE_AGENT_KEYS: readonly ProfileAgentKey[] = ['claude', 'codex', 'cursor', 'gemini'];
+
+/**
+ * Which agent a legacy profile was actually written for.
+ *
+ * Before profiles named a single agent they all defaulted to "supports everything", which made
+ * the picker offer a Claude endpoint to a Codex session and vice versa. The environment a profile
+ * carries is the honest signal: Anthropic/Claude Code variables are Claude, OpenAI/Codex/Azure
+ * variables are Codex.
+ */
+function inferAgentFromProfile(profile: AIBackendProfile): ProfileAgentKey | undefined {
+    let anthropic = 0;
+    let codex = 0;
+    if (profile.anthropicConfig) {
+        anthropic += 3;
+    }
+    if (profile.openaiConfig || profile.azureOpenAIConfig) {
+        codex += 3;
+    }
+    if (profile.codexConfig) {
+        codex += 3;
+    }
+    for (const env of profile.environmentVariables ?? []) {
+        if (env.name.startsWith('ANTHROPIC_') || env.name.startsWith('CLAUDE_CODE_')) {
+            anthropic += 1;
+        } else if (env.name.startsWith('CODEX_') || env.name.startsWith('OPENAI_') || env.name.startsWith('AZURE_OPENAI_')) {
+            codex += 1;
+        }
+    }
+    if (anthropic === 0 && codex === 0) {
+        return undefined;
+    }
+    return codex > anthropic ? 'codex' : 'claude';
+}
+
+/**
+ * The one agent a profile is for.
+ *
+ * An explicit single-agent map wins. A legacy map that enables several is read by what the
+ * profile actually carries (see `inferAgentFromProfile`). Built-ins keep their declared map —
+ * several of them deliberately cover a CLI pair — and a profile with no signal at all falls back
+ * to that map.
+ */
+export function effectiveProfileAgent(profile: AIBackendProfile): ProfileAgentKey | undefined {
+    const enabled = PROFILE_AGENT_KEYS.filter((agent) => profile.compatibility[agent]);
+    if (enabled.length === 1) {
+        return enabled[0];
+    }
+    if (profile.isBuiltIn) {
+        return undefined;
+    }
+    return inferAgentFromProfile(profile);
+}
+
 export function validateProfileForAgent(profile: AIBackendProfile, agent: 'claude' | 'codex' | 'cursor' | 'cursor-acp' | 'gemini'): boolean {
     // cursor-acp uses the same cursor-agent binary so reuse cursor compatibility
     const compatKey = agent === 'cursor-acp' ? 'cursor' : agent;
-    return profile.compatibility[compatKey];
+    const effective = effectiveProfileAgent(profile);
+    return effective !== undefined ? effective === compatKey : profile.compatibility[compatKey];
 }
 
 /**
@@ -217,6 +289,14 @@ export function getProfileEnvironmentVariables(profile: AIBackendProfile): Recor
         if (profile.openaiConfig.apiKey) envVars.OPENAI_API_KEY = profile.openaiConfig.apiKey;
         if (profile.openaiConfig.baseUrl) envVars.OPENAI_BASE_URL = profile.openaiConfig.baseUrl;
         if (profile.openaiConfig.model) envVars.OPENAI_MODEL = profile.openaiConfig.model;
+    }
+
+    // Codex endpoint. Generic names on the wire: the CLI reads them to write the session's
+    // managed `$CODEX_HOME/config.toml`, and the key is what that config's provider points at.
+    if (profile.codexConfig) {
+        if (profile.codexConfig.baseUrl) envVars.CODEX_BASE_URL = profile.codexConfig.baseUrl;
+        if (profile.codexConfig.apiKey) envVars.CODEX_API_KEY = profile.codexConfig.apiKey;
+        if (profile.codexConfig.model) envVars.CODEX_MODEL = profile.codexConfig.model;
     }
 
     // Add Azure OpenAI config

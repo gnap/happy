@@ -43,8 +43,16 @@ const TogetherAIConfigSchema = z.object({
     model: z.string().optional(),
 });
 
+/** The Codex endpoint a profile states as data; `runCodex` materialises its `config.toml`. */
+const CodexConfigSchema = z.object({
+    baseUrl: z.string().optional(),
+    apiKey: z.string().optional(),
+    model: z.string().optional(),
+});
+
 // Tmux configuration schema (matching GUI exactly)
 const TmuxConfigSchema = z.object({
+
     sessionName: z.string().optional(),
     tmpDir: z.string().optional(),
     updateEnvironment: z.boolean().optional(),
@@ -60,6 +68,7 @@ const EnvironmentVariableSchema = z.object({
 const ProfileCompatibilitySchema = z.object({
   claude: z.boolean().default(true),
   codex: z.boolean().default(true),
+  cursor: z.boolean().default(true),
   gemini: z.boolean().default(true),
 });
 
@@ -90,6 +99,7 @@ export const AIBackendProfileSchema = z.object({
     openaiConfig: OpenAIConfigSchema.optional(),
     azureOpenAIConfig: AzureOpenAIConfigSchema.optional(),
     togetherAIConfig: TogetherAIConfigSchema.optional(),
+    codexConfig: CodexConfigSchema.optional(),
 
     // Tmux configuration
     tmuxConfig: TmuxConfigSchema.optional(),
@@ -139,11 +149,38 @@ export const AIBackendProfileSchema = z.object({
 
 export type AIBackendProfile = z.infer<typeof AIBackendProfileSchema>;
 
+/**
+ * Which agent a legacy profile was actually written for.
+ *
+ * Profiles used to default to "supports everything", so a Claude endpoint was offered to Codex
+ * sessions and vice versa. The environment is the honest signal; see the App's copy of this rule.
+ */
+function inferProfileAgent(profile: AIBackendProfile): 'claude' | 'codex' | 'cursor' | 'gemini' | undefined {
+  let anthropic = 0;
+  let codex = 0;
+  if (profile.anthropicConfig) anthropic += 3;
+  if (profile.openaiConfig || profile.azureOpenAIConfig) codex += 3;
+  if (profile.codexConfig) codex += 3;
+  for (const env of profile.environmentVariables ?? []) {
+    if (env.name.startsWith('ANTHROPIC_') || env.name.startsWith('CLAUDE_CODE_')) {
+      anthropic += 1;
+    } else if (env.name.startsWith('CODEX_') || env.name.startsWith('OPENAI_') || env.name.startsWith('AZURE_OPENAI_')) {
+      codex += 1;
+    }
+  }
+  if (anthropic === 0 && codex === 0) return undefined;
+  return codex > anthropic ? 'codex' : 'claude';
+}
+
 // Helper functions matching the happy app exactly
 export function validateProfileForAgent(profile: AIBackendProfile, agent: 'claude' | 'codex' | 'gemini' | 'cursor' | 'cursor-acp' | 'acp-cursor'): boolean {
   // cursor / cursor-acp / acp-cursor: profile compat doesn't filter cursor sessions — always allow
   if (agent === 'cursor' || agent === 'cursor-acp' || agent === 'acp-cursor') return true;
-  return profile.compatibility[agent];
+  const enabled = (['claude', 'codex', 'cursor', 'gemini'] as const).filter((key) => profile.compatibility[key]);
+  if (enabled.length === 1) return enabled[0] === agent;
+  if (profile.isBuiltIn) return profile.compatibility[agent];
+  const inferred = inferProfileAgent(profile);
+  return inferred !== undefined ? inferred === agent : profile.compatibility[agent];
 }
 
 export function getProfileEnvironmentVariables(profile: AIBackendProfile): Record<string, string> {
@@ -171,6 +208,14 @@ export function getProfileEnvironmentVariables(profile: AIBackendProfile): Recor
     if (profile.openaiConfig.apiKey) envVars.OPENAI_API_KEY = profile.openaiConfig.apiKey;
     if (profile.openaiConfig.baseUrl) envVars.OPENAI_BASE_URL = profile.openaiConfig.baseUrl;
     if (profile.openaiConfig.model) envVars.OPENAI_MODEL = profile.openaiConfig.model;
+  }
+
+  // Codex endpoint: `runCodex` turns these into a managed CODEX_HOME/config.toml. Generic names
+  // on purpose — the same variables mean the same thing to any Codex session, wherever it runs.
+  if (profile.codexConfig) {
+    if (profile.codexConfig.baseUrl) envVars.CODEX_BASE_URL = profile.codexConfig.baseUrl;
+    if (profile.codexConfig.apiKey) envVars.CODEX_API_KEY = profile.codexConfig.apiKey;
+    if (profile.codexConfig.model) envVars.CODEX_MODEL = profile.codexConfig.model;
   }
 
   // Add Azure OpenAI config
