@@ -622,9 +622,6 @@ export async function sessionRestart(
 export async function sessionArchive(sessionId: string, machineId: string): Promise<{ success: boolean; message?: string }> {
     const outcome = await sync.archiveSession(sessionId, machineId);
     if (outcome.kind === 'applied') {
-        // The owner's roster will say the same thing on its next statement; recording it here is
-        // what takes the row out of the list at the moment the person asked, not a heartbeat later.
-        storage.getState().archiveSessionLocally(sessionId);
         return { success: true };
     }
     if (outcome.kind === 'refused') {

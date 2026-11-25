@@ -389,24 +389,6 @@ export function saveDeletedSessionUids(deletions: Record<string, number>) {
     saveSessionMap('session-deletion-uids', deletions);
 }
 
-/**
- * Sessions this account has archived, by lineage uid or server id.
- *
- * An archive is a fact on the machine that owns the session: the row and its history stay, and
- * the machine's roster says it wants them out of the active list. The server still holds the row,
- * so a listing from it would put an archived session back on screen unless this device remembers
- * what the owner said — and it has to survive a restart to do that. Keyed by uid first, because
- * the same conversation can come back under a different server id.
- *
- * Absent for every install that has never archived anything, which is simply an empty map.
- */
-export function loadArchivedSessions(): Record<string, number> {
-    return loadSessionMap<number>('session-archived', 'archived sessions');
-}
-
-export function saveArchivedSessions(archived: Record<string, number>) {
-    saveSessionMap('session-archived', archived);
-}
 
 export function loadProfile(): Profile {
     const profile = mmkv.getString('profile');
