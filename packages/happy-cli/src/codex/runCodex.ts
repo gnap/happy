@@ -606,9 +606,15 @@ export async function runCodex(opts: {
             messageBuffer.addMessage('Turn aborted', 'status');
             sendReady();
         } else if (msg.type === 'error') {
-            const text = typeof msg.message === 'string' && msg.message.length > 0
+            // The frame's own message is the retry counter ("Reconnecting... 2/5"); what a person
+            // can act on is in the error's additionalDetails ("Selected model is at capacity…").
+            // Sending only the counter left the App with a status it could not explain.
+            const base = typeof msg.message === 'string' && msg.message.length > 0
                 ? msg.message
                 : 'Codex reported an error';
+            const details = (msg.error as { additionalDetails?: unknown } | undefined)?.additionalDetails;
+            const detail = typeof details === 'string' && details.trim().length > 0 ? details.trim() : undefined;
+            const text = detail && detail !== base && !base.includes(detail) ? `${base} — ${detail}` : base;
             messageBuffer.addMessage(`Error: ${text}`, 'status');
             session.sendSessionEvent({ type: 'message', message: text });
         }
