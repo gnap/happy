@@ -200,6 +200,12 @@ export async function runCodex(opts: {
     session = initialSession;
     writeSessionPidFile(session.sessionId);
 
+    // Announce that this session can be served over the LAN/relay. The App has to know before it
+    // picks a channel, and it cannot ask over the LAN without already being on it; agentState
+    // travels by the server, so it arrives in time. Claude sessions have said this all along —
+    // without it a Codex session stayed on the server channel even with its socket connected.
+    session.updateAgentState((state) => ({ ...state, lanSocket: true }));
+
     // Report to daemon (once at start; also retry periodically so daemon sees us if it wasn't running at start)
     const DAEMON_REPORT_INTERVAL_MS = 60_000;
     const reportToDaemon = () => {
