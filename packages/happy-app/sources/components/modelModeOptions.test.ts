@@ -29,16 +29,8 @@ describe('modelModeOptions', () => {
 
     it('builds codex model fallbacks with translated labels', () => {
         const models = getCodexModelModes(translate);
-        expect(models.map((model) => model.key)).toEqual([
-            'gpt-5-codex-high',
-            'gpt-5-codex-medium',
-            'gpt-5-codex-low',
-            'gpt-5-minimal',
-            'gpt-5-low',
-            'gpt-5-medium',
-            'gpt-5-high',
-        ]);
-        expect(models[0].name).toBe('tr:agentInput.codexModel.gpt5CodexHigh');
+        expect(models.map((model) => model.key)).toEqual(['sol', 'astra', 'terra', 'luna']);
+        expect(models[0].name).toBe('tr:agentInput.codexModel.sol');
     });
 
     it('prefers metadata models over hardcoded fallbacks', () => {

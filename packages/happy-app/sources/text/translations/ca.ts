@@ -513,6 +513,10 @@ export const ca: TranslationStructure = {
             auto: 'Auto',
         },
         codexModel: {
+            sol: 'Sol',
+            astra: 'Astra',
+            terra: 'Terra',
+            luna: 'Luna',
             title: 'CODEX MODEL',
             gpt5CodexLow: 'gpt-5-codex low',
             gpt5CodexMedium: 'gpt-5-codex medium',
