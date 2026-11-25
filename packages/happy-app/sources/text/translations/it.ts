@@ -371,6 +371,9 @@ export const it: TranslationStructure = {
     session: {
         inputPlaceholder: 'Scrivi un messaggio ...',
         peerMessage: "Da un'altra sessione di Claude",
+        subagents: "Subagenti",
+        subagentStream: "Subagente",
+        noSubagents: "Ancora nessun subagente",
         encrypting: 'handshaking…',
         backgroundTasks: 'Attività in background',
         activityScheduled: 'Programmato',
@@ -435,6 +438,7 @@ export const it: TranslationStructure = {
         failedToCopyMetadata: 'Impossibile copiare i metadati',
         failedToKillSession: 'Impossibile terminare la sessione',
         failedToArchiveSession: 'Impossibile archiviare la sessione',
+        archiveUnsupported: "La versione di questa macchina non supporta l'archiviazione delle sessioni.",
         connectionStatus: 'Stato connessione',
         channelAuto: 'Automatico',
         channelServer: 'Server',

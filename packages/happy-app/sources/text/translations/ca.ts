@@ -316,6 +316,9 @@ export const ca: TranslationStructure = {
     session: {
         inputPlaceholder: 'Escriu un missatge...',
         peerMessage: "D'una altra sessió de Claude",
+        subagents: "Subagents",
+        subagentStream: "Subagent",
+        noSubagents: "Encara no hi ha subagents",
         encrypting: 'establint connexió…',
         backgroundTasks: 'Tasques en segon pla',
         activityScheduled: 'Programat',
@@ -380,6 +383,7 @@ export const ca: TranslationStructure = {
         failedToCopyMetadata: 'Ha fallat copiar les metadades',
         failedToKillSession: 'Ha fallat finalitzar la sessió',
         failedToArchiveSession: 'Ha fallat arxivar la sessió',
+        archiveUnsupported: "La versió d'aquesta màquina no admet arxivar sessions.",
         connectionStatus: 'Estat de la connexió',
         channelAuto: 'Automàtic',
         channelServer: 'Servidor',

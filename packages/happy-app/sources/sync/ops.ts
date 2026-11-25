@@ -617,17 +617,26 @@ export async function sessionRestart(
  * Archive a session: stop it and keep the row, its history and the server's record.
  *
  * The failure carries no message of its own — the caller's localized "failed to archive" is what
- * the person reads — except when the machine itself gave a reason.
+ * the person reads — except when the machine itself gave a reason. `reason` is what lets the
+ * caller tell "this machine's build does not know how" from "nothing answered", so an older build
+ * can be named instead of being reported as an outage.
  */
-export async function sessionArchive(sessionId: string, machineId: string): Promise<{ success: boolean; message?: string }> {
+export async function sessionArchive(sessionId: string, machineId: string): Promise<{
+    success: boolean;
+    message?: string;
+    reason?: 'unsupported' | 'unreachable' | 'refused';
+}> {
     const outcome = await sync.archiveSession(sessionId, machineId);
     if (outcome.kind === 'applied') {
         return { success: true };
     }
     if (outcome.kind === 'refused') {
-        return { success: false, message: outcome.body };
+        return { success: false, message: outcome.body, reason: 'refused' };
     }
-    return { success: false };
+    return {
+        success: false,
+        reason: outcome.kind === 'unsupported' ? 'unsupported' : 'unreachable',
+    };
 }
 
 // Types for lazy tool content RPC

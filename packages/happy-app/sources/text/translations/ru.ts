@@ -332,6 +332,7 @@ export const ru: TranslationStructure = {
         failedToCopyMetadata: 'Не удалось скопировать метаданные',
         failedToKillSession: 'Не удалось завершить сессию',
         failedToArchiveSession: 'Не удалось архивировать сессию',
+        archiveUnsupported: "Эта сборка машины не поддерживает архивирование сессий.",
         connectionStatus: 'Статус подключения',
         channelAuto: 'Автоматически',
         channelServer: 'Сервер',
@@ -440,6 +441,9 @@ export const ru: TranslationStructure = {
     session: {
         inputPlaceholder: 'Введите сообщение...',
         peerMessage: 'От другой сессии Claude',
+        subagents: "Субагенты",
+        subagentStream: "Субагент",
+        noSubagents: "Субагентов пока нет",
         encrypting: 'установка соединения…',
         backgroundTasks: 'Фоновые задачи',
         activityScheduled: 'Запланировано',
