@@ -290,7 +290,20 @@ export type LanServerOptions = {
    * the CLI owns the tag. A client that knows only the tag can still read, which is what keeps
    * a session reachable while it is waiting for the server.
    */
-  getHistory: (address: LanSessionAddress, query: { since?: string; before?: string; maxEntries?: number }) => LanHistory | null;
+  getHistory: (address: LanSessionAddress, query: { since?: string; before?: string; maxEntries?: number; subagent?: string }) => LanHistory | null;
+  /**
+   * The sub-agent streams this machine's log holds for a session, or null when it has none.
+   *
+   * A listing over the same log the history route pages: the sub-agent id is stored beside each
+   * entry as plaintext so the daemon can filter and page one stream without opening the ciphertext.
+   */
+  listSubagents?: (address: LanSessionAddress) => {
+    subagent: string;
+    taskCall?: string;
+    entries: number;
+    firstAt: number;
+    lastAt: number;
+  }[] | null;
   /**
    * The full input and result of one tool call, for a detail view that was opened.
    *
@@ -771,21 +784,44 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
       return reply.code(401).send({ error: 'unauthorized' });
     }
     const { tag } = request.params as { tag: string };
-    const { since, before } = request.query as { since?: string; before?: string };
+    const { since, before, subagent } = request.query as { since?: string; before?: string; subagent?: string };
     const { limit } = request.query as { limit?: string };
     const maxEntries = limit !== undefined
       ? Math.min(500, Math.max(1, Number.parseInt(limit, 10) || 0)) || undefined
       : undefined;
-    const history = opts.getHistory({ tag }, { since, before, maxEntries });
+    const history = opts.getHistory({ tag }, { since, before, maxEntries, subagent });
     if (!history) {
-      logger.debug(`[lan] history 404 tag=${tag} since=${since ?? '-'} before=${before ?? '-'}`);
+      logger.debug(`[lan] history 404 tag=${tag} since=${since ?? '-'} before=${before ?? '-'} subagent=${subagent ?? '-'}`);
       return reply.code(404).send({ error: 'no local history for that tag' });
     }
     logger.debug(
-      `[lan] history tag=${tag} since=${since ?? '-'} before=${before ?? '-'} ` +
+      `[lan] history tag=${tag} since=${since ?? '-'} before=${before ?? '-'} subagent=${subagent ?? '-'} ` +
       `entries=${history.entries.length} hasNewer=${history.hasNewer} hasOlder=${history.hasOlder} reset=${history.reset}`,
     );
     return reply.send({ v: LAN_PROTOCOL_VERSION, ...history });
+  });
+
+  /**
+   * The sub-agent streams this machine's log holds for a session, addressed by the CLI's tag.
+   *
+   * A listing only: the stream itself is read through the history route with `subagent=`, with its
+   * own anchors, so a sub-agent is paged exactly like the main conversation. A reader that opens
+   * one later reads it then; nothing here is pushed.
+   */
+  app.get('/lan/tags/:tag/subagents', async (request, reply) => {
+    if (!requireToken(request)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    if (!opts.listSubagents) {
+      return reply.code(404).send({ error: 'this daemon does not list sub-agents' });
+    }
+    const { tag } = request.params as { tag: string };
+    const subagents = opts.listSubagents({ tag });
+    if (subagents === null) {
+      return reply.code(404).send({ error: 'no local history for that tag' });
+    }
+    logger.debug(`[lan] subagents tag=${tag} count=${subagents.length} from=${clientAddress(request)}`);
+    return reply.send({ v: LAN_PROTOCOL_VERSION, subagents });
   });
 
   /**
@@ -1126,23 +1162,45 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     const { sessionId } = request.params as { sessionId: string };
     // No anchor at all means "the newest page": a reader that has just opened a session wants the
     // end of the log, not the beginning.
-    const { since, before, limit } = request.query as { since?: string; before?: string; limit?: string };
+    const { since, before, limit, subagent } = request.query as { since?: string; before?: string; limit?: string; subagent?: string };
     const maxEntries = limit !== undefined ? Math.min(500, Math.max(1, Number.parseInt(limit, 10) || 0)) || undefined : undefined;
-    const history = opts.getHistory({ sessionId }, { since, before, maxEntries });
+    const history = opts.getHistory({ sessionId }, { since, before, maxEntries, subagent });
     if (!history) {
       // 404 rather than an empty list: the client should retry later, not record "no history".
-      logger.debug(`[lan] history 404 ${sessionId} since=${since ?? '-'} before=${before ?? '-'}`);
+      logger.debug(`[lan] history 404 ${sessionId} since=${since ?? '-'} before=${before ?? '-'} subagent=${subagent ?? '-'}`);
       return reply.code(404).send({ error: 'no local history for that session' });
     }
     // One line per read, because "the reader is behind" and "the reader is stuck on one page" look
     // identical from outside and are told apart only by whether the anchors move between reads.
     logger.debug(
-      `[lan] history ${sessionId} since=${since ?? '-'} before=${before ?? '-'} ` +
+      `[lan] history ${sessionId} since=${since ?? '-'} before=${before ?? '-'} subagent=${subagent ?? '-'} ` +
       `entries=${history.entries.length} bytes=${history.entries.reduce((n, e) => n + e.c.length, 0)} ` +
       `hasNewer=${history.hasNewer} hasOlder=${history.hasOlder} reset=${history.reset} ` +
       `cursor=${history.cursor} older=${history.older} from=${clientAddress(request)}`,
     );
     return reply.send({ v: LAN_PROTOCOL_VERSION, ...history });
+  });
+
+  /**
+   * The sub-agent streams this machine's log holds for a session, addressed by server id.
+   *
+   * Same answer as the tag-addressed route; the App normally knows the id, and a stream is read
+   * from the history route with `subagent=` when it is opened.
+   */
+  app.get('/lan/sessions/:sessionId/subagents', async (request, reply) => {
+    if (!requireToken(request)) {
+      return reply.code(401).send({ error: 'unauthorized' });
+    }
+    if (!opts.listSubagents) {
+      return reply.code(404).send({ error: 'this daemon does not list sub-agents' });
+    }
+    const { sessionId } = request.params as { sessionId: string };
+    const subagents = opts.listSubagents({ sessionId });
+    if (subagents === null) {
+      return reply.code(404).send({ error: 'no local history for that session' });
+    }
+    logger.debug(`[lan] subagents ${sessionId} count=${subagents.length} from=${clientAddress(request)}`);
+    return reply.send({ v: LAN_PROTOCOL_VERSION, subagents });
   });
 
   /**

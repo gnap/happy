@@ -109,9 +109,19 @@ const HISTORY: LanHistory = {
 /** Mutable so a test can simulate a session whose history this machine does not have. */
 let history: LanHistory | null = HISTORY;
 /** What the route passed down, so the anchor plumbing can be asserted rather than assumed. */
-let lastQuery: { since?: string; before?: string } | undefined;
+let lastQuery: { since?: string; before?: string; maxEntries?: number; subagent?: string } | undefined;
+/** A machine's sub-agent listing, when the test wired one. */
+let subagentsHandler: ((address: { sessionId?: string; tag?: string }) => {
+    subagent: string;
+    taskCall?: string;
+    entries: number;
+    firstAt: number;
+    lastAt: number;
+}[] | null) | undefined;
 /** How the route named the session, so the two addresses can be told apart. */
 let lastAddress: { sessionId?: string; tag?: string } | undefined;
+/** How the sub-agent listing route named the session. */
+let lastSubagentsAddress: { sessionId?: string; tag?: string } | undefined;
 /** Messages the socket handed to the daemon, in order. */
 let sent: { sessionId: string; localId: string; content: string }[] = [];
 /** Sessions the restart route asked to restart. */
@@ -173,6 +183,7 @@ async function start(limits?: Parameters<typeof startLanServer>[0]['limits']) {
             lastAddress = address;
             return history;
         },
+        ...(subagentsHandler ? { listSubagents: subagentsHandler } : {}),
         onSend: (message) => {
             sent.push(message);
         },
@@ -264,6 +275,8 @@ afterEach(async () => {
     restartHandler = undefined;
     deleteHandler = undefined;
     archiveHandler = undefined;
+    subagentsHandler = undefined;
+    lastSubagentsAddress = undefined;
     toolContentHandler = undefined;
     sessionFileHandler = undefined;
     sessionFolderHandler = undefined;
@@ -732,7 +745,7 @@ describe('lanServer read-only API', () => {
 
             const res = await fetch(url('/lan/sessions/sess-1/history?since=0:5'), authorized(token));
 
-            expect(lastQuery).toEqual({ since: '0:5', before: undefined });
+            expect(lastQuery).toEqual({ since: '0:5', before: undefined, maxEntries: undefined, subagent: undefined });
             const body = (await res.json()) as { cursor: string; older: string };
             expect(body.cursor).toBe('0:1');
             expect(body.older).toBe('0:0');
@@ -744,7 +757,7 @@ describe('lanServer read-only API', () => {
 
             await fetch(url('/lan/sessions/sess-1/history?before=2:9'), authorized(token));
 
-            expect(lastQuery).toEqual({ since: undefined, before: '2:9' });
+            expect(lastQuery).toEqual({ since: undefined, before: '2:9', maxEntries: undefined, subagent: undefined });
         });
 
         it('asks for no anchor at all on a first read, which means the newest page', async () => {
@@ -753,7 +766,61 @@ describe('lanServer read-only API', () => {
 
             await fetch(url('/lan/sessions/sess-1/history'), authorized(token));
 
-            expect(lastQuery).toEqual({ since: undefined, before: undefined });
+            expect(lastQuery).toEqual({ since: undefined, before: undefined, maxEntries: undefined, subagent: undefined });
+        });
+
+        it('passes a sub-agent filter through, so one stream is paged on its own', async () => {
+            await start();
+            const token = await getToken();
+
+            await fetch(url('/lan/sessions/sess-1/history?subagent=sub-1&since=1:2'), authorized(token));
+
+            expect(lastQuery).toEqual({ since: '1:2', before: undefined, maxEntries: undefined, subagent: 'sub-1' });
+        });
+    });
+
+    describe('sub-agent listings', () => {
+        const summary = { subagent: 'sub-1', taskCall: 'call-1', entries: 3, firstAt: 10, lastAt: 20 };
+
+        it('lists by server id', async () => {
+            subagentsHandler = (address) => {
+                lastSubagentsAddress = address;
+                return [summary];
+            };
+            await start();
+            const token = await getToken();
+
+            const res = await fetch(url('/lan/sessions/sess-1/subagents'), authorized(token));
+
+            expect(res.status).toBe(200);
+            expect(await res.json()).toEqual({ v: 1, subagents: [summary] });
+            expect(lastSubagentsAddress).toEqual({ sessionId: 'sess-1' });
+        });
+
+        it('lists by the CLI tag, for a session the server has not named', async () => {
+            subagentsHandler = (address) => (address.tag === 'tag-1' ? [summary] : null);
+            await start();
+            const token = await getToken();
+
+            const res = await fetch(url('/lan/tags/tag-1/subagents'), authorized(token));
+
+            expect(res.status).toBe(200);
+            expect(await res.json()).toEqual({ v: 1, subagents: [summary] });
+        });
+
+        it('says 404 when this machine has no listing for the session', async () => {
+            subagentsHandler = () => null;
+            await start();
+            const token = await getToken();
+
+            expect((await fetch(url('/lan/sessions/sess-1/subagents'), authorized(token))).status).toBe(404);
+        });
+
+        it('says 404 when the build has no listing route at all', async () => {
+            await start();
+            const token = await getToken();
+
+            expect((await fetch(url('/lan/sessions/sess-1/subagents'), authorized(token))).status).toBe(404);
         });
     });
 
