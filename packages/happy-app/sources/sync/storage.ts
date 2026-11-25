@@ -10,7 +10,6 @@ import { visibleWindow } from "./reducer/standIns";
 import { NormalizedMessage } from "./typesRaw";
 import type { DaemonRoute, LanSighting, RelayEndpoint, SessionChannel, SessionDivergence } from './lan/types';
 import { daemonSessionListSignature, daemonSessionRows, dropDeletedDaemonSessionRows, isStaleSessionRuntimeStatement, keepPendingDaemonSessionRows, mergeSessionRuntime, type DaemonSessionEntry, type DaemonSessionReport, type SessionRuntimeEntry, type SessionRuntimeReport } from './daemonSessionList';
-import { findMessageGaps, type SessionMessageGap } from './messageGaps';
 
 export type { DaemonSessionEntry } from './daemonSessionList';
 
@@ -320,12 +319,7 @@ interface StorageState {
     /** Record the live LAN socket, or null once it is gone. */
     setDaemonSocketStatus: (id: string, status: DaemonConnectionState) => void;
     applyReady: () => void;
-    applyMessages: (sessionId: string, messages: NormalizedMessage[]) => {
-        changed: string[],
-        hasReadyEvent: boolean,
-        /** Per-writer counters missing between two held messages. */
-        gaps: SessionMessageGap[],
-    };
+    applyMessages: (sessionId: string, messages: NormalizedMessage[]) => { changed: string[], hasReadyEvent: boolean };
     applyMessagesLoaded: (sessionId: string) => void;
     setFetching: (sessionId: string, fetching: boolean) => void;
     applyHydratedCache: (sessionId: string, messages: Message[], reducerState: ReducerState, oldestSeq: number, hasOlderMessages: boolean, lastSeq: number) => void;
@@ -1400,7 +1394,6 @@ export const storage = create<StorageState>()((set, get) => {
             bump('messagesApplied', messages.length);
             let changed = new Set<string>();
             let hasReadyEvent = false;
-            let gaps: SessionMessageGap[] = [];
             set((state) => {
 
                 // Resolve session messages state
@@ -1445,9 +1438,6 @@ export const storage = create<StorageState>()((set, get) => {
                 const visible = visibleWindow(
                     Object.values(mergedMessagesMap).sort((a, b) => b.createdAt - a.createdAt)
                 );
-                // What the window is missing, by writer. Computed after the merge, so a delivery
-                // that closes a gap (including a backfill) is not still reported as one.
-                gaps = findMessageGaps(visible.messages);
 
                 // Update session with todos and latestUsage
                 // IMPORTANT: We extract latestUsage from the mutable reducerState and copy it to the Session object
@@ -1479,7 +1469,7 @@ export const storage = create<StorageState>()((set, get) => {
                 return state;
             });
 
-            return { changed: Array.from(changed), hasReadyEvent, gaps };
+            return { changed: Array.from(changed), hasReadyEvent };
         },
         applyMessagesLoaded: (sessionId: string) => set((state) => {
             const existingSession = sessionMessagesLive.get(sessionId);
