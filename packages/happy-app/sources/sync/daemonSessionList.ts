@@ -60,7 +60,10 @@ export function daemonSessionRows(
 ): Record<string, DaemonSessionEntry> {
     const rows: Record<string, DaemonSessionEntry> = {};
     for (const session of sessions) {
-        const key = session.happySessionId ?? session.tag;
+        // The server id is what a registered row is addressed by; before it exists, the lineage
+        // uid is the public name a reader may keep. The tag is this machine's private word, and
+        // is only a key for a machine too old to publish a uid.
+        const key = session.happySessionId ?? session.sessionUid ?? session.tag;
         if (key === undefined) continue;
         rows[key] = {
             ...(session.desktop ? { desktop: session.desktop } : {}),

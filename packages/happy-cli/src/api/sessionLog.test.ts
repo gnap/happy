@@ -23,7 +23,7 @@ vi.mock('@/ui/logger', () => ({
     logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
 }));
 
-import { appendSessionLog, collapseSessionLogEntries, readSessionLog, readSessionLogPage, sessionLogDir, pruneSessionLogs, type SessionLogEntry } from './sessionLog';
+import { appendSessionLog, collapseSessionLogEntries, listSessionSubagents, readSessionLog, readSessionLogPage, sessionLogDir, sessionLogIdentity, pruneSessionLogs, type SessionLogEntry } from './sessionLog';
 
 let home: string;
 /** Distinct tag per test: the torn-tail check is memoised per path within a process. */
@@ -365,5 +365,129 @@ describe('collapseSessionLogEntries', () => {
         const first = wire('server-1', 'local-1', 'in', 1);
         const again = wire('server-2', 'local-1', 'in', 2);
         expect(collapseSessionLogEntries([first, again])).toEqual([again]);
+    });
+});
+
+describe('sub-agent streams', () => {
+    const sub = (n: number, subagent: string, taskCall = 'call-a'): SessionLogEntry => ({
+        ...entry(n),
+        subagent,
+        taskCall,
+    });
+
+    it('reads one sub-agent stream without the main thread or its siblings', () => {
+        const tag = tagFor('subagent-forward');
+        appendSessionLog(tag, SITE, sub(1, 'a'));
+        appendSessionLog(tag, SITE, entry(2)); // main thread
+        appendSessionLog(tag, SITE, sub(3, 'a'));
+        appendSessionLog(tag, SITE, sub(4, 'b', 'call-b'));
+        appendSessionLog(tag, SITE, sub(5, 'a'));
+
+        const page = readSessionLogPage({ tag, site: SITE, since: '0:0', subagent: 'a' });
+        expect(page.entries.map((e) => e.id)).toEqual(['id-1', 'id-3', 'id-5']);
+        expect(page.entries.every((e) => e.subagent === 'a')).toBe(true);
+    });
+
+    it('pages a sub-agent stream backwards', () => {
+        const tag = tagFor('subagent-backward');
+        for (let n = 1; n <= 5; n += 1) {
+            appendSessionLog(tag, SITE, sub(n, 'a'));
+        }
+
+        const newest = readSessionLogPage({ tag, site: SITE, maxEntries: 2, subagent: 'a' });
+        expect(newest.entries.map((e) => e.id)).toEqual(['id-4', 'id-5']);
+        expect(newest.hasOlder).toBe(true);
+
+        const older = readSessionLogPage({ tag, site: SITE, before: newest.older, maxEntries: 2, subagent: 'a' });
+        expect(older.entries.map((e) => e.id)).toEqual(['id-2', 'id-3']);
+    });
+
+    it('moves the cursor past entries a filtered forward read skipped', () => {
+        const tag = tagFor('subagent-empty-forward');
+        appendSessionLog(tag, SITE, entry(1));
+        appendSessionLog(tag, SITE, entry(2));
+
+        const empty = readSessionLogPage({ tag, site: SITE, since: '0:0', subagent: 'a' });
+        expect(empty.entries).toEqual([]);
+        expect(empty.cursor).not.toBe('0:0');
+        // The same range is not asked for again.
+        expect(readSessionLogPage({ tag, site: SITE, since: empty.cursor, subagent: 'a' }).entries).toEqual([]);
+
+        appendSessionLog(tag, SITE, sub(3, 'a'));
+        const next = readSessionLogPage({ tag, site: SITE, since: empty.cursor, subagent: 'a' });
+        expect(next.entries.map((e) => e.id)).toEqual(['id-3']);
+    });
+
+    it('lists every sub-agent with its entries and task call', () => {
+        const tag = tagFor('subagent-list');
+        appendSessionLog(tag, SITE, sub(1, 'a', 'call-a'));
+        appendSessionLog(tag, SITE, entry(2));
+        appendSessionLog(tag, SITE, sub(3, 'a', 'call-a'));
+        appendSessionLog(tag, SITE, sub(4, 'b', 'call-b'));
+
+        expect(listSessionSubagents({ tag, site: SITE })).toEqual([
+            { subagent: 'a', taskCall: 'call-a', entries: 2, firstAt: entry(1).at, lastAt: sub(3, 'a').at },
+            { subagent: 'b', taskCall: 'call-b', entries: 1, firstAt: entry(4).at, lastAt: entry(4).at },
+        ]);
+    });
+});
+
+describe('sessionLogIdentity', () => {
+    it('reads the id from a session protocol payload', () => {
+        expect(sessionLogIdentity({ role: 'session', content: { id: 'e', subagent: 'a', taskCall: 'call-a' } }))
+            .toEqual({ subagent: 'a', taskCall: 'call-a' });
+    });
+
+    it('reads the id from a lifecycle payload, one level deeper', () => {
+        expect(sessionLogIdentity({ role: 'session', content: { type: 'session', data: { subagent: 'a' } } }))
+            .toEqual({ subagent: 'a' });
+    });
+
+    it('says nothing for a main-thread or non-object payload', () => {
+        expect(sessionLogIdentity({ role: 'session', content: { id: 'e' } })).toEqual({});
+        expect(sessionLogIdentity('ciphertext')).toEqual({});
+    });
+
+    it('mirrors the writer stamp from a session envelope', () => {
+        expect(sessionLogIdentity({
+            role: 'session',
+            content: { id: 'e', sid: 'tag-1', site: 'machine-1', n: 7 },
+        })).toEqual({ site: 'machine-1', n: 7 });
+    });
+
+    it('mirrors the writer stamp from an agent record, even when it carries a data object', () => {
+        // The legacy agent shapes keep `(sid, site, n)` on `content` beside `data`; reading only
+        // `data` would miss the stamp on every cursor event.
+        expect(sessionLogIdentity({
+            role: 'agent',
+            content: { id: 'e', type: 'event', data: { text: 'x' }, site: 'machine-1', n: 9 },
+        })).toEqual({ site: 'machine-1', n: 9 });
+    });
+
+    it('ignores a counter that is not a non-negative integer', () => {
+        expect(sessionLogIdentity({ role: 'session', content: { site: 'm', n: -1 } })).toEqual({ site: 'm' });
+        expect(sessionLogIdentity({ role: 'session', content: { site: 'm', n: 1.5 } })).toEqual({ site: 'm' });
+    });
+});
+
+describe('collapseSessionLogEntries tags', () => {
+    it('keeps the stream identity from the copy it drops', () => {
+        // The outbound copy is the only one whose plaintext carried the id and the writer stamp;
+        // the echo is preferred because it has the server id, and it must not erase what it could
+        // not know.
+        const outbound = { ...entry(1), subagent: 'a', taskCall: 'call-a', site: 'machine-1', n: 3 };
+        const echo = { ...entry(2, 'in'), localId: outbound.localId, id: 'server-1' };
+        expect(collapseSessionLogEntries([outbound, echo])).toEqual([
+            { ...echo, subagent: 'a', taskCall: 'call-a', site: 'machine-1', n: 3 },
+        ]);
+    });
+});
+
+describe('writer stamp mirror', () => {
+    it('keeps site and n beside the ciphertext through a write and a read', () => {
+        const tag = tagFor('stamp-mirror');
+        appendSessionLog(tag, SITE, { ...entry(1), site: 'machine-1', n: 4 });
+
+        expect(readSessionLog(tag, SITE)).toEqual([{ ...entry(1), site: 'machine-1', n: 4 }]);
     });
 });

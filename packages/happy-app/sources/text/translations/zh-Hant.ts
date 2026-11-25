@@ -317,6 +317,9 @@ export const zhHant: TranslationStructure = {
     session: {
         inputPlaceholder: '輸入訊息...',
         peerMessage: '來自另一個 Claude 工作階段',
+        subagents: "子代理",
+        subagentStream: "子代理",
+        noSubagents: "還沒有子代理",
         encrypting: '正在建立連線…',
         backgroundTasks: '後台任務',
         activityScheduled: '定時任務',
@@ -381,6 +384,7 @@ export const zhHant: TranslationStructure = {
         failedToCopyMetadata: '複製中繼資料失敗',
         failedToKillSession: '終止工作階段失敗',
         failedToArchiveSession: '封存工作階段失敗',
+        archiveUnsupported: "這台機器的版本不支援封存工作階段。",
         connectionStatus: '連線狀態',
         channelAuto: '自動',
         channelServer: '公網伺服器',

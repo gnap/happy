@@ -930,6 +930,11 @@ function sameWireSession(a: WireSession, b: WireSession): boolean {
         && a.agentStateVersion === b.agentStateVersion
         && a.updatedAt === b.updatedAt
         && a.seq === b.seq
+        // The lineage name is lifted out of the metadata ciphertext, so it can arrive while every
+        // versioned field stays put — a machine that only learned the uid, or a metadata payload
+        // that decrypted later. Without this the row keeps the old value and a deletion recorded
+        // against the uid would have nothing to match.
+        && (a.sessionUid ?? null) === (b.sessionUid ?? null)
         && (a.restartingAt ?? null) === (b.restartingAt ?? null);
 }
 

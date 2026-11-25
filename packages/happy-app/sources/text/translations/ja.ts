@@ -374,6 +374,9 @@ export const ja: TranslationStructure = {
     session: {
         inputPlaceholder: 'メッセージを入力...',
         peerMessage: '別の Claude セッションから',
+        subagents: "サブエージェント",
+        subagentStream: "サブエージェント",
+        noSubagents: "サブエージェントはまだありません",
         encrypting: '接続を確立中…',
         backgroundTasks: 'バックグラウンドタスク',
         activityScheduled: 'スケジュール',
@@ -438,6 +441,7 @@ export const ja: TranslationStructure = {
         failedToCopyMetadata: 'メタデータのコピーに失敗しました',
         failedToKillSession: 'セッションの終了に失敗しました',
         failedToArchiveSession: 'セッションのアーカイブに失敗しました',
+        archiveUnsupported: "このマシンのビルドはセッションのアーカイブに対応していません。",
         connectionStatus: '接続状態',
         channelAuto: '自動',
         channelServer: 'サーバー',

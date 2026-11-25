@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 // other LAN tests use.
 vi.mock('@/encryption/hmac_sha256', () => ({ hmac_sha256: vi.fn(async () => new Uint8Array(32)) }));
 
-const { archiveSessionAt, deleteSessionAt, deleteSessionAtLegacy, restartAskBody, restartSessionAt, sessionControlAt } = await import('./client');
+const { archiveSessionAt, deleteSessionAt, deleteSessionAtLegacy, fetchSessionSubagents, restartAskBody, restartSessionAt, sessionControlAt } = await import('./client');
 
 const base = 'http://10.0.0.2:55673';
 
@@ -162,5 +162,30 @@ describe('restartSessionAt', () => {
         await restartSessionAt(base, 't1', 'sess-1');
         expect(calls[0].init.body).toBeUndefined();
         expect(calls[0].init.headers['content-type']).toBeUndefined();
+    });
+});
+
+describe('fetchSessionSubagents', () => {
+    it('reads the listing and keeps only rows it understands', async () => {
+        const calls = stub({
+            status: 200,
+            body: {
+                subagents: [
+                    { subagent: 'sub-1', taskCall: 'call-1', entries: 2, firstAt: 10, lastAt: 20 },
+                    { subagent: 42 },
+                ],
+            },
+        });
+
+        expect(await fetchSessionSubagents(base, 't1', 'sess-1')).toEqual([
+            { subagent: 'sub-1', taskCall: 'call-1', entries: 2, firstAt: 10, lastAt: 20 },
+        ]);
+        expect(calls[0].url).toBe(`${base}/lan/sessions/sess-1/subagents`);
+    });
+
+    it('says null for a machine with no listing for the session', async () => {
+        // An older build, or no log: both mean "this machine cannot answer", not an error.
+        stub({ status: 404 });
+        expect(await fetchSessionSubagents(base, 't1', 'sess-1')).toBeNull();
     });
 });

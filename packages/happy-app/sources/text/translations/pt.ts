@@ -316,6 +316,9 @@ export const pt: TranslationStructure = {
     session: {
         inputPlaceholder: 'Digite uma mensagem ...',
         peerMessage: 'De outra sessão do Claude',
+        subagents: "Subagentes",
+        subagentStream: "Subagente",
+        noSubagents: "Ainda não há subagentes",
         encrypting: 'estabelecendo conexão…',
         backgroundTasks: 'Tarefas em segundo plano',
         activityScheduled: 'Agendado',
@@ -380,6 +383,7 @@ export const pt: TranslationStructure = {
         failedToCopyMetadata: 'Falha ao copiar metadados',
         failedToKillSession: 'Falha ao encerrar sessão',
         failedToArchiveSession: 'Falha ao arquivar sessão',
+        archiveUnsupported: "A versão desta máquina não suporta arquivar sessões.",
         connectionStatus: 'Status da conexão',
         channelAuto: 'Automático',
         channelServer: 'Servidor',

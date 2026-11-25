@@ -331,6 +331,14 @@ export async function readSessionOverLan(options: {
      */
     page: { kind: 'tail' } | { kind: 'follow'; cursor: string } | { kind: 'older'; before: string };
     /**
+     * Read one sub-agent's stream instead of the whole session's.
+     *
+     * The daemon filters its log by this plaintext id, so the page has the same two anchors as
+     * any other — a sub-agent is paged exactly like the main conversation, and its entries are
+     * decrypted and normalised the same way.
+     */
+    subagent?: string;
+    /**
      * Whether the reader already holds this entry. A daemon page is bounded but whole — it can be
      * hundreds of entries when only a handful are new — and decrypting and normalising the rest
      * is the cost of a read measured in seconds. The envelope carries id/localId in the clear, so
@@ -377,8 +385,10 @@ export async function readSessionOverLan(options: {
          * stale mid-read fail the read instead of being replaced underneath it.
          */
         const request = async (page: typeof options.page) => {
-            const query: { since: string } | { before: string } | Record<string, never> =
-                page.kind === 'follow' ? { since: page.cursor } : page.kind === 'older' ? { before: page.before } : {};
+            const query: { since?: string; before?: string; subagent?: string } = {
+                ...(page.kind === 'follow' ? { since: page.cursor } : page.kind === 'older' ? { before: page.before } : {}),
+                ...(options.subagent !== undefined ? { subagent: options.subagent } : {}),
+            };
             // Acquired outside the try: a rejected *proof* is a credential problem, not a token
             // problem, and treating it as one would answer a wrong machine key with a second
             // handshake it is going to fail anyway.

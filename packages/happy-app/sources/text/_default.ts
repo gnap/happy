@@ -315,6 +315,9 @@ export const en = {
     session: {
         inputPlaceholder: 'Type a message ...',
         peerMessage: 'From another Claude session',
+        subagents: "Sub-agents",
+        subagentStream: "Sub-agent",
+        noSubagents: "No sub-agents yet",
         encrypting: 'handshaking…',
         backgroundTasks: 'Background tasks',
         activityScheduled: 'Scheduled',
@@ -379,6 +382,7 @@ export const en = {
         failedToCopyMetadata: 'Failed to copy metadata',
         failedToKillSession: 'Failed to kill session',
         failedToArchiveSession: 'Failed to archive session',
+        archiveUnsupported: "This machine's build does not support archiving sessions.",
         connectionStatus: 'Connection Status',
         channelAuto: 'Automatic',
         channelServer: 'Server',
