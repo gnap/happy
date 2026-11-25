@@ -41,43 +41,12 @@ function sameDivergence(a: SessionDivergence | undefined, b: SessionDivergence |
         && a.blocked === b.blocked;
 }
 
-/**
- * The archived memory after what the owner said about some lineages.
- *
- * `archived` is the owner's want for a row that is still kept; `running` is the same owner saying
- * it is not archived any more. A statement with no lifecycle is an older machine that never
- * stated one, and silence about a row is not a statement about it either — both leave the memory
- * exactly as it was.
- */
-function nextArchivedSessions(
-    current: Record<string, number>,
-    statements: readonly { key: string; lifecycle: string | undefined }[],
-    at: number,
-): Record<string, number> {
-    let next: Record<string, number> | null = null;
-    for (const statement of statements) {
-        if (statement.lifecycle === 'archived') {
-            if ((next ?? current)[statement.key] === undefined) {
-                next = { ...(next ?? current), [statement.key]: at };
-            }
-        } else if (statement.lifecycle === 'running') {
-            if ((next ?? current)[statement.key] !== undefined) {
-                next = { ...(next ?? current) };
-                delete next[statement.key];
-            }
-        }
-    }
-    if (next !== null) {
-        saveArchivedSessions(next);
-    }
-    return next ?? current;
-}
 import { applySettings, Settings } from "./settings";
 import { LocalSettings, applyLocalSettings } from "./localSettings";
 import { Purchases, customerInfoToPurchases } from "./purchases";
 import { Profile } from "./profile";
 import { UserProfile, RelationshipUpdatedEvent } from "./friendTypes";
-import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionMaxModes, saveSessionMaxModes, loadSessionProfileIds, saveSessionProfileIds, loadSessionSandboxIsolations, saveSessionSandboxIsolations, loadRelayEndpoints, saveRelayEndpoints, loadDeletedSessions, saveDeletedSessions, loadDeletedSessionUids, saveDeletedSessionUids, loadArchivedSessions, saveArchivedSessions } from "./persistence";
+import { loadSettings, loadLocalSettings, saveLocalSettings, saveSettings, loadPurchases, savePurchases, loadProfile, saveProfile, loadSessionDrafts, saveSessionDrafts, loadSessionPermissionModes, saveSessionPermissionModes, loadSessionModelModes, saveSessionModelModes, loadSessionMaxModes, saveSessionMaxModes, loadSessionProfileIds, saveSessionProfileIds, loadSessionSandboxIsolations, saveSessionSandboxIsolations, loadRelayEndpoints, saveRelayEndpoints, loadDeletedSessions, saveDeletedSessions, loadDeletedSessionUids, saveDeletedSessionUids } from "./persistence";
 import type { PermissionModeKey } from '@/components/PermissionModeSelector';
 import type { CustomerInfo } from './revenueCat/types';
 import React from "react";
@@ -301,20 +270,6 @@ interface StorageState {
     deletedSessionUids: Record<string, number>;
     /** Records that a lineage was deleted, so a row with that uid cannot come back under a new id. */
     rememberDeletedSessionUid: (uid: string, at: number) => void;
-    /**
-     * Sessions this account has archived, by lineage uid or server id.
-     *
-     * An archive keeps the row and its history; the owner's roster says it wants the session out
-     * of the active list. The server still holds the row, so this memory is what stops a server
-     * listing from putting it back — and it is persisted, because the owner may be offline.
-     */
-    archivedSessions: Record<string, number>;
-    /** Records that a lineage was archived. Repeated statements do not move the time. */
-    rememberArchivedSession: (key: string, at: number) => void;
-    /** Forgets an archive, when the owner says the session is running again. */
-    forgetArchivedSession: (key: string) => void;
-    /** Records an archive for one session, resolving its lineage uid. */
-    archiveSessionLocally: (sessionId: string, at?: number) => void;
     /** What each machine last said it was running, asked over a channel it answered on. */
     daemonVersions: Record<string, { running: string; onDisk: string | null; restartRequired: boolean; at: number }>;
     /** Replace the daemons' view. Pass null to clear it (the server answered). */
@@ -612,14 +567,6 @@ function buildSessionListViewData(
      * was counted offline — in the same row that showed it online, and in the count directly above.
      */
     drivers: readonly ChannelDriver[] = [],
-    /**
-     * Lineages this account has archived, by uid or server id.
-     *
-     * An archived session is still kept — by the machine, by the server and in the cache — and
-     * the list is the one place that decides not to draw it. Hiding it here rather than removing
-     * the row keeps it addressable by a deep link and leaves an "archived" surface possible later.
-     */
-    archived: Readonly<Record<string, number>> = {},
 ): SessionListViewItem[] {
     /** Whether anything is reaching this session, from any channel, the way the rest of the App asks. */
     const reached = (session: Session) => resolveSessionReach(session.id, session.metadata?.machineId, drivers).online;
@@ -675,9 +622,6 @@ function buildSessionListViewData(
     const inactiveSessions: Session[] = [];
 
     Object.values(sessions).forEach(session => {
-        if (archived[session.sessionUid ?? session.id] !== undefined) {
-            return;
-        }
         if (reached(session)) {
             activeSessions.push(session);
         } else {
@@ -1052,7 +996,6 @@ export const storage = create<StorageState>()((set, get) => {
         sessionRuntime: {},
         deletedSessions: loadDeletedSessions(),
         deletedSessionUids: loadDeletedSessionUids(),
-        archivedSessions: loadArchivedSessions(),
         daemonVersions: {},
         channelOverride: {},
         artifacts: {},  // Initialize artifacts
@@ -2183,34 +2126,12 @@ export const storage = create<StorageState>()((set, get) => {
                     sessionLive.set(key, { ...known, restartingAt: row.restartingSince });
                 }
             }
-            // Archived rows are kept by the machine, so they are still in this listing; the
-            // owner's want is what makes them out of the active list. An imported row speaks for
-            // the server, not for the machine, and says nothing about a want it cannot see.
-            const archivedSessions = nextArchivedSessions(
-                state.archivedSessions,
-                listed
-                    .filter((row) => row.origin !== 'server')
-                    .map((row) => ({
-                        key: row.sessionUid ?? row.happySessionId,
-                        lifecycle: row.desiredLifecycle,
-                    }))
-                    .filter((statement): statement is { key: string; lifecycle: string | undefined } =>
-                        statement.key !== undefined),
-                Date.now(),
-            );
             // A heartbeat moving is not a change the list draws; when the list the UI reads is the
             // same, the store does not change at all.
-            const listChanged = daemonSessionListSignature(state.daemonSessionList)
-                !== daemonSessionListSignature(next);
-            const archiveChanged = archivedSessions !== state.archivedSessions;
-            if (!listChanged && !archiveChanged) {
+            if (daemonSessionListSignature(state.daemonSessionList) === daemonSessionListSignature(next)) {
                 return state;
             }
-            return {
-                ...state,
-                ...(listChanged ? { daemonSessionList: next } : {}),
-                ...(archiveChanged ? { archivedSessions } : {}),
-            };
+            return { ...state, daemonSessionList: next };
         }),
         applySessionRuntime: (entries) => set((state) => {
             if (entries === null) {
@@ -2221,20 +2142,6 @@ export const storage = create<StorageState>()((set, get) => {
             const offered = entries.filter((entry) => state.deletedSessions[entry.sessionId] === undefined);
             const at = Date.now();
             const next = mergeSessionRuntime(state.sessionRuntime, offered, at);
-            // The same want, arriving as a push rather than as a listing. A stale statement says
-            // nothing about the row now, so it must not move the archive memory either.
-            const archivedSessions = nextArchivedSessions(
-                state.archivedSessions,
-                offered
-                    .filter((entry) => entry.desiredLifecycle !== undefined
-                        && !isStaleSessionRuntimeStatement(state.sessionRuntime[entry.sessionId], entry))
-                    .map((entry) => ({
-                        key: sessionLive.get(entry.sessionId)?.sessionUid ?? entry.sessionId,
-                        lifecycle: entry.desiredLifecycle,
-                    })),
-                at,
-            );
-            const archiveChanged = archivedSessions !== state.archivedSessions;
             // A push that repeats what the row already says must not redraw it.
             const same = offered.every((entry) => {
                 const before = state.sessionRuntime[entry.sessionId];
@@ -2260,9 +2167,7 @@ export const storage = create<StorageState>()((set, get) => {
                 const restated = offered.some((entry) => entry.divergence !== null
                     && !isStaleSessionRuntimeStatement(state.sessionRuntime[entry.sessionId], entry)
                     && next[entry.sessionId]?.divergence !== undefined);
-                if (!restated) {
-                    return archiveChanged ? { ...state, archivedSessions } : state;
-                }
+                if (!restated) return state;
                 const refreshed = { ...state.sessionRuntime };
                 for (const entry of offered) {
                     if (isStaleSessionRuntimeStatement(state.sessionRuntime[entry.sessionId], entry)) continue;
@@ -2271,9 +2176,9 @@ export const storage = create<StorageState>()((set, get) => {
                         refreshed[entry.sessionId] = { ...current, at };
                     }
                 }
-                return { ...state, sessionRuntime: refreshed, ...(archiveChanged ? { archivedSessions } : {}) };
+                return { ...state, sessionRuntime: refreshed };
             }
-            return { ...state, sessionRuntime: next, ...(archiveChanged ? { archivedSessions } : {}) };
+            return { ...state, sessionRuntime: next };
         }),
         setSessionChannelOverride: (sessionId: string, channel: SessionChannel | null) => set((state) => {
             if (channel === null) {
@@ -2340,33 +2245,6 @@ export const storage = create<StorageState>()((set, get) => {
             saveDeletedSessionUids(deletedSessionUids);
             return { ...state, deletedSessionUids };
         }),
-        rememberArchivedSession: (key: string, at: number) => set((state) => {
-            if (state.archivedSessions[key] !== undefined) {
-                return state;
-            }
-            const archivedSessions = { ...state.archivedSessions, [key]: at };
-            saveArchivedSessions(archivedSessions);
-            return { ...state, archivedSessions };
-        }),
-        forgetArchivedSession: (key: string) => set((state) => {
-            if (state.archivedSessions[key] === undefined) {
-                return state;
-            }
-            const { [key]: _restored, ...archivedSessions } = state.archivedSessions;
-            saveArchivedSessions(archivedSessions);
-            return { ...state, archivedSessions };
-        }),
-        archiveSessionLocally: (sessionId: string, at = Date.now()) => set((state) => {
-            // The lineage is the stable name: a resumed conversation can come back under a new
-            // server id, and the archive still describes the conversation.
-            const key = sessionLive.get(sessionId)?.sessionUid ?? sessionId;
-            if (state.archivedSessions[key] !== undefined) {
-                return state;
-            }
-            const archivedSessions = { ...state.archivedSessions, [key]: at };
-            saveArchivedSessions(archivedSessions);
-            return { ...state, archivedSessions };
-        }),
         deleteSession: (sessionId: string) => set((state) => {
             // The row is about to leave the store, so its lineage name is read first: a deletion
             // of a conversation must not depend on which server id it happened to be wearing.
@@ -2419,24 +2297,10 @@ export const storage = create<StorageState>()((set, get) => {
             delete profileIds[sessionId];
             saveSessionProfileIds(profileIds);
 
-            // A deleted lineage has no archive left to remember; keeping the marker would describe
-            // a row that no longer exists and could only ever be read as stale.
-            const archivedSessions = (() => {
-                const keys = [sessionId, uid].filter(
-                    (key): key is string => key !== undefined && state.archivedSessions[key] !== undefined,
-                );
-                if (keys.length === 0) return state.archivedSessions;
-                const next = { ...state.archivedSessions };
-                for (const key of keys) delete next[key];
-                saveArchivedSessions(next);
-                return next;
-            })();
-
             return {
                 ...state,
                 deletedSessions,
                 deletedSessionUids,
-                archivedSessions,
             };
         }),
         // Outbox (send status tracking)
@@ -2634,7 +2498,6 @@ const builtFrom: {
     relayEndpoints: unknown;
     relayHubConnected: unknown;
     channelPriority: unknown;
-    archivedSessions: unknown;
     /**
      * What the list's channel-derived output is made of, for the last build.
      *
@@ -2659,7 +2522,6 @@ const builtFrom: {
     relayEndpoints: null,
     relayHubConnected: null,
     channelPriority: null,
-    archivedSessions: null,
     channelSignature: null,
 };
 
@@ -2727,8 +2589,7 @@ function recomputeDerived(state: StorageState): void {
         || builtFrom.candidateHealth !== state.candidateHealth
         || builtFrom.relayEndpoints !== state.relayEndpoints
         || builtFrom.relayHubConnected !== state.relayHubConnected
-        || builtFrom.channelPriority !== state.localSettings.channelPriority
-        || builtFrom.archivedSessions !== state.archivedSessions;
+        || builtFrom.channelPriority !== state.localSettings.channelPriority;
     if (!contentChanged && !channelChanged) {
         return;
     }
@@ -2747,7 +2608,6 @@ function recomputeDerived(state: StorageState): void {
     builtFrom.relayEndpoints = state.relayEndpoints;
     builtFrom.relayHubConnected = state.relayHubConnected;
     builtFrom.channelPriority = state.localSettings.channelPriority;
-    builtFrom.archivedSessions = state.archivedSessions;
     // Rows subscribe to their own answer; unchanged bits do not wake them.
     sessionOnlineLive.replaceAll(answers.online);
     const signatureChanged = answers.signature !== builtFrom.channelSignature;
@@ -2759,7 +2619,6 @@ function recomputeDerived(state: StorageState): void {
         sessions,
         state.machines,
         drivers,
-        state.archivedSessions,
     );
     // The list lives in its own store: writing it does not notify the zustand store, and an array
     // that did not move is not a write at all.
@@ -2806,12 +2665,7 @@ export function getSessionGitStatus(sessionId: string): GitStatus | null {
  * `useKeyedSelector` instead, so a write to one session does not re-render them.
  */
 export function useSessions(): Session[] {
-    const sessions = useAllKeyedValues(sessionLive);
-    const archived = storage((state) => state.archivedSessions);
-    return React.useMemo(
-        () => sessions.filter((session) => archived[session.sessionUid ?? session.id] === undefined),
-        [sessions, archived],
-    );
+    return useAllKeyedValues(sessionLive);
 }
 
 export function useSession(id: string): Session | null {
@@ -3208,14 +3062,9 @@ export function useSessionListViewData(): SessionListViewItem[] | null {
 export function useAllSessions(): Session[] {
     const ready = storage((state) => state.isDataReady);
     const sessions = useAllKeyedValues(sessionLive);
-    const archived = storage((state) => state.archivedSessions);
     return React.useMemo(
-        () => ready
-            ? [...sessions]
-                .filter((session) => archived[session.sessionUid ?? session.id] === undefined)
-                .sort((a, b) => b.updatedAt - a.updatedAt)
-            : [],
-        [ready, sessions, archived],
+        () => ready ? [...sessions].sort((a, b) => b.updatedAt - a.updatedAt) : [],
+        [ready, sessions],
     );
 }
 
