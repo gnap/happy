@@ -804,10 +804,19 @@ class Sync {
                     void this.refreshDaemonVersions(this.machinesWithoutLiveSocket());
                 }
 
-                const idleMs = Date.now() - this.lastUserActivityAt;
-                if (idleMs > 600_000) {
-                    log.log(`🕐 Skipping periodic session refresh — idle for ${Math.round(idleMs / 1000)}s`);
-                    return;
+                // The idle gate is a desktop rule. Nothing on iOS or Android feeds
+                // `lastUserActivityAt` — only `#setupDesktopLifecycle` listens for input — so ten
+                // minutes after launch this test was true for good and every periodic session
+                // refresh stopped: the delta fetch, the daemon roster read and the full refresh.
+                // A stale list then had no path back short of a cold start, which is exactly what
+                // a kill looked like it was fixing. A phone on a desk with the app open is not a
+                // desktop parked on another Space; keep the net running there.
+                if (Platform.OS === 'web') {
+                    const idleMs = Date.now() - this.lastUserActivityAt;
+                    if (idleMs > 600_000) {
+                        log.log(`🕐 Skipping periodic session refresh — idle for ${Math.round(idleMs / 1000)}s`);
+                        return;
+                    }
                 }
                 // Every FULL_REFRESH_INTERVAL, do a full fetch to purge stale sessions
                 // that were deleted/archived on the server and won't appear in deltas.
