@@ -50,9 +50,11 @@ export function parseWriterIdentity(raw: DecryptedRecord | null | undefined): Wr
     }
 
     // Session records keep the triple inside the envelope (`content.data`); the legacy agent
-    // shapes keep it directly on `content`. `?? content` also covers the unwrapped envelope
-    // shape that `preprocessMessageContent` rewrites.
-    const carrier = raw.role === 'session' ? (isObject(content.data) ? content.data : content) : content;
+    // shapes keep it directly on `content`. The `type: 'session'` shape carries the same envelope
+    // under `data` whichever role the record is labelled with — the normaliser accepts both — so
+    // the wrapper is recognised by either signal, not by the role alone.
+    const wrapped = isObject(content.data) && (raw.role === 'session' || content.type === 'session');
+    const carrier = wrapped ? content.data as Record<string, unknown> : content;
 
     const sid = typeof carrier.sid === 'string' ? carrier.sid : undefined;
     const site = typeof carrier.site === 'string' ? carrier.site : undefined;

@@ -83,6 +83,7 @@ import { UserProfile } from './friendTypes';
 import { resolveMessageModeMeta, resolveMessageProfileEnv, resolveMessageProxyViaRelay } from './messageMeta';
 import { loadMessageCache, saveMessageCache, clearMessageCache, clearAllMessageCaches, preloadSessionCacheDB, getCachedLastSeq } from './cache/messageCache';
 import { mergePageIntoWindow } from './messageIdentity';
+import type { SessionMessageGap } from './messageGaps';
 import { MAX_CACHED_MESSAGES } from './cache/limits';
 import { preloadSessionsListCache, loadSessionsListCache, saveSessionsListCache, clearSessionsListCache } from './cache/sessionsListCache';
 import { olderAfterSeq } from './cacheSegment';
@@ -521,6 +522,11 @@ class Sync {
     private lastSessionWakeAt = new Map<string, number>();
     /** How many times a single outgoing message has been answered with "no process". One retry. */
     private deliveryWakeAttempts = new Map<string, number>();
+    /** Gap intervals already asked the server for, by session and bounds. */
+    private readonly gapBackfillAttempts = new Map<string, number>();
+    /** One backfill at a time per session: two would ask for the same interval twice. */
+    private readonly gapBackfillSessions = new Set<string>();
+    private static readonly GAP_BACKFILL_COOLDOWN_MS = 10 * 60_000;
     /**
      * The newest roster revision heard from each machine.
      *
@@ -4300,6 +4306,62 @@ class Sync {
     }
 
     /**
+     * Ask the owning machine for the counters a gap names.
+     *
+     * A missing `n` is a record the author wrote and this reader does not have; the machine that
+     * wrote it is the authority on whether it exists, and its log carries the plaintext `(site, n)`
+     * mirror precisely so this can be answered without the server's sequence. The server stays a
+     * delivery channel, never the place a gap is addressed.
+     *
+     * A gap the machine cannot fill is a real loss, and asking again will not change it. The
+     * signature is remembered for a while, so a loss does not become a loop.
+     */
+    private backfillMessageGaps(sessionId: string, gaps: readonly SessionMessageGap[]): void {
+        const targets = gaps.filter((gap) => gap.missing.length > 0).slice(0, 2);
+        if (targets.length === 0 || this.gapBackfillSessions.has(sessionId)) {
+            return;
+        }
+        const now = Date.now();
+        const fresh = targets.filter((gap) => {
+            const key = `${sessionId}|${gap.site}|${gap.missing[0]}-${gap.missing[gap.missing.length - 1]}`;
+            const attemptedAt = this.gapBackfillAttempts.get(key);
+            if (attemptedAt !== undefined && now - attemptedAt < Sync.GAP_BACKFILL_COOLDOWN_MS) {
+                return false;
+            }
+            this.gapBackfillAttempts.set(key, now);
+            return true;
+        });
+        if (fresh.length === 0) {
+            return;
+        }
+        this.gapBackfillSessions.add(sessionId);
+        void (async () => {
+            try {
+                for (const gap of fresh) {
+                    await this.readGapFromMachine(sessionId, gap);
+                }
+            } catch (error) {
+                log.log(`🕳️ gap backfill ${sessionId} failed: ${String(error)}`);
+            } finally {
+                this.gapBackfillSessions.delete(sessionId);
+            }
+        })();
+    }
+
+    /** One writer's missing counters, read from the machine that wrote them. */
+    private async readGapFromMachine(sessionId: string, gap: SessionMessageGap): Promise<void> {
+        const fromN = gap.missing[0];
+        const toN = gap.missing[gap.missing.length - 1];
+        const read = await this.readOverLan(sessionId, { kind: 'range', site: gap.site, fromN, toN });
+        if (!read || read.messages.length === 0) {
+            log.log(`🕳️ gap ${sessionId}: ${gap.site} [${gap.missing.join(',')}] — the machine has no such entries`);
+            return;
+        }
+        log.log(`🕳️ gap ${sessionId}: ${gap.site} [${gap.missing.join(',')}] — ${read.messages.length} entries from the machine`);
+        this.applyMessages(sessionId, read.messages);
+    }
+
+    /**
      * Scrolls back one page through the daemon's log.
      *
      * The anchor comes from the read that established the window — every daemon page carries both
@@ -5357,6 +5419,25 @@ class Sync {
         subagentId: string,
         page: { kind: 'tail' } | { kind: 'follow'; cursor: string } | { kind: 'older'; before: string },
     ): Promise<LanSessionRead | null> {
+        return this.readOverLan(sessionId, page, subagentId);
+    }
+
+    /**
+     * One read over the session's own machine, with the caller's page.
+     *
+     * The machine is the addressing authority here: `(site, n)` is its own counter, and the page
+     * kinds are all positions in its log. The server is not offered as a substitute — a repair
+     * that asked the server for a range would be addressing by a number the author never minted.
+     */
+    private async readOverLan(
+        sessionId: string,
+        page:
+            | { kind: 'tail' }
+            | { kind: 'follow'; cursor: string }
+            | { kind: 'older'; before: string }
+            | { kind: 'range'; site: string; fromN: number; toN: number },
+        subagent?: string,
+    ): Promise<LanSessionRead | null> {
         const machineId = getSession(sessionId)?.metadata?.machineId;
         const machineKey = machineId ? this.getMachineKey(machineId) : null;
         if (!machineId || !machineKey) {
@@ -5370,7 +5451,7 @@ class Sync {
             machineKey,
             encryption: this.encryption,
             page,
-            subagent: subagentId,
+            ...(subagent !== undefined ? { subagent } : {}),
             connection: link?.connection ?? this.lanMachineConnections.get(machineId),
             candidates: this.readCandidates(machineId, this.readRoutes(sessionId, machineId)),
         });
@@ -8161,6 +8242,9 @@ class Sync {
 
     private applyMessages = (sessionId: string, messages: NormalizedMessage[]) => {
         const result = storage.getState().applyMessages(sessionId, messages);
+        if (result.gaps.length > 0) {
+            this.backfillMessageGaps(sessionId, result.gaps);
+        }
         let m: Message[] = [];
         for (let messageId of result.changed) {
             const message = getSessionMessages(sessionId)?.messagesMap[messageId];

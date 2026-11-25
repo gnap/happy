@@ -457,7 +457,7 @@ export async function fetchHistory(
     baseUrl: string,
     token: string,
     sessionId: string,
-    page: { since?: string; before?: string; subagent?: string } = {}
+    page: { since?: string; before?: string; subagent?: string; site?: string; fromN?: number; toN?: number } = {}
 ): Promise<LanHistory | null> {
     const params = new URLSearchParams();
     if (page.since) {
@@ -468,6 +468,18 @@ export async function fetchHistory(
     }
     if (page.subagent) {
         params.set('subagent', page.subagent);
+    }
+    // A bounded repair by the log's own coordinates: one writer's counters, inclusive. The
+    // machine filters its plaintext stamp, so this asks for exactly what the reader is missing
+    // and never names the server's sequence.
+    if (page.site) {
+        params.set('site', page.site);
+    }
+    if (page.fromN !== undefined) {
+        params.set('from_n', String(page.fromN));
+    }
+    if (page.toN !== undefined) {
+        params.set('to_n', String(page.toN));
     }
     // A page is read to be shown, and the reader decrypts at most this many entries anyway: asking
     // for more is paying for bytes and parse work that the caller throws away (measured: 546
