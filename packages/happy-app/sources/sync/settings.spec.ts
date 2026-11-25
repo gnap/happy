@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { settingsParse, applySettings, settingsDefaults, type Settings, AIBackendProfileSchema } from './settings';
+import { settingsParse, applySettings, settingsDefaults, getProfileEnvironmentVariables, type Settings, AIBackendProfileSchema } from './settings';
 import { getBuiltInProfile } from './profileUtils';
 
 describe('settings', () => {
@@ -864,6 +864,32 @@ describe('settings', () => {
             expect(merged.useEnhancedSessionWizard).toBe(true);
             expect(merged.profiles).toEqual(pendingChanges.profiles);
             expect(merged.dismissedCLIWarnings).toEqual(pendingChanges.dismissedCLIWarnings);
+        });
+    });
+});
+
+describe('getProfileEnvironmentVariables', () => {
+    it('turns a Codex endpoint into the generic wire variables, not hand-managed OpenAI ones', () => {
+        const profile = AIBackendProfileSchema.parse({
+            id: 'codex-profile',
+            name: 'Codex',
+            environmentVariables: [],
+            compatibility: { claude: false, codex: true, cursor: false, gemini: false },
+            codexConfig: {
+                baseUrl: 'https://llm.example/v1',
+                apiKey: 'sk-test',
+                model: 'gpt-6.1-terra',
+            },
+            isBuiltIn: false,
+            createdAt: 0,
+            updatedAt: 0,
+            version: '1.0.0',
+        });
+
+        expect(getProfileEnvironmentVariables(profile)).toEqual({
+            CODEX_BASE_URL: 'https://llm.example/v1',
+            CODEX_API_KEY: 'sk-test',
+            CODEX_MODEL: 'gpt-6.1-terra',
         });
     });
 });

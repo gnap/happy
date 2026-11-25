@@ -8,6 +8,7 @@ import Constants from 'expo-constants';
 import { t } from '@/text';
 import { ProfileEditForm } from '@/components/ProfileEditForm';
 import { AIBackendProfile } from '@/sync/settings';
+import { compatibilityForAgent } from '@/sync/profileUtils';
 import { layout } from '@/components/layout';
 import { callbacks } from '../index';
 
@@ -33,7 +34,7 @@ export default function ProfileEditScreen() {
             name: '',
             anthropicConfig: {},
             environmentVariables: [],
-            compatibility: { claude: true, codex: true, cursor: true, gemini: true },
+            compatibility: compatibilityForAgent('claude'),
             isBuiltIn: false,
             createdAt: Date.now(),
             updatedAt: Date.now(),

@@ -1051,6 +1051,9 @@ export const pt: TranslationStructure = {
         proxyRouteNone: 'Direto',
 
         profileName: 'Nome do perfil',
+        profileAgent: 'Agente',
+        profileAgentDescription: 'Para qual CLI é este perfil',
+        codexConfigDescription: 'O Happy cria uma configuração gerenciada do Codex para esta sessão — não é preciso definir CODEX_HOME.',
         enterName: 'Digite o nome do perfil',
         baseURL: 'URL base',
         authToken: 'Token de autenticação',

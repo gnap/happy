@@ -28,7 +28,7 @@ import {
     resolveCurrentOption,
 } from '@/components/modelModeOptions';
 import { AIBackendProfile, getProfileEnvironmentVariables, validateProfileForAgent } from '@/sync/settings';
-import { getBuiltInProfile, DEFAULT_PROFILES } from '@/sync/profileUtils';
+import { compatibilityForAgent, getBuiltInProfile, DEFAULT_PROFILES } from '@/sync/profileUtils';
 import { AgentInput } from '@/components/AgentInput';
 import { StyleSheet } from 'react-native-unistyles';
 import { randomUUID } from 'expo-crypto';
@@ -614,6 +614,14 @@ function NewSessionWizard() {
         return getBuiltInProfile(selectedProfileId);
     }, [selectedProfileId, profileMap]);
 
+    // A profile selected for one agent is not a valid choice for another. Cycling the agent must
+    // drop it rather than carry its environment into a CLI it was not written for.
+    React.useEffect(() => {
+        if (selectedProfile && !validateProfileForAgent(selectedProfile, agentType)) {
+            setSelectedProfileId(null);
+        }
+    }, [agentType, selectedProfile]);
+
     const selectedMachine = React.useMemo(() => {
         if (!selectedMachineId) return null;
         return machines.find(m => m.id === selectedMachineId);
@@ -770,7 +778,7 @@ function NewSessionWizard() {
             name: '',
             anthropicConfig: {},
             environmentVariables: [],
-            compatibility: { claude: true, codex: true, cursor: true, gemini: true },
+            compatibility: compatibilityForAgent(agentType === 'cursor-acp' ? 'cursor' : agentType),
             isBuiltIn: false,
             createdAt: Date.now(),
             updatedAt: Date.now(),
@@ -778,7 +786,7 @@ function NewSessionWizard() {
         };
         const profileData = encodeURIComponent(JSON.stringify(newProfile));
         router.push(`/new/pick/profile-edit?profileData=${profileData}`);
-    }, [router]);
+    }, [router, agentType]);
 
     const handleEditProfile = React.useCallback((profile: AIBackendProfile) => {
         const profileData = encodeURIComponent(JSON.stringify(profile));
@@ -1034,10 +1042,12 @@ function NewSessionWizard() {
             // profile keeps the route its own SOCKS5 setting asks for.
             let proxyViaRelay: boolean | undefined = undefined;
             if (selectedProfileId) {
-                const selectedProfile = profileMap.get(selectedProfileId);
-                if (selectedProfile) {
-                    environmentVariables = transformProfileToEnvironmentVars(selectedProfile, agentType);
-                    proxyViaRelay = selectedProfile.proxyViaRelay ?? false;
+                const profile = profileMap.get(selectedProfileId) ?? getBuiltInProfile(selectedProfileId);
+                // Defense in depth: the picker only offers compatible profiles, but a selection
+                // can race an agent change. Never hand a profile to a CLI it was not written for.
+                if (profile && validateProfileForAgent(profile, agentType)) {
+                    environmentVariables = transformProfileToEnvironmentVars(profile, agentType);
+                    proxyViaRelay = profile.proxyViaRelay ?? false;
                 }
             }
             // Pass initial permission/model to CLI so ACP cursor starts with user-selected mode (not default)
@@ -1658,6 +1668,7 @@ function NewSessionWizard() {
                             {/* Custom profiles - show first (exclude built-in templates) */}
                             {profiles
                                 .filter(p => !DEFAULT_PROFILES.some(bp => bp.id === p.id))
+                                .filter(p => validateProfileForAgent(p, agentType))
                                 .map((profile) => {
                                 const availability = isProfileAvailable(profile);
 
@@ -1725,7 +1736,7 @@ function NewSessionWizard() {
                                 .filter(bp => profileIds.has(bp.id))
                                 .map((profileDisplay) => {
                                 const profile = getBuiltInProfile(profileDisplay.id);
-                                if (!profile) return null;
+                                if (!profile || !validateProfileForAgent(profile, agentType)) return null;
 
                                 const availability = isProfileAvailable(profile);
 

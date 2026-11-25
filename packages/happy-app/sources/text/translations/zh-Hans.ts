@@ -1053,6 +1053,9 @@ export const zhHans: TranslationStructure = {
         proxyRouteNone: '直连',
 
         profileName: '配置文件名称',
+        profileAgent: 'Agent',
+        profileAgentDescription: '这个 profile 用于哪个 CLI',
+        codexConfigDescription: 'Happy 会为这个会话生成托管的 Codex 配置，不需要手动设置 CODEX_HOME。',
         enterName: '输入配置文件名称',
         baseURL: '基础 URL',
         authToken: '认证令牌',

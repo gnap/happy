@@ -96,8 +96,10 @@ export type ChannelOperation =
     | 'identity'
     /** Ask a machine which sessions it has. */
     | 'listSessions'
-    /** Archive a session: a machine-side delete transaction, replayed to the server. */
+    /** Archive a session: stop it and keep the row, its history and the server's record. */
     | 'archive'
+    /** Delete a session: a machine-side tombstone, replayed to the server. */
+    | 'delete'
     /** Start a new session on a machine. */
     | 'spawn'
     /** Stop a session, or the daemon. */
