@@ -43,11 +43,24 @@ const TogetherAIConfigSchema = z.object({
     model: z.string().optional(),
 });
 
-/** The Codex endpoint a profile states as data; `runCodex` materialises its `config.toml`. */
+/** The `auth.json` a ChatGPT sign-in produced, kept so sessions can log in without the browser. */
+const CodexAuthSchema = z.object({
+    authJson: z.string().min(1),
+    savedAt: z.number(),
+    accountId: z.string().optional(),
+    email: z.string().optional(),
+    planType: z.string().optional(),
+});
+
+/**
+ * The Codex credential a profile states as data. `runCodex` materialises either a provider
+ * `config.toml` (endpoint + key) or the shared `auth.json` of a ChatGPT login.
+ */
 const CodexConfigSchema = z.object({
     baseUrl: z.string().optional(),
     apiKey: z.string().optional(),
     model: z.string().optional(),
+    auth: CodexAuthSchema.optional(),
 });
 
 // Tmux configuration schema (matching GUI exactly)
@@ -213,8 +226,15 @@ export function getProfileEnvironmentVariables(profile: AIBackendProfile): Recor
   // Codex endpoint: `runCodex` turns these into a managed CODEX_HOME/config.toml. Generic names
   // on purpose — the same variables mean the same thing to any Codex session, wherever it runs.
   if (profile.codexConfig) {
-    if (profile.codexConfig.baseUrl) envVars.CODEX_BASE_URL = profile.codexConfig.baseUrl;
-    if (profile.codexConfig.apiKey) envVars.CODEX_API_KEY = profile.codexConfig.apiKey;
+    // A login is the whole credential; it travels base64 so an environment record carries it
+    // unchanged. An endpoint/key beside it would take Codex off the login, so they are not sent.
+    if (profile.codexConfig.auth?.authJson) {
+      envVars.CODEX_AUTH_JSON = Buffer.from(profile.codexConfig.auth.authJson, 'utf8').toString('base64');
+      envVars.CODEX_AUTH_SAVED_AT = String(profile.codexConfig.auth.savedAt);
+    } else {
+      if (profile.codexConfig.baseUrl) envVars.CODEX_BASE_URL = profile.codexConfig.baseUrl;
+      if (profile.codexConfig.apiKey) envVars.CODEX_API_KEY = profile.codexConfig.apiKey;
+    }
     if (profile.codexConfig.model) envVars.CODEX_MODEL = profile.codexConfig.model;
   }
 

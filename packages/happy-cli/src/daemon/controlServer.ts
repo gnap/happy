@@ -35,7 +35,7 @@ export function startDaemonControlServer({
   stopSessionByPid: (pid: number) => boolean;
   port: number;
   spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>;
-  restartSession: (sessionId: string, sandboxConfig?: unknown, requiresDesktop?: boolean, expectGeneration?: number, mode?: 'wait' | 'accept') => Promise<RestartSessionResult>;
+  restartSession: (sessionId: string, sandboxConfig?: unknown, requiresDesktop?: boolean, expectGeneration?: number, mode?: 'wait' | 'accept', profile?: import('./types').RestartProfileAsk) => Promise<RestartSessionResult>;
   /** Remove a session from this machine and from the server. */
   deleteSession: (sessionId: string) => SessionLifecycleResult;
   /** Stop a session and keep it, marked archived. */
@@ -333,6 +333,9 @@ export function startDaemonControlServer({
           expect: z.enum(['accepted']).optional(),
           /** The generation the caller observed; a repeat is answered, not repeated. */
           generation: z.number().int().min(0).optional(),
+          /** The profile the caller holds now, for a restart asked before the next message. */
+          environmentVariables: z.record(z.string()).optional(),
+          proxyViaRelay: z.boolean().optional(),
         }),
         response: {
           200: z.object({
@@ -351,14 +354,20 @@ export function startDaemonControlServer({
         }
       }
     }, async (request) => {
-      const { sessionId, requiresDesktop, expect, generation } = request.body;
-      logger.debug(`[CONTROL SERVER] Restart session request: ${sessionId}, expect=${expect ?? 'wait'}, generation=${generation ?? '-'}`);
+      const { sessionId, requiresDesktop, expect, generation, environmentVariables, proxyViaRelay } = request.body;
+      logger.debug(`[CONTROL SERVER] Restart session request: ${sessionId}, expect=${expect ?? 'wait'}, generation=${generation ?? '-'}, profile=${environmentVariables !== undefined || proxyViaRelay !== undefined ? 'carried' : 'recovered'}`);
       return restartSession(
         sessionId,
         undefined,
         typeof requiresDesktop === 'boolean' ? requiresDesktop : undefined,
         generation,
         expect === 'accepted' ? 'accept' : 'wait',
+        environmentVariables !== undefined || proxyViaRelay !== undefined
+          ? {
+              ...(environmentVariables !== undefined ? { environmentVariables } : {}),
+              ...(proxyViaRelay !== undefined ? { proxyViaRelay } : {}),
+            }
+          : undefined,
       );
     });
 

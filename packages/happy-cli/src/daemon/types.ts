@@ -86,6 +86,18 @@ export type RestartSessionResult = SessionControlResult & {
 };
 
 /**
+ * The profile the caller wants the restarted process to boot with.
+ *
+ * A restart happens after a profile edit and before any message carries the new environment; the
+ * daemon's own recovery reads the last message's profile, which is the older one. The caller that
+ * holds the current profile therefore says what it is. Absent fields fall back to that recovery.
+ */
+export type RestartProfileAsk = {
+    environmentVariables?: Record<string, string>;
+    proxyViaRelay?: boolean;
+};
+
+/**
  * Session tracking for daemon
  */
 export interface TrackedSession {

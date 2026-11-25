@@ -15,7 +15,7 @@ import { backoff } from '@/utils/time';
 import { localRouteNames } from '@/daemon/proxy/routes';
 import { isBun, isNode } from '@/utils/runtime';
 import { RpcHandlerManager } from './rpc/RpcHandlerManager';
-import type { SessionLifecycleResult, RestartSessionResult } from '../daemon/types';
+import type { SessionLifecycleResult, RestartSessionResult, RestartProfileAsk } from '../daemon/types';
 
 /** How long a best-effort daemon-state write may take before the caller moves on. */
 const DAEMON_STATE_WRITE_TIMEOUT_MS = 2000;
@@ -136,7 +136,7 @@ type MachineRpcHandlers = {
     deleteSession: (sessionId: string) => SessionLifecycleResult;
     /** Stop a session and keep it, marked archived. */
     archiveSession: (sessionId: string) => SessionLifecycleResult;
-    restartSession: (sessionId: string, sandboxConfig?: any, requiresDesktop?: boolean, expectGeneration?: number, mode?: 'wait' | 'accept') => Promise<RestartSessionResult>;
+    restartSession: (sessionId: string, sandboxConfig?: any, requiresDesktop?: boolean, expectGeneration?: number, mode?: 'wait' | 'accept', profile?: RestartProfileAsk) => Promise<RestartSessionResult>;
     requestShutdown: () => void;
 }
 
@@ -329,22 +329,38 @@ export class ApiMachineClient {
             if (!sessionId) {
                 throw new Error('Session ID is required');
             }
-            logger.debug(`[API MACHINE] restartSession params: sessionId=${sessionId}, sandboxConfig=${JSON.stringify(sandboxConfig)}, expect=${expect ?? 'legacy'}, generation=${generation ?? '-'}`);
             const desktop = typeof requiresDesktop === 'boolean' ? requiresDesktop : undefined;
+            // The App sends the profile as it is now. A restart after a profile edit has no newer
+            // message to recover from, so this is the only copy of the new route and credentials.
+            const carriedEnv = params?.environmentVariables;
+            const environmentVariables = carriedEnv && typeof carriedEnv === 'object' && !Array.isArray(carriedEnv)
+                ? Object.fromEntries(
+                    Object.entries(carriedEnv as Record<string, unknown>)
+                        .filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+                )
+                : undefined;
+            const proxyViaRelay = typeof params?.proxyViaRelay === 'boolean' ? params.proxyViaRelay : undefined;
+            const profile: RestartProfileAsk | undefined = environmentVariables !== undefined || proxyViaRelay !== undefined
+                ? {
+                    ...(environmentVariables !== undefined ? { environmentVariables } : {}),
+                    ...(proxyViaRelay !== undefined ? { proxyViaRelay } : {}),
+                }
+                : undefined;
+            logger.debug(`[API MACHINE] restartSession params: sessionId=${sessionId}, sandboxConfig=${JSON.stringify(sandboxConfig)}, expect=${expect ?? 'legacy'}, generation=${generation ?? '-'}, profile=${profile ? 'carried' : 'recovered'}`);
 
             if (expect === 'accepted' || typeof generation === 'number') {
                 // The acceptance answer is synchronous work (the generation checks and recording
                 // the desired state), so awaiting it does not wait for the restart itself. This is
                 // what lets a refusal — a generation this machine does not know — reach the caller
                 // instead of being silently dropped.
-                const result = await restartSession(sessionId, sandboxConfig, desktop, typeof generation === 'number' ? generation : undefined, 'accept');
+                const result = await restartSession(sessionId, sandboxConfig, desktop, typeof generation === 'number' ? generation : undefined, 'accept', profile);
                 logger.debug(`[API MACHINE] restartSession: ${sessionId} — accepted=${result.accepted} stage=${result.stage} reason=${result.reason ?? '-'}`);
                 return result;
             }
 
             // Legacy callers get the same fire-and-forget they always got; the added fields say
             // what this machine can honestly say at this point in the work.
-            restartSession(sessionId, sandboxConfig, desktop).then(r => {
+            restartSession(sessionId, sandboxConfig, desktop, undefined, undefined, profile).then(r => {
                 logger.debug(`[API MACHINE] restartSession: ${sessionId} — success=${r.success}`);
             }).catch(err => {
                 logger.debug(`[API MACHINE] restartSession: ${sessionId} — error:`, err);

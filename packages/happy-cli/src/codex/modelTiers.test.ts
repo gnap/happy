@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { codexModelOptions, currentTierCode, modelForTier, resolveCodexModel, tierOfModel } from './modelTiers';
+import { codexModelOptions, currentTierCode, modelForTier, resolveCodexModel, resolveCodexModelIfExplicit, tierOfModel } from './modelTiers';
 
 const saved = { ...process.env };
 
@@ -46,6 +46,32 @@ describe('resolveCodexModel', () => {
         expect(resolveCodexModel(undefined)).toBe(modelForTier('terra'));
         process.env.CODEX_MODEL = 'gpt-6.0-sol';
         expect(resolveCodexModel(undefined)).toBe('gpt-6.0-sol');
+    });
+});
+
+describe('resolveCodexModelIfExplicit', () => {
+    it('sends nothing when only a tier was picked and the machine maps no build', () => {
+        delete process.env.CODEX_MODEL;
+        delete process.env.CODEX_MODEL_SOL;
+        expect(resolveCodexModelIfExplicit('sol')).toBeUndefined();
+        expect(resolveCodexModelIfExplicit(undefined)).toBeUndefined();
+    });
+
+    it('sends a tier only when the machine maps it to a real model', () => {
+        process.env.CODEX_MODEL_SOL = 'gpt-5-codex';
+        expect(resolveCodexModelIfExplicit('sol')).toBe('gpt-5-codex');
+        expect(resolveCodexModelIfExplicit('gpt-5-codex')).toBe('gpt-5-codex');
+    });
+
+    it('does not treat a tier name in CODEX_MODEL as a model', () => {
+        process.env.CODEX_MODEL = 'terra';
+        expect(resolveCodexModelIfExplicit('sol')).toBeUndefined();
+        expect(resolveCodexModelIfExplicit(undefined)).toBeUndefined();
+    });
+
+    it('uses a real CODEX_MODEL as the default', () => {
+        process.env.CODEX_MODEL = 'gpt-5-codex';
+        expect(resolveCodexModelIfExplicit(undefined)).toBe('gpt-5-codex');
     });
 });
 

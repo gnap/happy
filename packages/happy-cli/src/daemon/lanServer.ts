@@ -57,6 +57,16 @@ const BODY_LIMIT_BYTES = 4096;
  */
 const CONTROL_BODY_LIMIT_BYTES = 256 * 1024;
 
+/**
+ * The restart route's ceiling.
+ *
+ * It carries the caller's profile environment, and a Codex login's `auth.json` is kilobytes of
+ * base64; the global 4KB is enough for a nonce, not for a credential. Like the control route, this
+ * one is behind a token and an account proof before its body is parsed, so the larger ceiling is
+ * about size. The caller treats a 413 as this machine refusing the restart, which it is not.
+ */
+const RESTART_BODY_LIMIT_BYTES = 256 * 1024;
+
 const PROOF_CONTEXT = 'v1.proof';
 const TOKEN_CONTEXT = 'v1.token';
 
@@ -363,6 +373,7 @@ export type LanServerOptions = {
     requiresDesktop?: boolean,
     expectGeneration?: number,
     mode?: 'wait' | 'accept',
+    profile?: import('./types').RestartProfileAsk,
   ) => Promise<import('./types').RestartSessionResult>;
   /**
    * A control call the *session* acts on, forwarded to its process: abort the turn in flight, or
@@ -789,7 +800,7 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
    * tell "this machine says no" from "this machine cannot be asked": the second is what sends it
    * to the server instead, and a refusal must not read as a reason to ask someone else.
    */
-  app.post('/lan/sessions/:sessionId/restart', async (request, reply) => {
+  app.post('/lan/sessions/:sessionId/restart', { bodyLimit: RESTART_BODY_LIMIT_BYTES }, async (request, reply) => {
     if (!requireToken(request)) {
       return reply.code(401).send({ error: 'unauthorized' });
     }
@@ -805,7 +816,13 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     if (!opts.restartSession) {
       return reply.code(404).send({ error: 'this daemon does not restart sessions' });
     }
-    const body = request.body as { requiresDesktop?: unknown; expect?: unknown; generation?: unknown } | null;
+    const body = request.body as {
+      requiresDesktop?: unknown;
+      expect?: unknown;
+      generation?: unknown;
+      environmentVariables?: unknown;
+      proxyViaRelay?: unknown;
+    } | null;
     const requested = typeof body?.requiresDesktop === 'boolean' ? body.requiresDesktop : undefined;
     // Additive request fields: an older caller sends neither and keeps the blocking answer.
     // `generation` makes a repeat land on the state its first ask reached; `expect: accepted`
@@ -814,8 +831,24 @@ export async function startLanServer(opts: LanServerOptions): Promise<LanServerH
     const generation = typeof body?.generation === 'number' && Number.isInteger(body.generation) && body.generation >= 0
       ? body.generation
       : undefined;
-    logger.debug(`[lan] restart ${sessionId} from=${clientAddress(request)} desktop=${requested ?? 'keep'} expect=${expectAccepted ? 'accepted' : 'wait'} generation=${generation ?? '-'}`);
-    const result = await opts.restartSession(sessionId, undefined, requested, generation, expectAccepted ? 'accept' : 'wait');
+    const environmentVariables = body?.environmentVariables && typeof body.environmentVariables === 'object' && !Array.isArray(body.environmentVariables)
+      ? Object.fromEntries(
+          Object.entries(body.environmentVariables as Record<string, unknown>)
+            .filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+        )
+      : undefined;
+    const proxyViaRelay = typeof body?.proxyViaRelay === 'boolean' ? body.proxyViaRelay : undefined;
+    logger.debug(`[lan] restart ${sessionId} from=${clientAddress(request)} desktop=${requested ?? 'keep'} expect=${expectAccepted ? 'accepted' : 'wait'} generation=${generation ?? '-'} profile=${environmentVariables !== undefined || proxyViaRelay !== undefined ? 'carried' : 'recovered'}`);
+    const result = await opts.restartSession(
+      sessionId,
+      undefined,
+      requested,
+      generation,
+      expectAccepted ? 'accept' : 'wait',
+      environmentVariables !== undefined || proxyViaRelay !== undefined
+        ? { ...(environmentVariables !== undefined ? { environmentVariables } : {}), ...(proxyViaRelay !== undefined ? { proxyViaRelay } : {}) }
+        : undefined,
+    );
     logger.debug(`[lan] restart ${sessionId} success=${result.success} accepted=${result.accepted} stage=${result.stage}${result.error ? ` error=${result.error}` : ''}`);
     return reply.send({ v: LAN_PROTOCOL_VERSION, ...result });
   });

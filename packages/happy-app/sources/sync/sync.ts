@@ -6436,6 +6436,19 @@ class Sync {
         if (!machineKey) {
             return null;
         }
+        // The profile as it is *now*, not as the last user message left it. A restart is asked for
+        // after an edit (a new route, a new login) and before any message exists to carry it; the
+        // daemon can only recover the older copy. Sending the current one is what makes a restart
+        // an injection point rather than a replay of the previous message.
+        const session = getSession(sessionId);
+        const profiles = storage.getState().settings.profiles ?? [];
+        const environmentVariables = session ? resolveMessageProfileEnv(session, profiles) : undefined;
+        const proxyViaRelay = session ? resolveMessageProxyViaRelay(session, profiles) : undefined;
+        const ask: RestartAsk = {
+            ...options,
+            ...(environmentVariables !== undefined ? { environmentVariables } : {}),
+            ...(proxyViaRelay !== undefined ? { proxyViaRelay } : {}),
+        };
         // The same ordering that governs where this session's messages are read from: a session
         // pinned to one channel is restarted on it, and one the App is reading over the LAN is
         // restarted there. The server carries it too, when no machine channel answered first — an
@@ -6444,16 +6457,23 @@ class Sync {
             operation: 'restart',
             path: `/lan/sessions/${encodeURIComponent(sessionId)}/restart`,
             proof: { operation: 'restart', target: sessionId },
-            run: (baseUrl, token, proof) => restartSessionAt(baseUrl, token, sessionId, proof ?? undefined, options),
+            run: (baseUrl, token, proof) => restartSessionAt(baseUrl, token, sessionId, proof ?? undefined, ask),
             // The server carries the same action by asking the daemon on this App's behalf. It is a
             // channel like the others: tried when its turn comes, and skipped when it cannot. The
             // daemon reads the same fields from this path as from its own route, so the ask is
             // built once rather than described twice and allowed to drift.
             onServer: () => apiSocket.machineRPC<
                 LanRestartVerdict,
-                { sessionId: string; requiresDesktop?: boolean; generation?: number; expect?: 'accepted' }
+                {
+                    sessionId: string;
+                    requiresDesktop?: boolean;
+                    generation?: number;
+                    expect?: 'accepted';
+                    environmentVariables?: Record<string, string>;
+                    proxyViaRelay?: boolean;
+                }
             >(
-                machineId, 'restartSession', { sessionId, ...(restartAskBody(options) ?? {}) },
+                machineId, 'restartSession', { sessionId, ...(restartAskBody(ask) ?? {}) },
             ),
         });
         if (outcome.kind === 'done') {
