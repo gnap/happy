@@ -23,6 +23,7 @@ import { MessageBuffer } from "@/ui/ink/messageBuffer";
 import { CodexDisplay } from "@/ui/ink/CodexDisplay";
 import { CHANGE_TITLE_INSTRUCTION } from '@/gemini/constants';
 import { notifyDaemonSessionStarted, notifyDaemonSessionEnding } from "@/daemon/controlClient";
+import { startUnixSocketClient, reportLanDelivery } from '@/daemon/unixSocketClient';
 import { registerKillSessionHandler } from "@/claude/registerKillSessionHandler";
 import { stopCaffeinate } from "@/utils/caffeinate";
 import { connectionState } from '@/utils/serverConnectionErrors';
@@ -104,6 +105,35 @@ export async function runCodex(opts: {
         logger.info(`[codex] profile endpoint ${profileCodex.baseUrl ?? '(default)'} — config at ${home}${previousHome && previousHome !== home ? ` (replaces CODEX_HOME=${previousHome})` : ''}`);
     }
 
+    // A profile can also arrive with a user message (the App sends it every time). Codex reads its
+    // provider at process start, so a change means rewriting the managed home and reconnecting the
+    // app-server. The signature is over the endpoint itself: a profile edit that changes nothing
+    // Codex consumes must not restart it.
+    const CODEX_PROFILE_KEYS = ['CODEX_BASE_URL', 'CODEX_API_KEY', 'CODEX_MODEL'] as const;
+    const profileEnvSignature = (env: Record<string, string | undefined>): string =>
+        CODEX_PROFILE_KEYS.map((key) => `${key}=${env[key] ?? ''}`).join('\0');
+    let pendingProfileEnv: Record<string, string> | undefined;
+    let appliedProfileKeys: string[] = [];
+    let appliedProfileSignature = profileEnvSignature(process.env);
+
+    const applyProfileEnv = async (env: Record<string, string>): Promise<void> => {
+        // A key the previous profile set and this one omits must not linger in the process.
+        for (const key of appliedProfileKeys) {
+            if (!(key in env)) delete process.env[key];
+        }
+        for (const [key, value] of Object.entries(env)) process.env[key] = value;
+        appliedProfileKeys = Object.keys(env);
+
+        const next = readProfileCodexConfig(process.env);
+        if (!next) return;
+        const home = writeProfileCodexHome(configuration.happyHomeDir, sessionTag, {
+            ...next,
+            ...(next.model ? { model: resolveCodexModel(next.model) } : {}),
+        });
+        process.env.CODEX_HOME = home;
+        logger.info(`[codex] profile endpoint changed — config at ${home}`);
+    };
+
     const api = await ApiClient.create(opts.credentials);
 
     // Log startup options
@@ -181,6 +211,27 @@ export async function runCodex(opts: {
     reportToDaemon();
     setInterval(reportToDaemon, DAEMON_REPORT_INTERVAL_MS);
 
+    // The daemon's LAN and relay readers reach a session through this socket: it registers the
+    // session with them, mirrors the log they page, and routes messages they send. Codex sessions
+    // used to start without it, so only the server channel could reach them.
+    const stopSocketClient = startUnixSocketClient({
+        sessionId: session.sessionId,
+        pid: process.pid,
+        sessionTag,
+        metadata,
+    }, reportToDaemon, (payload) => {
+        const delivered = session.deliverLanUserMessage(payload);
+        logger.debug(`[START] LAN user message ${delivered ? 'routed' : 'rejected (did not decrypt)'}`);
+        reportLanDelivery(payload.localId, delivered);
+    }, (rpc) => {
+        void session.rpcHandlerManager.handleRequest({
+            method: `${session.sessionId}:${rpc.method}`,
+            params: rpc.params ?? '',
+        });
+    }, () => session.getPresence());
+    process.on('beforeExit', () => stopSocketClient());
+    process.on('exit', () => stopSocketClient());
+
     const messageQueue = new MessageQueue2<EnhancedMode>((mode) => hashObject({
         permissionMode: mode.permissionMode,
         model: mode.model,
@@ -193,6 +244,10 @@ export async function runCodex(opts: {
 
     let handleUserMessage: ((message: UserMessage) => void) | null = null;
     handleUserMessage = (message) => {
+        const profileEnv = message.meta?.environmentVariables as Record<string, string> | undefined;
+        if (profileEnv) {
+            pendingProfileEnv = profileEnv;
+        }
         // Resolve permission mode (accept all modes, will be mapped in switch statement)
         let messagePermissionMode = currentPermissionMode;
         if (message.meta?.permissionMode) {
@@ -500,6 +555,12 @@ export async function runCodex(opts: {
         } else if (msg.type === 'turn_aborted') {
             messageBuffer.addMessage('Turn aborted', 'status');
             sendReady();
+        } else if (msg.type === 'error') {
+            const text = typeof msg.message === 'string' && msg.message.length > 0
+                ? msg.message
+                : 'Codex reported an error';
+            messageBuffer.addMessage(`Error: ${text}`, 'status');
+            session.sendSessionEvent({ type: 'message', message: text });
         }
 
         if (msg.type === 'task_started') {
@@ -637,6 +698,19 @@ export async function runCodex(opts: {
                     sandboxManagedByHappy,
                 );
 
+                if (pendingProfileEnv) {
+                    const desiredSignature = profileEnvSignature({ ...process.env, ...pendingProfileEnv });
+                    if (desiredSignature !== appliedProfileSignature) {
+                        await applyProfileEnv(pendingProfileEnv);
+                        appliedProfileSignature = desiredSignature;
+                        // The provider is read when the app-server starts; restart it so the new
+                        // profile's endpoint and key are the ones this turn uses.
+                        await client.disconnect();
+                        await client.connect();
+                        logger.debug('[Codex] app-server reconnected for a profile change');
+                    }
+                }
+
                 const model = resolveCodexModel(message.mode.model);
                 publishModelCatalog(message.mode.model);
 
@@ -745,6 +819,7 @@ export async function runCodex(opts: {
         logger.debug('[codex]: client.disconnect begin');
         await client.disconnect();
         logger.debug('[codex]: client.disconnect done');
+        stopSocketClient();
         // Stop Happy MCP server
         logger.debug('[codex]: happyServer.stop');
         happyServer.stop();

@@ -297,6 +297,7 @@ export class CodexAppServerClient {
             || method === 'thread/goal/cleared'
             || method === 'turn/started'
             || method === 'turn/completed'
+            || method === 'error'
             || method === 'thread/status/changed'
             || method === 'thread/tokenUsage/updated'
             || method.startsWith('item/');
@@ -377,6 +378,38 @@ export class CodexAppServerClient {
                 params?.turn?.error ?? params?.error,
                 method,
             );
+            return true;
+        }
+
+        // A turn-level error. `willRetry` says whether Codex will retry on its own; a final
+        // error (willRetry=false) also ends the turn, so the caller's sendTurnAndWait must not
+        // keep waiting for a completion that will never come.
+        if (method === 'error') {
+            const error = params?.error ?? null;
+            const message = typeof error?.message === 'string'
+                ? error.message
+                : (typeof params?.message === 'string' ? params.message : 'Codex reported an error');
+            logger.warn('[CodexAppServer] error notification:', {
+                message,
+                willRetry: params?.will_retry,
+                threadId: params?.thread_id,
+                turnId: params?.turn_id,
+            });
+            this.eventHandler?.({
+                type: 'error',
+                message,
+                error,
+                will_retry: params?.will_retry,
+                ...(params?.turn_id ? { turn_id: params.turn_id } : {}),
+            });
+            if (!params?.will_retry && this.pendingTurnCompletion) {
+                this.emitRawTurnCompletion(
+                    params?.turn_id ?? this._turnId,
+                    'failed',
+                    error ?? { message },
+                    method,
+                );
+            }
             return true;
         }
 
