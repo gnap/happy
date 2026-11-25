@@ -557,6 +557,10 @@ export const ja: TranslationStructure = {
             auto: '自動',
         },
         codexModel: {
+            sol: 'Sol',
+            astra: 'Astra',
+            terra: 'Terra',
+            luna: 'Luna',
             title: 'CODEXモデル',
             gpt5CodexLow: 'gpt-5-codex 低',
             gpt5CodexMedium: 'gpt-5-codex 中',
