@@ -658,6 +658,64 @@ export function readSessionLog(tag: string, site: string | undefined): SessionLo
   return readSessionLogPage({ tag, site, since: '0:0', maxBytes: Number.MAX_SAFE_INTEGER }).entries;
 }
 
+/**
+ * Reads one writer's counters in an inclusive range, by the log's own coordinates.
+ *
+ * This is the off-server addressing: `(site, n)` is stamped by the writer and mirrored beside the
+ * ciphertext, so a reader that knows what it is missing can ask this machine for exactly that
+ * interval. No server sequence is involved, and a machine with no such entries answers honestly —
+ * an empty list — rather than sending the reader somewhere else to guess.
+ *
+ * A range is a bounded repair, not a page: it returns every matching entry (up to a cap), oldest
+ * first, with the two directions' duplicate copies collapsed as `readSessionLogPage` does.
+ */
+export type SessionLogRangeQuery = {
+  tag: string;
+  /** The writer whose stream is being repaired; also the store's key for the log. */
+  site: string | undefined;
+  /** Inclusive first counter. */
+  fromN: number;
+  /** Inclusive last counter. */
+  toN: number;
+  /** A repair is bounded; a range that claims thousands is a bug, not a page. */
+  maxEntries?: number;
+};
+
+const DEFAULT_RANGE_MAX_ENTRIES = 200;
+
+export function readSessionLogRange(query: SessionLogRangeQuery): SessionLogEntry[] {
+  const dir = sessionLogDir(query.tag, query.site);
+  const maxEntries = Math.max(1, query.maxEntries ?? DEFAULT_RANGE_MAX_ENTRIES);
+  const entries: SessionLogEntry[] = [];
+  for (const name of listSegments(dir)) {
+    const buffer = readSegment(dir, name);
+    if (buffer === null) {
+      continue;
+    }
+    for (const line of segmentLines(buffer)) {
+      let entry: SessionLogEntry;
+      try {
+        entry = JSON.parse(line.text) as SessionLogEntry;
+      } catch {
+        continue;
+      }
+      // Only the writer's own mirrored stamp decides. A record without one predates the mirror
+      // and cannot be addressed this way; it is not guessed at from its neighbours.
+      if (entry.site !== query.site || entry.n === undefined) {
+        continue;
+      }
+      if (entry.n < query.fromN || entry.n > query.toN) {
+        continue;
+      }
+      entries.push(entry);
+      if (entries.length >= maxEntries) {
+        return collapseSessionLogEntries(entries);
+      }
+    }
+  }
+  return collapseSessionLogEntries(entries);
+}
+
 /** One sub-agent's stream, as the session's log knows it. */
 export type SessionSubagentSummary = {
   subagent: string;

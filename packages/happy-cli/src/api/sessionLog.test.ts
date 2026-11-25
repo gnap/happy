@@ -23,7 +23,7 @@ vi.mock('@/ui/logger', () => ({
     logger: { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} },
 }));
 
-import { appendSessionLog, collapseSessionLogEntries, listSessionSubagents, readSessionLog, readSessionLogPage, sessionLogDir, sessionLogIdentity, pruneSessionLogs, type SessionLogEntry } from './sessionLog';
+import { appendSessionLog, collapseSessionLogEntries, listSessionSubagents, readSessionLog, readSessionLogPage, readSessionLogRange, sessionLogDir, sessionLogIdentity, pruneSessionLogs, type SessionLogEntry } from './sessionLog';
 
 let home: string;
 /** Distinct tag per test: the torn-tail check is memoised per path within a process. */
@@ -489,5 +489,32 @@ describe('writer stamp mirror', () => {
         appendSessionLog(tag, SITE, { ...entry(1), site: 'machine-1', n: 4 });
 
         expect(readSessionLog(tag, SITE)).toEqual([{ ...entry(1), site: 'machine-1', n: 4 }]);
+    });
+});
+
+describe('readSessionLogRange', () => {
+    it('reads one writer\'s counters and nothing else', () => {
+        const tag = tagFor('range');
+        appendSessionLog(tag, SITE, { ...entry(1), site: 'machine-1', n: 0 });
+        appendSessionLog(tag, SITE, entry(2)); // a main-thread record with no mirrored stamp
+        appendSessionLog(tag, SITE, { ...entry(3), site: 'machine-1', n: 3 });
+        appendSessionLog(tag, SITE, { ...entry(4), site: 'machine-1', n: 2 });
+
+        expect(readSessionLogRange({ tag, site: 'machine-1', fromN: 1, toN: 2 }).map((e) => e.id))
+            .toEqual(['id-4']);
+        // Log order, not counter order: the range is a repair, and the reader applies by id.
+        expect(readSessionLogRange({ tag, site: 'machine-1', fromN: 0, toN: 3 }).map((e) => e.id))
+            .toEqual(['id-1', 'id-3', 'id-4']);
+        expect(readSessionLogRange({ tag, site: 'another-machine', fromN: 0, toN: 3 })).toEqual([]);
+    });
+
+    it('bounds the repair, so a claim of thousands cannot become the whole log', () => {
+        const tag = tagFor('range-cap');
+        for (let n = 0; n < 10; n += 1) {
+            appendSessionLog(tag, SITE, { ...entry(n + 1), site: 'machine-1', n });
+        }
+
+        expect(readSessionLogRange({ tag, site: 'machine-1', fromN: 0, toN: 9, maxEntries: 3 }))
+            .toHaveLength(3);
     });
 });

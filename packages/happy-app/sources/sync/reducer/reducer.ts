@@ -129,6 +129,8 @@ type ReducerMessage = {
     isThinking?: boolean;
     event: AgentEvent | null;
     tool: ToolCall | null;
+    /** The writer's `(site, n)` stamp, when the record carried one. Survives a cache round-trip. */
+    writer?: { site: string; n: number };
     meta?: MessageMeta;
     files?: { name: string; size: number; mimeType: string; data: string; width?: number; height?: number }[];
 }
@@ -309,6 +311,20 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
     let newMessages: Message[] = [];
     let changed: Set<string> = new Set();
     let hasReadyEvent = false;
+
+    /**
+     * The `(site, n)` stamp of every record in this batch, by its original id.
+     *
+     * The reducer keeps its own ids for messages it builds from several blocks, but `realID`
+     * remembers the record each came from. Carrying the stamp onto the converted message is what
+     * makes a missing counter visible to a reader that only sees the reduced list.
+     */
+    const writers = new Map<string, { site: string; n: number }>();
+    for (const message of messages) {
+        if (message.writer) {
+            writers.set(message.id, message.writer);
+        }
+    }
 
     // First, trace all messages to identify sidechains
     const tracedMessages = traceMessages(state.tracerState, messages);
@@ -494,6 +510,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
         state.messages.set(mid, {
             id: mid,
             realID: message.id,
+            ...(message.writer ? { writer: message.writer } : {}),
+            ...(message.seq !== undefined ? { seq: message.seq } : {}),
             role: 'agent',
             createdAt: message.createdAt,
             event: event,
@@ -834,6 +852,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
             state.messages.set(mid, {
                 id: mid,
                 realID: msg.id,
+                ...(msg.writer ? { writer: msg.writer } : {}),
+                ...(msg.seq !== undefined ? { seq: msg.seq } : {}),
                 localId: msg.localId ?? null,
                 role: 'user',
                 createdAt: msg.createdAt,
@@ -915,6 +935,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                     state.messages.set(mid, {
                         id: mid,
                         realID: msg.id,
+                        ...(msg.writer ? { writer: msg.writer } : {}),
+                        ...(msg.seq !== undefined ? { seq: msg.seq } : {}),
                         role: 'agent',
                         createdAt: msg.createdAt,
                         text: isThinking ? `*${c.thinking}*` : c.text,
@@ -1040,6 +1062,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                         state.messages.set(mid, {
                             id: mid,
                             realID: msg.id,
+                            ...(msg.writer ? { writer: msg.writer } : {}),
+                            ...(msg.seq !== undefined ? { seq: msg.seq } : {}),
                             role: 'agent',
                             createdAt: msg.createdAt,
                             text: null,
@@ -1318,6 +1342,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
             let userMsg: ReducerMessage = {
                 id: mid,
                 realID: msg.id,
+                ...(msg.writer ? { writer: msg.writer } : {}),
+                ...(msg.seq !== undefined ? { seq: msg.seq } : {}),
                 role: 'user',
                 createdAt: msg.createdAt,
                 text: msg.content[0].prompt,
@@ -1336,6 +1362,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                     let textMsg: ReducerMessage = {
                         id: mid,
                         realID: msg.id,
+                        ...(msg.writer ? { writer: msg.writer } : {}),
+                        ...(msg.seq !== undefined ? { seq: msg.seq } : {}),
                         role: 'agent',
                         createdAt: msg.createdAt,
                         text: isThinking ? `*${c.thinking}*` : c.text,
@@ -1380,6 +1408,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
                     let toolMsg: ReducerMessage = {
                         id: mid,
                         realID: msg.id,
+                        ...(msg.writer ? { writer: msg.writer } : {}),
+                        ...(msg.seq !== undefined ? { seq: msg.seq } : {}),
                         role: 'agent',
                         createdAt: msg.createdAt,
                         text: null,
@@ -1542,6 +1572,8 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
             state.messages.set(mid, {
                 id: mid,
                 realID: msg.id,
+                ...(msg.writer ? { writer: msg.writer } : {}),
+                ...(msg.seq !== undefined ? { seq: msg.seq } : {}),
                 role: 'agent',
                 createdAt: msg.createdAt,
                 event: msg.content,
@@ -1561,7 +1593,7 @@ export function reducer(state: ReducerState, messages: NormalizedMessage[], agen
         let existing = state.messages.get(id);
         if (!existing) continue;
 
-        let message = convertReducerMessageToMessage(existing, state);
+        let message = convertReducerMessageToMessage(existing, state, writers);
         if (message) {
             newMessages.push(message);
         }
@@ -1724,7 +1756,18 @@ export function materializeReducerMessages(state: ReducerState): Message[] {
     return messages.sort((a, b) => b.createdAt - a.createdAt);
 }
 
-function convertReducerMessageToMessage(reducerMsg: ReducerMessage, state: ReducerState): Message | null {
+function convertReducerMessageToMessage(
+    reducerMsg: ReducerMessage,
+    state: ReducerState,
+    writers?: ReadonlyMap<string, { site: string; n: number }>,
+): Message | null {
+    // The stamp is stored on the reducer message when it is built, so it also survives a cache
+    // round-trip; the batch map is a fallback for a message built before that field existed.
+    const writer = reducerMsg.writer
+        ?? writers?.get(reducerMsg.realID ?? reducerMsg.id)
+        ?? writers?.get(reducerMsg.id);
+    const withWriter = writer ? { writer } : {};
+    const withSeq = reducerMsg.seq !== undefined ? { seq: reducerMsg.seq } : {};
     if (reducerMsg.role === 'user' && reducerMsg.text !== null) {
         return {
             id: reducerMsg.id,
@@ -1732,6 +1775,8 @@ function convertReducerMessageToMessage(reducerMsg: ReducerMessage, state: Reduc
             createdAt: reducerMsg.createdAt,
             kind: 'user-text',
             text: reducerMsg.text || '',
+            ...withWriter,
+            ...withSeq,
             ...(reducerMsg.meta?.displayText && { displayText: reducerMsg.meta.displayText }),
             ...(reducerMsg.files && reducerMsg.files.length > 0 ? { files: reducerMsg.files } : {}),
             meta: reducerMsg.meta
@@ -1743,6 +1788,8 @@ function convertReducerMessageToMessage(reducerMsg: ReducerMessage, state: Reduc
             createdAt: reducerMsg.createdAt,
             kind: 'agent-text',
             text: reducerMsg.text,
+            ...withWriter,
+            ...withSeq,
             ...(reducerMsg.isThinking && { isThinking: true }),
             meta: reducerMsg.meta
         };
@@ -1751,7 +1798,7 @@ function convertReducerMessageToMessage(reducerMsg: ReducerMessage, state: Reduc
         let childMessages: Message[] = [];
         let children = reducerMsg.realID ? state.sidechains.get(reducerMsg.realID) || [] : [];
         for (let child of children) {
-            let childMessage = convertReducerMessageToMessage(child, state);
+            let childMessage = convertReducerMessageToMessage(child, state, writers);
             if (childMessage) {
                 childMessages.push(childMessage);
             }
@@ -1764,6 +1811,8 @@ function convertReducerMessageToMessage(reducerMsg: ReducerMessage, state: Reduc
             kind: 'tool-call',
             tool: { ...reducerMsg.tool },
             children: childMessages,
+            ...withWriter,
+            ...withSeq,
             meta: reducerMsg.meta
         };
     } else if (reducerMsg.role === 'agent' && reducerMsg.event !== null) {
@@ -1772,6 +1821,8 @@ function convertReducerMessageToMessage(reducerMsg: ReducerMessage, state: Reduc
             createdAt: reducerMsg.createdAt,
             kind: 'agent-event',
             event: reducerMsg.event,
+            ...withWriter,
+            ...withSeq,
             meta: reducerMsg.meta
         };
     }

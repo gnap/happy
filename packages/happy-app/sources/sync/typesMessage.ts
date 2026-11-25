@@ -90,4 +90,11 @@ export type Message = (UserTextMessage | AgentTextMessage | ToolCallMessage | Mo
      * what lets the same message delivered by two of them collapse to one bubble.
      */
     localId?: string | null;
+    /**
+     * The writer's own `(site, n)` stamp, when the record carried one.
+     *
+     * Within one site the counters are contiguous; a missing one is the signal that a message was
+     * lost rather than merely not yet read. Absent on records written before the CLI stamped them.
+     */
+    writer?: { site: string; n: number };
 };

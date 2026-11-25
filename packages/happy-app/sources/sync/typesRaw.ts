@@ -1,6 +1,7 @@
 import * as z from 'zod';
 import { isCuid } from '@paralleldrive/cuid2';
 import { MessageMetaSchema, MessageMeta } from './typesMessageMeta';
+import { parseWriterIdentity } from './writerIdentity';
 
 //
 // Raw types
@@ -743,6 +744,14 @@ export type NormalizedMessage = ({
     /** Server-assigned seq — unique per message. Used for cache dedup. */
     seq?: number,
     isSidechain: boolean,
+    /**
+     * The writer's own `(site, n)` stamp, when the record carries one.
+     *
+     * It rides inside the ciphertext on both channels, so it survives a channel switch and a
+     * server that re-issued its seq. A missing `n` within one site is the one signal that says a
+     * message was lost rather than merely not yet read.
+     */
+    writer?: { site: string; n: number },
     meta?: MessageMeta,
     usage?: UsageData,
     /** Latest /context snapshot from CLI /context mini-turn (carried in turn-end envelope). */
@@ -1090,7 +1099,7 @@ function normalizeSessionEnvelopeContent(
     return null;
 }
 
-export function normalizeRawMessage(
+function normalizeRawMessageInternal(
     id: string,
     localId: string | null,
     createdAt: number,
@@ -1602,4 +1611,28 @@ export function normalizeRawMessage(
         }
     }
     return null;
+}
+
+/**
+ * One raw record, normalized, with the writer's own stamp carried onto the result.
+ *
+ * `(site, n)` rides inside the ciphertext and is the same on every channel, so lifting it here is
+ * what lets the store notice a missing counter without knowing which channel a message arrived
+ * over. A record with no stamp simply has no `writer` field: unknown is not counter zero.
+ */
+export function normalizeRawMessage(
+    id: string,
+    localId: string | null,
+    createdAt: number,
+    raw: RawRecord,
+): NormalizedMessage | null {
+    const normalized = normalizeRawMessageInternal(id, localId, createdAt, raw);
+    if (!normalized) {
+        return null;
+    }
+    const identity = parseWriterIdentity(raw as { role?: unknown; content?: unknown });
+    if (!identity || identity.site === undefined || identity.n === undefined) {
+        return normalized;
+    }
+    return { ...normalized, writer: { site: identity.site, n: identity.n } };
 }
