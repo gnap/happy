@@ -509,12 +509,16 @@ function safeEqual(a: Buffer, b: Buffer): boolean {
  * request is a browser POST carrying them, and a preflight that does not name them is a refusal
  * the route never sees — the caller reads it as a machine that will not answer, and the action
  * falls to a channel that cannot carry it.
+ *
+ * `x-happy-client-version` is the same trap in its quietest form: it rides every LAN request for
+ * observation only, so a preflight that omits it makes the entire channel fail on desktop while
+ * the phone keeps working. A header that is never required must still be allowed.
  */
 const CORS_HEADERS: Record<string, string> = {
   'access-control-allow-origin': '*',
   'access-control-allow-methods': 'GET, POST, OPTIONS',
   'access-control-allow-headers':
-    'authorization, content-type, x-happy-proof-nonce, x-happy-proof-at, x-happy-proof-signature',
+    'authorization, content-type, x-happy-client-version, x-happy-proof-nonce, x-happy-proof-at, x-happy-proof-signature',
   'access-control-max-age': '600',
 };
 
