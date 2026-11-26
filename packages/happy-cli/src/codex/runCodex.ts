@@ -31,6 +31,7 @@ import { setupOfflineReconnection } from '@/utils/setupOfflineReconnection';
 import type { ApiSessionClient } from '@/api/apiSession';
 import { getUserMessageText } from '@/api/types';
 import type { UserMessage } from '@/api/types';
+import { isPermissionMode } from '@/claude/utils/permissionMode';
 import { resolveCodexExecutionPolicy, shouldAutoApproveCodexApproval } from './executionPolicy';
 import { applyNetworkProxyPolicy, networkProxySettled, reassertNetworkProxy, resetNetworkProxyPolicy } from '@/utils/networkProxy';
 import { mapCodexMcpMessageToSessionEnvelopes, mapCodexProcessorMessageToSessionEnvelopes } from './utils/sessionProtocolMapper';
@@ -279,8 +280,28 @@ export async function runCodex(opts: {
 
     // Track current overrides to apply per message
     // Use shared PermissionMode type from api/types for cross-agent compatibility
-    let currentPermissionMode: import('@/api/types').PermissionMode | undefined = undefined;
+    //
+    // The first message is not the only way a mode arrives: a session that is resumed after a
+    // restart must start from the mode the person last chose, or its very first approval is
+    // decided by the fallback. Claude restores the same field before its loop starts.
+    const storedPermissionMode = response?.metadata?.currentOperatingModeCode;
+    let currentPermissionMode: import('@/api/types').PermissionMode | undefined =
+        typeof storedPermissionMode === 'string' && isPermissionMode(storedPermissionMode)
+            ? storedPermissionMode
+            : undefined;
+    if (currentPermissionMode) {
+        logger.debug(`[Codex] Restored permission mode from session metadata: ${currentPermissionMode}`);
+    }
     let currentModel: string | undefined = undefined;
+    /**
+     * The profile this session is on, mirrored to metadata.
+     *
+     * The env map comes and goes with each message, but the profile's id is what lets another
+     * client resolve that profile and a restart carry it. Claude and Cursor have always written
+     * it; Codex only read the env, so a restart from a client without the local mapping spawned
+     * bare with no route and no credential.
+     */
+    let currentProfileId: string | null | undefined = undefined;
 
     let handleUserMessage: ((message: UserMessage) => void) | null = null;
     handleUserMessage = (message) => {
@@ -293,12 +314,36 @@ export async function runCodex(opts: {
         if (typeof message.meta?.proxyViaRelay === 'boolean') {
             pendingProxyViaRelay = message.meta.proxyViaRelay;
         }
+        // An absent profileId means "keep the current profile"; an explicit null means "cleared".
+        const profileIdProvided = message.meta !== undefined
+            && Object.prototype.hasOwnProperty.call(message.meta, 'profileId');
+        if (profileIdProvided) {
+            const messageProfileId = (message.meta as { profileId?: string | null }).profileId ?? null;
+            if (messageProfileId !== currentProfileId) {
+                currentProfileId = messageProfileId;
+                void session.updateMetadata((metadata) => ({
+                    ...metadata,
+                    profileId: currentProfileId ?? null,
+                })).catch((error) => logger.debug('[Codex] Failed to persist profileId to session metadata', error));
+            }
+        }
         // Resolve permission mode (accept all modes, will be mapped in switch statement)
         let messagePermissionMode = currentPermissionMode;
-        if (message.meta?.permissionMode) {
+        if (message.meta?.permissionMode !== undefined) {
             messagePermissionMode = message.meta.permissionMode as import('@/api/types').PermissionMode;
             currentPermissionMode = messagePermissionMode;
             logger.debug(`[Codex] Permission mode updated from user message to: ${currentPermissionMode}`);
+
+            // Publish the mode as the session's current one, exactly as Claude and Cursor do. The
+            // App keeps each client's picker local; session metadata is the only thing that tells
+            // another client what mode this conversation is actually in. Without this write the
+            // other client keeps its own (often default) choice, and the next message it sends
+            // silently flips the turn back — the two clients overwrite each other forever.
+            const effectivePermissionMode = messagePermissionMode || 'default';
+            void session.updateMetadata((metadata) => ({
+                ...metadata,
+                currentOperatingModeCode: effectivePermissionMode,
+            })).catch((error) => logger.debug('[Codex] Failed to persist permission mode to session metadata', error));
         } else {
             logger.debug(`[Codex] User message received with no permission mode override, using current: ${currentPermissionMode ?? 'default (effective)'}`);
         }
@@ -792,7 +837,23 @@ export async function runCodex(opts: {
                             });
                             logger.debug('[Codex] Resumed thread', storedThreadId);
                         } catch (error) {
-                            logger.debug('[Codex] Resume failed; starting a new thread', error instanceof Error ? error.message : error);
+                            // A failed resume must not silently erase the only pointer to this
+                            // conversation. The usual cause is a home mismatch — the id is valid
+                            // but its rollout lives under another CODEX_HOME (a profile that did
+                            // not travel with a restart) — and a new thread immediately overwrites
+                            // this file. Keep the id beside it so the context is recoverable once
+                            // the home is right again.
+                            const reason = error instanceof Error ? error.message : String(error);
+                            logger.warn(
+                                `[Codex] Resume failed for ${storedThreadId} under ${process.env.CODEX_HOME ?? '(default Codex home)'}; `
+                                + `starting a new thread (old id kept beside ${threadIdPath})`,
+                                reason,
+                            );
+                            try {
+                                fs.copyFileSync(threadIdPath, `${threadIdPath}.${storedThreadId}.bak`);
+                            } catch (backupError) {
+                                logger.debug('[Codex] Failed to keep the failed thread id', backupError);
+                            }
                         }
                     }
                     if (!client.hasActiveThread()) {
