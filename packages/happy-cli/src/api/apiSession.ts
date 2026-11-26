@@ -1089,14 +1089,24 @@ export class ApiSessionClient extends EventEmitter {
         // them, so a message that arrives on the socket fast path and is later re-fetched over
         // HTTP would otherwise be logged twice.
         if (incoming.ct) {
-            this.noteLogHead(appendSessionLog(this.sid, this.site, {
+            const entry: SessionLogEntry = {
                 id: incoming.id ?? incoming.localId ?? String(seq ?? ''),
                 localId: incoming.localId ?? null,
                 dir: 'in',
                 at: Date.now(),
                 c: incoming.ct,
                 ...(incoming.localId ? this.logIdentityByLocalId.get(incoming.localId) ?? {} : {}),
-            }));
+            };
+            const anchor = appendSessionLog(this.sid, this.site, entry);
+            this.noteLogHead(anchor);
+            // The entry itself, not just the hint. A reader whose cursor is already at the head
+            // because it applied the agent's out entries skips the `log-grew` hint as covered —
+            // and with it the user message that shares the log but not the pushed stream. That is
+            // why a message sent from one App was visible only on that App: its own optimistic
+            // copy, while every other reader never fetched the `in` entry. Pushing it here makes
+            // the user message arrive like any other entry, and `localId` dedup absorbs the copy
+            // the sender already holds.
+            forwardSessionEventToDaemon({ t: 'log-entry', id: this.sessionId, entry, anchor });
             this.announceLogGrowth();
         }
 
