@@ -180,6 +180,24 @@ describe('relay', () => {
         }
     });
 
+    it('allows the client-version header every LAN request carries', async () => {
+        // The relay answers the preflight itself, so this is the one place that decides whether a
+        // desktop webview can use the relayed channel at all — regardless of what the daemon behind
+        // the relay would allow. Native clients do not preflight, which is why the omission only
+        // shows up on desktop.
+        relay = startRelay({ port: 0 });
+        const res = await fetch(`http://127.0.0.1:${relay.port}/r/${'a'.repeat(32)}/lan/sessions/s/history`, {
+            method: 'OPTIONS',
+            headers: {
+                origin: 'http://localhost:8081',
+                'access-control-request-method': 'GET',
+                'access-control-request-headers': 'authorization, x-happy-client-version',
+            },
+        });
+        expect(res.status).toBe(204);
+        expect(res.headers.get('access-control-allow-headers')).toContain('x-happy-client-version');
+    });
+
     it('allows the headers an account proof is sent in', async () => {
         // A control submit through the relay is the same browser POST with the proof headers on it.
         // A preflight the relay answers without them is a refusal the daemon never sees, so the

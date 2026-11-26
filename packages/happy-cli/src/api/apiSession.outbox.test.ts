@@ -225,6 +225,41 @@ describe('ApiSessionClient local message log', () => {
         expect(loggedEntries('in')).toHaveLength(1);
     });
 
+    it('mirrors an incoming message to the daemon as a log-entry frame', () => {
+        // The `in` entry is the only record a LAN reader has of a user message sent by another
+        // App. The hint alone is not enough: the reader's cursor can already be at the head
+        // because the agent's `out` entries were pushed, and then it skips the read that would
+        // have carried the user message. The entry has to travel like the out ones do.
+        mockAxiosPost.mockResolvedValue({ data: { messages: [] } });
+        const client = new ApiSessionClient('fake-token', makeSession());
+        (client as unknown as { lastSeq: number }).lastSeq = 5;
+
+        const body = { role: 'user', content: { type: 'text', text: 'hello' } };
+        const ct = encodeBase64(encrypt(SESSION_KEY, 'legacy', body));
+        emitSocketEvent('update', newMessageUpdate(6, ct));
+
+        const logged = loggedEntries('in');
+        expect(logged).toHaveLength(1);
+
+        const mirrored = mockForward.mock.calls
+            .map((call: any[]) => call[0])
+            .filter((event: any) => event?.t === 'log-entry');
+        expect(mirrored).toEqual([
+            {
+                t: 'log-entry',
+                id: 'test-session-id',
+                entry: {
+                    id: logged[0].id,
+                    localId: logged[0].localId ?? null,
+                    dir: 'in',
+                    at: logged[0].at,
+                    c: logged[0].c,
+                },
+                anchor: expect.any(String),
+            },
+        ]);
+    });
+
     it('logs outbound messages with the ciphertext that actually went on the wire', async () => {
         mockAxiosPost.mockResolvedValue({ data: { messages: [] } });
         const client = new ApiSessionClient('fake-token', makeSession());
