@@ -30,6 +30,21 @@ export { channelLinks, type ChannelLink } from './channelLinks';
 export type { ChannelLinkState } from './channels/types';
 
 /** Whether two runtime divergences say the same thing. A repeated push must not redraw the row. */
+/**
+ * Keep the writer stamp a newly reduced message no longer carries.
+ *
+ * The reducer can re-emit a message from a later batch that does not repeat the record's stamp —
+ * a tool result updating its call, for instance. That is the same message with a newer field, not
+ * a different record, so losing `(site, n)` here would make a gap appear or disappear depending on
+ * which batch happened to arrive last.
+ */
+function keepMessageIdentity(next: Message, previous: Message | undefined): Message {
+    if (previous === undefined || next.writer !== undefined || previous.writer === undefined) {
+        return next;
+    }
+    return { ...next, writer: previous.writer };
+}
+
 function sameDivergence(a: SessionDivergence | undefined, b: SessionDivergence | undefined): boolean {
     if (a === b) return true;
     if (a === undefined || b === undefined) return false;
@@ -1329,7 +1344,7 @@ export const storage = create<StorageState>()((set, get) => {
                     // This ensures the reducer state is updated with the new AgentState
                     const mergedMessagesMap = { ...existingSessionMessages.messagesMap };
                     processedMessages.forEach(message => {
-                        mergedMessagesMap[message.id] = message;
+                        mergedMessagesMap[message.id] = keepMessageIdentity(message, mergedMessagesMap[message.id]);
                     });
 
                     const visible = visibleWindow(
@@ -1416,7 +1431,7 @@ export const storage = create<StorageState>()((set, get) => {
                 // Merge messages
                 const mergedMessagesMap = { ...existingSession.messagesMap };
                 processedMessages.forEach(message => {
-                    mergedMessagesMap[message.id] = message;
+                    mergedMessagesMap[message.id] = keepMessageIdentity(message, mergedMessagesMap[message.id]);
                 });
 
                 // Convert to array and sort by createdAt, dropping stand-ins the window excludes

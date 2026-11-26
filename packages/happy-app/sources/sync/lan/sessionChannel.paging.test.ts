@@ -76,6 +76,15 @@ describe('readSessionOverLan pages', () => {
         expect(fetchHistory.mock.calls[0][3]).toEqual({ subagent: 'sub-1' });
     });
 
+    it('asks for a bounded repair by the writer\'s own counters, not by a server seq', async () => {
+        fetchHistory.mockResolvedValue(page());
+        decryptLanHistory.mockResolvedValue({ entries: [], decryptedCount: 0, sessionKey: new Uint8Array(32) });
+
+        await readOf({ ...base, page: { kind: 'range', site: 'machine-1', fromN: 2, toN: 4 } });
+
+        expect(fetchHistory.mock.calls[0][3]).toEqual({ site: 'machine-1', fromN: 2, toN: 4 });
+    });
+
     // One read is one page. A cut-short page is not a job left half-done — it answers a question the
     // caller asked ("is this reader further behind than a page?") — and walking the pages it implies
     // is what made opening a session idle for a day take as long as the day was busy.

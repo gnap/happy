@@ -2090,6 +2090,46 @@ describe('Zod Transform - WOLOG Content Normalization', () => {
             }
         });
 
+        it('carries the writer stamp onto the normalized message', () => {
+            const normalized = normalizeRawMessage('db-w-1', null, 1, {
+                ...base,
+                content: {
+                    type: 'session',
+                    data: {
+                        id: 'env-w-1',
+                        time: 1,
+                        role: 'agent',
+                        turn: 'turn-w',
+                        sid: 'tag-1',
+                        site: 'machine-1',
+                        n: 4,
+                        ev: { t: 'text', text: 'stamped' }
+                    }
+                }
+            } as any);
+
+            expect(normalized?.writer).toEqual({ site: 'machine-1', n: 4 });
+        });
+
+        it('leaves the stamp off a record that has none', () => {
+            const normalized = normalizeRawMessage('db-w-2', null, 1, {
+                ...base,
+                content: {
+                    type: 'session',
+                    data: {
+                        id: 'env-w-2',
+                        time: 1,
+                        role: 'agent',
+                        turn: 'turn-w',
+                        ev: { t: 'text', text: 'unstamped' }
+                    }
+                }
+            } as any);
+
+            expect(normalized).toBeTruthy();
+            expect(normalized?.writer).toBeUndefined();
+        });
+
         it('drops start/stop lifecycle markers', () => {
             const subagent = createId();
             const start = normalizeRawMessage('db-start-1', null, 1, {

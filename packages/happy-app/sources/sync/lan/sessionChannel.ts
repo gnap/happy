@@ -329,7 +329,19 @@ export async function readSessionOverLan(options: {
      * page: a reader that pages forward until it catches up is a reader that can be minutes behind
      * on a long session, because it must carry every entry written while it was away.
      */
-    page: { kind: 'tail' } | { kind: 'follow'; cursor: string } | { kind: 'older'; before: string };
+    page:
+        | { kind: 'tail' }
+        | { kind: 'follow'; cursor: string }
+        | { kind: 'older'; before: string }
+        /**
+         * A bounded repair by the writer's own counters, inclusive.
+         *
+         * The daemon filters its plaintext `(site, n)` mirror, so this neither depends on the
+         * server's sequence nor asks the reader to walk a page to discover what is missing. The
+         * returned `cursor`/`older` do not describe a range; a repair applies the messages and
+         * leaves the window's anchors alone.
+         */
+        | { kind: 'range'; site: string; fromN: number; toN: number };
     /**
      * Read one sub-agent's stream instead of the whole session's.
      *
@@ -385,8 +397,14 @@ export async function readSessionOverLan(options: {
          * stale mid-read fail the read instead of being replaced underneath it.
          */
         const request = async (page: typeof options.page) => {
-            const query: { since?: string; before?: string; subagent?: string } = {
-                ...(page.kind === 'follow' ? { since: page.cursor } : page.kind === 'older' ? { before: page.before } : {}),
+            const query: { since?: string; before?: string; subagent?: string; site?: string; fromN?: number; toN?: number } = {
+                ...(page.kind === 'follow'
+                    ? { since: page.cursor }
+                    : page.kind === 'older'
+                        ? { before: page.before }
+                        : page.kind === 'range'
+                            ? { site: page.site, fromN: page.fromN, toN: page.toN }
+                            : {}),
                 ...(options.subagent !== undefined ? { subagent: options.subagent } : {}),
             };
             // Acquired outside the try: a rejected *proof* is a credential problem, not a token
