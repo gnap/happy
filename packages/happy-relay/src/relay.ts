@@ -405,11 +405,16 @@ export function startRelay(options: RelayOptions): RelayHandle {
      * proof headers are here because an account-signed request is a browser POST carrying them, and
      * a preflight that does not name them is a refusal the daemon never sees — the caller reads it
      * as a machine that will not answer, and the action falls to a channel that cannot carry it.
+     *
+     * `x-happy-client-version` rides every LAN request for observation only, and the relay answers
+     * the preflight itself: omitting it here fails the whole relayed channel on desktop even when
+     * the daemon behind it would allow the header. A header that is never required must still be
+     * allowed.
      */
     const CORS = {
         'access-control-allow-origin': '*',
         'access-control-allow-headers':
-            'authorization,content-type,x-happy-proof-nonce,x-happy-proof-at,x-happy-proof-signature',
+            'authorization,content-type,x-happy-client-version,x-happy-proof-nonce,x-happy-proof-at,x-happy-proof-signature',
         'access-control-allow-methods': 'GET,POST,OPTIONS',
         'access-control-max-age': '600',
     };

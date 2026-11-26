@@ -983,6 +983,26 @@ describe('lanServer read-only API', () => {
             expect(res.headers.get('access-control-allow-methods')).toContain('POST');
         });
 
+        it('allows the client-version header every LAN request carries', async () => {
+            // The header is observation only and never required, which is exactly why it is easy to
+            // leave out of the allow list: the browser then refuses every LAN read on desktop while
+            // native clients, which do not preflight, keep working. A header the daemon does not
+            // need is still a header the browser must be allowed to send.
+            await start();
+
+            const res = await fetch(url('/lan/sessions/sess-1/history'), {
+                method: 'OPTIONS',
+                headers: {
+                    origin: 'http://localhost:8081',
+                    'access-control-request-method': 'GET',
+                    'access-control-request-headers': 'authorization, x-happy-client-version',
+                },
+            });
+
+            expect(res.status).toBe(204);
+            expect(res.headers.get('access-control-allow-headers')).toContain('x-happy-client-version');
+        });
+
         it('allows the headers an account proof is sent in', async () => {
             // A control submit is a browser POST with the proof headers on it, and the browser asks
             // permission for those before it sends the request at all. An allow list that omits them
