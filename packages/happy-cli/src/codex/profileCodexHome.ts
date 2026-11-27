@@ -13,15 +13,29 @@
  * `env_key`, and the process already carries the value. The auth file is a credential and is
  * written with `0600`.
  *
- * An OAuth home is shared per account rather than per session, because Codex refreshes the access
- * token with the refresh token and rewrites `auth.json`; two copies of one login would race, and the
- * copy that refreshes second would be holding a token the first has already rotated. One file per
- * account on this machine keeps the refresh chain in one place, serialised by Codex's own lock.
+ * A session's home is keyed by the session tag and stays the same across profile and account
+ * changes: threads, plugins, skills and the rest of Codex's state live there. The login is the one
+ * thing that changes, so it is linked from a per-account auth file; Codex's refresh writes through
+ * the link and the account's refresh chain stays in one place. Switching profiles must not move the
+ * session to a different home, or its thread rollout — which is the conversation — is left behind.
  */
 
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import {
+    copyFileSync,
+    cpSync,
+    existsSync,
+    lstatSync,
+    mkdirSync,
+    readFileSync,
+    readdirSync,
+    readlinkSync,
+    rmSync,
+    statSync,
+    symlinkSync,
+    writeFileSync,
+} from 'node:fs';
+import { join, resolve } from 'node:path';
 
 export type ProfileCodexAuth = {
     /** The `auth.json` body produced by `codex login`, verbatim. */
@@ -131,7 +145,12 @@ export function profileCodexHomeDir(happyHomeDir: string, sessionKey: string): s
     return join(happyHomeDir, 'codex', safe);
 }
 
-/** Where a ChatGPT login lives: one home per account on this machine, not per session. */
+/**
+ * Where a ChatGPT login's canonical `auth.json` lives: one per account on this machine.
+ *
+ * This is no longer a `CODEX_HOME`; a session home links its `auth.json` here. One file per
+ * account keeps Codex's refresh chain in one place even when several sessions use the account.
+ */
 export function profileCodexAuthHomeDir(happyHomeDir: string, authJson: string): string {
     const account = authAccountId(authJson);
     const key = account
@@ -194,14 +213,132 @@ function seedAuthFile(homeDir: string, auth: ProfileCodexAuth): void {
     writeFileSync(path, auth.authJson, { mode: 0o600 });
 }
 
-/** Writes the home and returns its path. The caller points `CODEX_HOME` at it. */
+/** Replaces `linkPath` with a link to `target`, falling back to a copy where links are unavailable. */
+function linkAuthFile(target: string, linkPath: string): void {
+    try {
+        const current = lstatSync(linkPath);
+        if (current.isSymbolicLink() && readlinkSync(linkPath) === target) return;
+    } catch {
+        // Missing, dangling, or unreadable: replace it.
+    }
+    try {
+        rmSync(linkPath, { force: true });
+    } catch {
+        // A directory here is a corrupt home; let the write below fail loudly.
+    }
+    try {
+        symlinkSync(target, linkPath);
+    } catch {
+        // Windows without symlink privileges: a copy still gives Codex a usable auth file. The
+        // per-account file remains canonical, and the newer-wins seed on the next write reconciles.
+        copyFileSync(target, linkPath);
+    }
+}
+
+/** The parts of a Codex home that belong to the session, not to the account. */
+const SESSION_HOME_ENTRIES = ['sessions', 'plugins', 'skills'] as const;
+
+/**
+ * Copies the session-owned entries from an older home into the stable one, without overwriting
+ * what is already there.
+ *
+ * This is a one-time migration for sessions that predate the stable per-session home: their
+ * thread rollout (and the plugins/skills Codex installed) live under the old account home. The
+ * account credential is deliberately not copied — the selected profile owns that.
+ */
+export function adoptCodexHomeContents(targetHome: string, sourceHome: string): void {
+    if (resolve(targetHome) === resolve(sourceHome)) return;
+    mkdirSync(targetHome, { recursive: true, mode: 0o700 });
+    for (const entry of SESSION_HOME_ENTRIES) {
+        const source = join(sourceHome, entry);
+        if (!existsSync(source)) continue;
+        try {
+            cpSync(source, join(targetHome, entry), { recursive: true, force: false, errorOnExist: false });
+        } catch {
+            // Best effort: a home that cannot be copied must not keep the session from starting.
+        }
+    }
+}
+
+/** Whether a home's `sessions` tree contains a rollout for this thread. */
+function homeHasThread(home: string, threadId: string): boolean {
+    const sessions = join(home, 'sessions');
+    if (!existsSync(sessions)) return false;
+    const suffix = `-${threadId}.jsonl`;
+    const walk = (dir: string, depth: number): boolean => {
+        if (depth > 4) return false;
+        let entries;
+        try {
+            entries = readdirSync(dir, { withFileTypes: true });
+        } catch {
+            return false;
+        }
+        for (const entry of entries) {
+            const path = join(dir, entry.name);
+            if (entry.isDirectory()) {
+                if (walk(path, depth + 1)) return true;
+            } else if (entry.name.startsWith('rollout-') && entry.name.endsWith(suffix)) {
+                return true;
+            }
+        }
+        return false;
+    };
+    return walk(sessions, 0);
+}
+
+/**
+ * The old home a session's stored thread lives in, when it predates the stable per-session home.
+ *
+ * Searches the per-account auth stores and any other managed homes; null means nothing on this
+ * machine owns the rollout. Used once, at startup, to seed the stable home before Codex resumes.
+ */
+export function findCodexHomeForThread(happyHomeDir: string, threadId: string): string | null {
+    const root = join(happyHomeDir, 'codex');
+    if (!existsSync(root)) return null;
+    const candidates: string[] = [];
+    const authRoot = join(root, 'auth');
+    if (existsSync(authRoot)) {
+        for (const name of readdirSync(authRoot)) candidates.push(join(authRoot, name));
+    }
+    for (const name of readdirSync(root)) {
+        if (name === 'auth') continue;
+        const path = join(root, name);
+        try {
+            if (lstatSync(path).isDirectory()) candidates.push(path);
+        } catch {
+            // A race with cleanup is not a home.
+        }
+    }
+    for (const home of candidates) {
+        if (homeHasThread(home, threadId)) return home;
+    }
+    return null;
+}
+
+/**
+ * Writes the session's home and returns its path. The caller points `CODEX_HOME` at it.
+ *
+ * The home is always keyed by the session tag, whatever the profile selects. The login is the
+ * only part that moves: its canonical file stays per account and `auth.json` in the home links to
+ * it. That is what keeps a thread (and the plugins/skills under the same home) across a profile
+ * or account switch.
+ */
 export function writeProfileCodexHome(happyHomeDir: string, sessionKey: string, config: ProfileCodexConfig): string {
-    const homeDir = config.auth
-        ? profileCodexAuthHomeDir(happyHomeDir, config.auth.authJson)
-        : profileCodexHomeDir(happyHomeDir, sessionKey);
+    const homeDir = profileCodexHomeDir(happyHomeDir, sessionKey);
     mkdirSync(homeDir, { recursive: true, mode: 0o700 });
     if (config.auth) {
-        seedAuthFile(homeDir, config.auth);
+        const authHome = profileCodexAuthHomeDir(happyHomeDir, config.auth.authJson);
+        mkdirSync(authHome, { recursive: true, mode: 0o700 });
+        seedAuthFile(authHome, config.auth);
+        linkAuthFile(join(authHome, 'auth.json'), join(homeDir, 'auth.json'));
+    } else {
+        // A session moving from a login to an endpoint must not keep the previous login: Codex
+        // would read it and ignore the provider the profile just named.
+        try {
+            rmSync(join(homeDir, 'auth.json'), { force: true });
+        } catch {
+            // Nothing to remove, or a directory we should not touch.
+        }
     }
     writeFileSync(join(homeDir, 'config.toml'), renderProfileCodexToml(config), { mode: 0o600 });
     return homeDir;

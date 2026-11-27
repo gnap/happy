@@ -2,7 +2,13 @@ import { render } from "ink";
 import React from "react";
 import { ApiClient } from '@/api/api';
 import { CodexAppServerClient } from './codexAppServerClient';
-import { readProfileCodexConfig, writeProfileCodexHome } from './profileCodexHome';
+import {
+    adoptCodexHomeContents,
+    findCodexHomeForThread,
+    profileCodexAuthHomeDir,
+    readProfileCodexConfig,
+    writeProfileCodexHome,
+} from './profileCodexHome';
 import { codexModelOptions, currentTierCode, resolveCodexModel } from './modelTiers';
 import { configuration } from '@/configuration';
 import { CodexPermissionHandler } from './utils/permissionHandler';
@@ -88,6 +94,29 @@ export async function runCodex(opts: {
 
     const sessionTag = opts.resumeSessionTag?.trim() || randomUUID();
 
+    // Codex's own conversation lives in its thread. The id is how a restarted process picks the
+    // same one up; nothing outside this machine needs it, so it is kept beside Happy's state.
+    // Read before the managed home is written: an older session's thread rollout may still be in
+    // the previous home, and the stable home has to adopt it before the app-server starts.
+    const threadIdPath = join(configuration.happyHomeDir, 'codex-threads', `${sessionTag}.txt`);
+    function readStoredThreadId(): string | null {
+        try {
+            const value = fs.readFileSync(threadIdPath, 'utf8').trim();
+            return value || null;
+        } catch {
+            return null;
+        }
+    }
+    function storeThreadId(threadId: string): void {
+        try {
+            fs.mkdirSync(dirname(threadIdPath), { recursive: true });
+            fs.writeFileSync(threadIdPath, threadId, { mode: 0o600 });
+        } catch (error) {
+            logger.debug('[Codex] Failed to store thread id', error);
+        }
+    }
+    const storedThreadId = readStoredThreadId();
+
     // Set backend for offline warnings (before any API calls)
     connectionState.setBackend('Codex');
 
@@ -110,6 +139,18 @@ export async function runCodex(opts: {
             // model — the turn sends one when a person chose it.
             ...(!profileCodex.auth && profileCodex.model ? { model: resolveCodexModel(profileCodex.model) } : {}),
         });
+        // A session that predates the stable home kept its thread rollout under the account home
+        // it happened to run in. Adopt it before the app-server starts; without this, the first
+        // profile/account switch resumes nothing and starts a new thread. The selected account's
+        // store is adopted too, so a thread created after an earlier switch is not left behind.
+        if (storedThreadId) {
+            const source = findCodexHomeForThread(configuration.happyHomeDir, storedThreadId);
+            if (source && source !== home) adoptCodexHomeContents(home, source);
+        }
+        if (profileCodex.auth) {
+            const authStore = profileCodexAuthHomeDir(configuration.happyHomeDir, profileCodex.auth.authJson);
+            if (authStore !== home) adoptCodexHomeContents(home, authStore);
+        }
         process.env.CODEX_HOME = home;
         logger.info(profileCodex.auth
             ? `[codex] ChatGPT login — auth at ${home}${previousHome && previousHome !== home ? ` (replaces CODEX_HOME=${previousHome})` : ''}`
@@ -159,10 +200,17 @@ export async function runCodex(opts: {
             delete process.env.CODEX_API_KEY;
             delete process.env.CODEX_BASE_URL;
         }
+        const previousHome = process.env.CODEX_HOME;
         const home = writeProfileCodexHome(configuration.happyHomeDir, sessionTag, {
             ...next,
             ...(!next.auth && next.model ? { model: resolveCodexModel(next.model) } : {}),
         });
+        // The home is stable now, but a session that started before that was true may still be
+        // switching away from an account home. Carry its thread and installed plugins over before
+        // the app-server is reconnected; the route/auth swap alone must not lose the conversation.
+        if (previousHome && previousHome !== home) {
+            adoptCodexHomeContents(home, previousHome);
+        }
         process.env.CODEX_HOME = home;
         logger.info(next.auth
             ? `[codex] ChatGPT login applied — auth at ${home}`
@@ -546,26 +594,6 @@ export async function runCodex(opts: {
     //
 
     const client = new CodexAppServerClient(sandboxConfig);
-
-    // Codex's own conversation lives in its thread. The id is how a restarted process picks the
-    // same one up; nothing outside this machine needs it, so it is kept beside Happy's state.
-    const threadIdPath = join(configuration.happyHomeDir, 'codex-threads', `${sessionTag}.txt`);
-    function readStoredThreadId(): string | null {
-        try {
-            const value = fs.readFileSync(threadIdPath, 'utf8').trim();
-            return value || null;
-        } catch {
-            return null;
-        }
-    }
-    function storeThreadId(threadId: string): void {
-        try {
-            fs.mkdirSync(dirname(threadIdPath), { recursive: true });
-            fs.writeFileSync(threadIdPath, threadId, { mode: 0o600 });
-        } catch (error) {
-            logger.debug('[Codex] Failed to store thread id', error);
-        }
-    }
 
     // The App's picker is metadata-driven: publish the stable tier keys and which one this
     // session is on. A tier's concrete model is decided here (see modelTiers.ts).
