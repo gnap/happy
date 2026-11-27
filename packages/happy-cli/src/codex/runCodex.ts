@@ -420,6 +420,9 @@ export async function runCodex(opts: {
     session.onUserMessage(handleUserMessage);
     let thinking = false;
     let currentTurnId: string | null = null;
+    // The app-server reports usage separately from the turn; keep the latest report so the
+    // turn-end envelope can carry it to the App's context gauge.
+    let lastTokenUsage: Record<string, unknown> | undefined;
     let codexStartedSubagents = new Set<string>();
     let codexActiveSubagents = new Set<string>();
     let codexProviderSubagentToSessionSubagent = new Map<string, string>();
@@ -751,12 +754,16 @@ export async function runCodex(opts: {
 
         // Convert Codex MCP events into the unified session-protocol envelope stream.
         // Reasoning deltas are handled by ReasoningProcessor to avoid duplicate text output.
+        if (msg.type === 'token_count') {
+            lastTokenUsage = msg as Record<string, unknown>;
+        }
         if (msg.type !== 'agent_reasoning_delta' && msg.type !== 'agent_reasoning' && msg.type !== 'agent_reasoning_section_break' && msg.type !== 'turn_diff') {
             const mapped = mapCodexMcpMessageToSessionEnvelopes(msg, {
                 currentTurnId,
                 startedSubagents: codexStartedSubagents,
                 activeSubagents: codexActiveSubagents,
                 providerSubagentToSessionSubagent: codexProviderSubagentToSessionSubagent,
+                lastTokenUsage,
             });
             currentTurnId = mapped.currentTurnId;
             codexStartedSubagents = mapped.startedSubagents;
@@ -902,6 +909,9 @@ export async function runCodex(opts: {
                     ? message.message + '\n\n' + CHANGE_TITLE_INSTRUCTION
                     : message.message;
                 first = false;
+                // A new turn must not inherit the previous turn's usage if the app-server does not
+                // report one before its turn-end.
+                lastTokenUsage = undefined;
                 // A daemon restart empties the registrations that point at a route; this turn must
                 // not inherit that. The app-server itself makes the request, over the process
                 // environment this call re-asserts.
