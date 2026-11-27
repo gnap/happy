@@ -2,13 +2,24 @@ import { randomUUID } from 'node:crypto';
 import { createId } from '@paralleldrive/cuid2';
 import type { ReasoningOutput } from './reasoningProcessor';
 import type { DiffToolCall, DiffToolResult } from './diffProcessor';
-import { createEnvelope, type CreateEnvelopeOptions, type SessionEnvelope } from '@slopus/happy-wire';
+import {
+    createEnvelope,
+    type CreateEnvelopeOptions,
+    type SessionEnvelope,
+    type SessionTurnEndUsage,
+} from '@slopus/happy-wire';
 
 export type CodexTurnState = {
     currentTurnId: string | null;
     startedSubagents?: Set<string>;
     activeSubagents?: Set<string>;
     providerSubagentToSessionSubagent?: Map<string, string>;
+    /**
+     * The last `thread/tokenUsage/updated` payload. The app-server reports usage separately from
+     * the turn lifecycle; the turn-end envelope is where the App expects the authoritative rollup,
+     * so the latest report travels with the state until the turn ends.
+     */
+    lastTokenUsage?: Record<string, unknown>;
 };
 
 type CodexMapperResult = {
@@ -176,6 +187,39 @@ function pickTurnEndStatus(message: Record<string, unknown>, type: unknown): Tur
     return 'completed';
 }
 
+function nonNegativeNumber(value: unknown): number | undefined {
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/**
+ * The App's turn-end usage from the app-server's latest token report.
+ *
+ * `last` is the API call's own count: its `inputTokens` is the context that went into the model,
+ * which is the gauge's numerator. `cachedInputTokens` is a subset of it and must not be added
+ * again; `modelContextWindow` is the denominator. The app-server may report either camelCase (the
+ * wire) or snake_case (older fixtures), so both spellings are read.
+ */
+function turnEndUsageFromTokenCount(raw: Record<string, unknown> | undefined): SessionTurnEndUsage | undefined {
+    const last = raw?.last;
+    if (!last || typeof last !== 'object') return undefined;
+    const usage = last as Record<string, unknown>;
+    const input = nonNegativeNumber(usage.inputTokens ?? usage.input_tokens);
+    if (input === undefined) return undefined;
+    const output = nonNegativeNumber(usage.outputTokens ?? usage.output_tokens);
+    const cacheRead = nonNegativeNumber(usage.cachedInputTokens ?? usage.cached_input_tokens);
+    const cacheWrite = nonNegativeNumber(usage.cacheWriteInputTokens ?? usage.cache_write_input_tokens);
+    const window = nonNegativeNumber(raw?.modelContextWindow ?? raw?.model_context_window);
+    return {
+        input_tokens: input,
+        ...(output !== undefined ? { output_tokens: output } : {}),
+        ...(cacheRead !== undefined ? { cache_read_input_tokens: cacheRead } : {}),
+        ...(cacheWrite !== undefined ? { cache_creation_input_tokens: cacheWrite } : {}),
+        // Explicit: the App otherwise sums input and cache fields, which double-counts the cache.
+        context_size: input,
+        ...(window !== undefined ? { context_window_tokens: window } : {}),
+    };
+}
+
 export function mapCodexMcpMessageToSessionEnvelopes(message: Record<string, unknown>, state: CodexTurnState): CodexMapperResult {
     const type = message.type;
     const startedSubagents = getStartedSubagents(state);
@@ -210,6 +254,7 @@ export function mapCodexMcpMessageToSessionEnvelopes(message: Record<string, unk
 
         const lifecycleOpts = { turn: state.currentTurnId } satisfies CreateEnvelopeOptions;
         providerSubagentToSessionSubagent.clear();
+        const usage = turnEndUsageFromTokenCount(state.lastTokenUsage);
         return {
             currentTurnId: null,
             startedSubagents,
@@ -220,6 +265,7 @@ export function mapCodexMcpMessageToSessionEnvelopes(message: Record<string, unk
                 createEnvelope('agent', {
                     t: 'turn-end',
                     status: pickTurnEndStatus(message, type),
+                    ...(usage ? { usage } : {}),
                 }, lifecycleOpts),
             ],
         };

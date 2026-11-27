@@ -12,7 +12,6 @@ import {
     type ProfileAgentChoice,
 } from '@/sync/profileUtils';
 import { EnvironmentVariablesList } from '@/components/EnvironmentVariablesList';
-import { Switch } from '@/components/Switch';
 import { useAllMachines } from '@/sync/storage';
 import { collectProxyRoutes, DIRECT_ROUTE } from '@/sync/proxyRoutes';
 import { isRunningInTauri } from '@/utils/platform';
@@ -106,12 +105,11 @@ export function ProfileEditForm({
     const [codexApiKey, setCodexApiKey] = React.useState(profile.codexConfig?.apiKey ?? '');
     const [codexModel, setCodexModel] = React.useState(profile.codexConfig?.model ?? '');
 
-    // Off unless the profile opted in. When on, all of this profile's traffic leaves through the
-    // relay; with a SOCKS5 hop in the environment, the relay connects to that hop first.
-    const [proxyViaRelay, setProxyViaRelay] = React.useState(profile.proxyViaRelay ?? false);
-
+    // The profile's egress is the named route. The old "traffic through relay" switch was a
+    // second control that the route branch ignored, so it is not offered here any more: a person
+    // chooses a route, and the machine that serves it owns the hop.
     // A route the relay defines and the machine serves on a fixed port. The name is the whole
-    // profile-side contract; when set it takes precedence over the relay switch above.
+    // profile-side contract.
     const [proxyRoute, setProxyRoute] = React.useState(profile.proxyRoute ?? '');
     // The names the known machines publish. The profile is account-level, so this is a union:
     // which of them a given session can actually use is decided on that machine, and refused
@@ -217,7 +215,6 @@ export function ProfileEditForm({
             environmentVariables,
             codexConfig,
             compatibility: compatibilityForAgent(agent),
-            proxyViaRelay,
             proxyRoute: route ? route : undefined,
             updatedAt: Date.now(),
         });
@@ -549,22 +546,6 @@ export function ProfileEditForm({
                         autoCorrect={false}
                     />
                 )}
-
-                {/* SOCKS5 egress route */}
-                <View style={formStyles.switchRow}>
-                    <View style={formStyles.switchText}>
-                        <Text style={formStyles.sectionTitle}>
-                            {t('profiles.proxyViaRelay')}
-                        </Text>
-                        <Text style={formStyles.switchDescription}>
-                            {t('profiles.proxyViaRelayDescription')}
-                        </Text>
-                    </View>
-                    <Switch
-                        value={proxyViaRelay}
-                        onValueChange={setProxyViaRelay}
-                    />
-                </View>
 
                 {/* Actions */}
                 <View style={formStyles.actions}>
